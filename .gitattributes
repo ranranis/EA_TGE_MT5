@@ -1,0 +1,11 @@
+# Preserve MQL5 source bytes. The host has core.autocrlf=true, so explicitly
+# disable newline conversion while retaining text diffs.
+*.mq5 -text diff
+*.mqh -text diff
+
+*.md text eol=lf
+*.py text eol=lf
+*.ps1 text eol=crlf
+*.json text eol=lf
+*.toml text eol=lf
+*.ex5 binary

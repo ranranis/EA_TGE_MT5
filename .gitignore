@@ -1,0 +1,42 @@
+# This repository lives at the MT5 MQL5 data root. Default-deny prevents
+# terminal data, broker data, generated binaries, logs and bundled examples
+# from entering the project history accidentally.
+/*
+
+# Repository governance files.
+!/.gitignore
+!/.gitattributes
+!/README.md
+!/AGENTS.md
+
+# The maintained project is the Experts subtree below.
+!/Experts/
+/Experts/*
+!/Experts/EA_交易托管系统_v1.56.mq5
+!/Experts/Include/
+!/Experts/Include/**
+!/Experts/.codex/
+/Experts/.codex/*
+!/Experts/.codex/config.toml
+!/Experts/.codex/skills/
+!/Experts/.codex/skills/**
+!/Experts/docs/
+!/Experts/docs/**
+!/Experts/scripts/
+!/Experts/scripts/**
+
+# Generated or recoverable artifacts stay outside Git even when nested under
+# an allowed directory.
+*.ex5
+*.log
+*.bak
+*.tmp
+*.zip
+*.set
+__pycache__/
+*.pyc
+_dev/
+_backups/
+Backups/
+_release/
+.codex/backups/
