@@ -2167,6 +2167,26 @@ struct FilteredPositionSummary
    string riskSummary;
 };
 
+struct NewsStopPreview
+{
+   bool     visible;
+   bool     priceValid;
+   double   volume;
+   double   buyStop;
+   double   sellStop;
+   double   buyDisasterSL;
+   double   sellDisasterSL;
+   bool     buyLossAvailable;
+   bool     sellLossAvailable;
+   double   buyLossMoney;
+   double   sellLossMoney;
+   bool     buyMarginAvailable;
+   bool     sellMarginAvailable;
+   double   buyMargin;
+   double   sellMargin;
+   string   status;
+};
+
 struct HoldingPanelViewModel
 {
    int managedCount;
@@ -2186,6 +2206,7 @@ struct HoldingPanelViewModel
    string supportText;
    string statusText;
    UISeverity statusSeverity;
+   NewsStopPreview newsStopPreview;
    PositionPanelViewModel positions[];
    int filteredPositionIndexes[];
    FilteredPositionSummary filteredSummary;
@@ -6789,6 +6810,90 @@ void NewsCalculateFrozenBuffers()
    PrintFormat("[消息箱体] DisasterBuffer=%.5f [initial %.5f atr %.5f box %.5f spread %.5f broker %.5f] SL BUY %.5f SELL %.5f",
                newsState.disasterBuffer, disasterInitial, disasterAtr, disasterBox, disasterSpread, brokerMin,
                newsState.buyDisasterSL, newsState.sellDisasterSL);
+}
+
+void NewsBuildFrozenStopPreview(NewsStopPreview &preview)
+{
+   preview.visible=(newsState.stage==消息阶段_箱体冻结 && newsState.boxFrozenByUser && newsState.boxValid);
+   preview.priceValid=false;
+   preview.volume=0.0;
+   preview.buyStop=0.0;
+   preview.sellStop=0.0;
+   preview.buyDisasterSL=0.0;
+   preview.sellDisasterSL=0.0;
+   preview.buyLossAvailable=false;
+   preview.sellLossAvailable=false;
+   preview.buyLossMoney=0.0;
+   preview.sellLossMoney=0.0;
+   preview.buyMarginAvailable=false;
+   preview.sellMarginAvailable=false;
+   preview.buyMargin=0.0;
+   preview.sellMargin=0.0;
+   preview.status="";
+   if(!preview.visible) return;
+
+   double tickSize=SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_SIZE);
+   double bid=SymbolInfoDouble(_Symbol,SYMBOL_BID);
+   double ask=SymbolInfoDouble(_Symbol,SYMBOL_ASK);
+   double minVolume=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MIN);
+   double maxVolume=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MAX);
+   double volumeStep=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_STEP);
+   if(tickSize<=0.0 || bid<=0.0 || ask<=0.0 || ask<=bid)
+   {
+      preview.status="预览不可用：Tick size 或 Bid/Ask 无效";
+      return;
+   }
+   if(minVolume<=0.0 || maxVolume<minVolume || volumeStep<=0.0 ||
+      MathAbs(MathRound(minVolume/volumeStep)*volumeStep-minVolume)>1e-8)
+   {
+      preview.status="预览不可用：最小手数或手数步长无效";
+      return;
+   }
+   if(newsState.rangeHigh<=newsState.rangeLow || newsState.breakoutBuffer<=0.0 || newsState.disasterBuffer<=0.0)
+   {
+      preview.status="预览不可用：冻结箱体或缓冲无效";
+      return;
+   }
+
+   preview.volume=minVolume; // 只读预览，不把最小手数当成未来实盘手数。
+   preview.buyStop=NormalizeDouble(MathCeil((newsState.rangeHigh+newsState.breakoutBuffer)/tickSize-1e-10)*tickSize,_Digits);
+   preview.sellStop=NormalizeDouble(MathFloor((newsState.rangeLow-newsState.breakoutBuffer)/tickSize+1e-10)*tickSize,_Digits);
+   preview.buyDisasterSL=NormalizeDouble(MathFloor((newsState.rangeLow-newsState.disasterBuffer)/tickSize+1e-10)*tickSize,_Digits);
+   preview.sellDisasterSL=NormalizeDouble(MathCeil((newsState.rangeHigh+newsState.disasterBuffer)/tickSize-1e-10)*tickSize,_Digits);
+
+   double minDistance=MathMax((double)MathMax((int)SymbolInfoInteger(_Symbol,SYMBOL_TRADE_STOPS_LEVEL),
+                                               (int)SymbolInfoInteger(_Symbol,SYMBOL_TRADE_FREEZE_LEVEL))*_Point,tickSize);
+   if(preview.buyStop<ask+minDistance || preview.sellStop>bid-minDistance ||
+      preview.buyDisasterSL>=preview.buyStop-minDistance || preview.sellDisasterSL<=preview.sellStop+minDistance)
+   {
+      preview.status="预览不可用：候选价不满足 Bid/Ask、StopsLevel 或 FreezeLevel";
+      return;
+   }
+   preview.priceValid=true;
+
+   double result=0.0;
+   if(OrderCalcProfit(ORDER_TYPE_BUY,_Symbol,preview.volume,preview.buyStop,preview.buyDisasterSL,result) && result<0.0)
+   {
+      preview.buyLossAvailable=true;
+      preview.buyLossMoney=-result;
+   }
+   if(OrderCalcProfit(ORDER_TYPE_SELL,_Symbol,preview.volume,preview.sellStop,preview.sellDisasterSL,result) && result<0.0)
+   {
+      preview.sellLossAvailable=true;
+      preview.sellLossMoney=-result;
+   }
+   if(OrderCalcMargin(ORDER_TYPE_BUY_STOP,_Symbol,preview.volume,preview.buyStop,result))
+   {
+      preview.buyMarginAvailable=true;
+      preview.buyMargin=result;
+   }
+   if(OrderCalcMargin(ORDER_TYPE_SELL_STOP,_Symbol,preview.volume,preview.sellStop,result))
+   {
+      preview.sellMarginAvailable=true;
+      preview.sellMargin=result;
+   }
+   preview.status=(preview.buyLossAvailable && preview.sellLossAvailable && preview.buyMarginAvailable && preview.sellMarginAvailable) ?
+                  "最小手数预览" : "预览部分不可用：风险或保证金计算失败";
 }
 
 ulong NewsPositionIdentifier(ulong ticket)
@@ -14494,6 +14599,7 @@ void BuildHoldingPanelViewModel(PanelViewModel &model)
    model.holding.statusText=lastStatus;
    model.holding.statusSeverity=CanvasStatusSeverity(lastStatus);
    model.spreadPoints=(bid>0.0 && ask>0.0)?(ask-bid)/_Point:0.0;
+   NewsBuildFrozenStopPreview(model.holding.newsStopPreview);
    RebuildHoldingDisplayProjection(model.holding);
    CanvasUIPerfStage("Build holding model",perfStart,20000);
 }
@@ -14923,21 +15029,49 @@ void RenderHoldingCanvasPanel(const PanelViewModel &model)
       CanvasPanelRenderer.TextEllipsized(CanvasPanelLayout.positionIdentity[slot],StringFormat("%.2f 手 · #%I64u",position.volume,position.ticket),CanvasThemeMuted(),CanvasResolvedFont,CanvasPanelMetrics.fontBody);
       UISeverity protectionSeverity=!position.hasSL?UI_SEVERITY_DANGER:(position.protectedPosition?UI_SEVERITY_SUCCESS:UI_SEVERITY_WARNING);
       DrawBadge(CanvasPanelLayout.positionProtection[slot],position.protectionText,protectionSeverity,BADGE_STATUS);
-      CanvasPanelRenderer.TextRight(CanvasPanelLayout.positionProfit[slot],FormatMiniSignedProfit(position.profit,2),CanvasPnLColor(position.profit),CanvasResolvedFont,CanvasPanelMetrics.fontHeader);
-      RenderPositionPriceLine(CanvasPanelLayout.positionPrices[slot],position);
-      RenderPositionMetaLine(CanvasPanelLayout.positionMeta[slot],position);
+       CanvasPanelRenderer.TextRight(CanvasPanelLayout.positionProfit[slot],FormatMiniSignedProfit(position.profit,2),CanvasPnLColor(position.profit),CanvasResolvedFont,CanvasPanelMetrics.fontHeader);
+       NewsStopPreview preview=model.holding.newsStopPreview;
+       if(preview.visible && preview.priceValid && (position.type==POSITION_TYPE_BUY || position.type==POSITION_TYPE_SELL))
+       {
+          bool isBuy=(position.type==POSITION_TYPE_BUY);
+          string previewText=StringFormat("%s Stop %s · 灾难SL %s",isBuy ? "Buy" : "Sell",
+                                          DoubleToString(isBuy ? preview.buyStop : preview.sellStop,_Digits),
+                                          DoubleToString(isBuy ? preview.buyDisasterSL : preview.sellDisasterSL,_Digits));
+          CanvasPanelRenderer.TextEllipsized(CanvasPanelLayout.positionPrices[slot],previewText,CanvasThemeText(),CanvasResolvedFont,CanvasPanelMetrics.fontBody);
+       }
+       else
+          RenderPositionPriceLine(CanvasPanelLayout.positionPrices[slot],position);
+       RenderPositionMetaLine(CanvasPanelLayout.positionMeta[slot],position);
    }
 
    DrawInsetPanel(CanvasPanelLayout.supportRow,CanvasPanelMetrics.radiusButton);
+   NewsStopPreview preview=model.holding.newsStopPreview;
    string supportLabels[5]={"R1","S1","SL","TP","点差"};
    string supportValues[5]={StringSubstr(model.holding.resistanceText,3),StringSubstr(model.holding.supportText,3),IntegerToString(summary.slCount)+"/"+IntegerToString(summary.managedCount),
                             IntegerToString(summary.tpCount)+"/"+IntegerToString(summary.managedCount),DoubleToString(model.spreadPoints,0)};
+   if(preview.visible)
+   {
+      supportLabels[0]="B损";
+      supportLabels[1]="S损";
+      supportLabels[2]="最坏";
+      supportLabels[3]="B保";
+      supportLabels[4]="S保";
+      supportValues[0]=preview.buyLossAvailable ? DoubleToString(preview.buyLossMoney,2) : "不可用";
+      supportValues[1]=preview.sellLossAvailable ? DoubleToString(preview.sellLossMoney,2) : "不可用";
+      supportValues[2]=(preview.buyLossAvailable && preview.sellLossAvailable) ? DoubleToString(preview.buyLossMoney+preview.sellLossMoney,2) : "不可用";
+      supportValues[3]=preview.buyMarginAvailable ? DoubleToString(preview.buyMargin,2) : "不可用";
+      supportValues[4]=preview.sellMarginAvailable ? DoubleToString(preview.sellMargin,2) : "不可用";
+   }
    RenderInlineMetrics(CanvasPanelLayout.supportRow,supportLabels,supportValues);
+   string holdingStatusText=model.holding.statusText;
+   if(preview.visible)
+      holdingStatusText=preview.status+" | 双边保证金 "+
+                        ((preview.buyMarginAvailable && preview.sellMarginAvailable) ? DoubleToString(preview.buyMargin+preview.sellMargin,2) : "不可用");
    DrawSurface(CanvasPanelLayout.statusRow,SURFACE_TOOLBAR,CanvasPanelMetrics.radiusButton,true,false,true);
    DrawAccentEdge(CanvasPanelLayout.statusRow,model.holding.statusSeverity==UI_SEVERITY_MUTED?UI_SEVERITY_INFO:model.holding.statusSeverity,CanvasPanelMetrics.space2,true);
    DrawSoftDivider(CanvasPanelLayout.statusRow.x+CanvasPanelMetrics.space6,CanvasPanelLayout.statusRow.y,
                    CanvasPanelLayout.statusRow.x+CanvasPanelLayout.statusRow.w-CanvasPanelMetrics.space6,CanvasPanelLayout.statusRow.y);
-   CanvasPanelRenderer.TextEllipsized(CanvasPanelLayout.statusRow,"状态："+model.holding.statusText,CanvasSeverityColor(model.holding.statusSeverity),CanvasResolvedFont,CanvasPanelMetrics.fontCaption,0,CanvasPanelMetrics.space10);
+   CanvasPanelRenderer.TextEllipsized(CanvasPanelLayout.statusRow,"状态："+holdingStatusText,CanvasSeverityColor(model.holding.statusSeverity),CanvasResolvedFont,CanvasPanelMetrics.fontCaption,0,CanvasPanelMetrics.space10);
    CanvasPanelRenderer.End();
    SyncCanvasNewsButtons(model.holding);
 }
@@ -17768,10 +17902,35 @@ void ShowPanel()
                    StringFormat("触碰: 高%d 低%d | 中轴%d | 开放%s", newsState.boxHighTouches,
                                 newsState.boxLowTouches, newsState.boxMiddleCrosses, newsState.releaseEnabled ? "是" : "否"),
                    clrSilver); line++;
-      SetPanelLine("SMA_PANEL_" + IntegerToString(line), HoldingPanelY(line),
-                   StringFormat("缓冲: 突破%.2f / 灾难%.2f | 灾难SL B%.2f S%.2f", newsState.breakoutBuffer,
-                                 newsState.disasterBuffer, newsState.buyDisasterSL, newsState.sellDisasterSL), clrSilver); line++;
-      double newsSpreadNow = CurrentSpreadPrice();
+       SetPanelLine("SMA_PANEL_" + IntegerToString(line), HoldingPanelY(line),
+                    StringFormat("缓冲: 突破%.2f / 灾难%.2f | 灾难SL B%.2f S%.2f", newsState.breakoutBuffer,
+                                  newsState.disasterBuffer, newsState.buyDisasterSL, newsState.sellDisasterSL), clrSilver); line++;
+       NewsStopPreview preview;
+       NewsBuildFrozenStopPreview(preview);
+       if(preview.visible)
+       {
+          if(preview.priceValid)
+             SetPanelLine("SMA_PANEL_" + IntegerToString(line), HoldingPanelY(line),
+                          StringFormat("最小手数预览 %.2f | Buy Stop %.2f / 灾难SL %.2f | Sell Stop %.2f / 灾难SL %.2f",
+                                       preview.volume,preview.buyStop,preview.buyDisasterSL,preview.sellStop,preview.sellDisasterSL),clrAqua);
+          else
+             SetPanelLine("SMA_PANEL_" + IntegerToString(line), HoldingPanelY(line),preview.status,LegacyDangerColor());
+          line++;
+          SetPanelLine("SMA_PANEL_" + IntegerToString(line), HoldingPanelY(line),
+                       StringFormat("双边最坏损失: B%s + S%s = %s",
+                                    preview.buyLossAvailable ? DoubleToString(preview.buyLossMoney,2) : "不可用",
+                                    preview.sellLossAvailable ? DoubleToString(preview.sellLossMoney,2) : "不可用",
+                                    (preview.buyLossAvailable && preview.sellLossAvailable) ? DoubleToString(preview.buyLossMoney+preview.sellLossMoney,2) : "不可用"),
+                       (preview.buyLossAvailable && preview.sellLossAvailable) ? clrAqua : clrOrange); line++;
+          SetPanelLine("SMA_PANEL_" + IntegerToString(line), HoldingPanelY(line),
+                       StringFormat("两单保证金: B%s + S%s = %s | %s",
+                                    preview.buyMarginAvailable ? DoubleToString(preview.buyMargin,2) : "不可用",
+                                    preview.sellMarginAvailable ? DoubleToString(preview.sellMargin,2) : "不可用",
+                                    (preview.buyMarginAvailable && preview.sellMarginAvailable) ? DoubleToString(preview.buyMargin+preview.sellMargin,2) : "不可用",
+                                    preview.status),
+                       (preview.buyMarginAvailable && preview.sellMarginAvailable) ? clrSilver : clrOrange); line++;
+       }
+       double newsSpreadNow = CurrentSpreadPrice();
       double newsSpreadLimit = NewsDynamicSpreadLimit();
       SetPanelLine("SMA_PANEL_" + IntegerToString(line), HoldingPanelY(line),
                    StringFormat("点差: 当前%.2f | 动态限制%.2f | 冻结前正常%.2f", newsSpreadNow,
