@@ -1721,6 +1721,16 @@ struct NewsHedgeState
    double   runnerHigh;
    double   runnerLow;
    int      runnerPartialStage;
+   bool     runnerPartialPending;
+   int      runnerPartialTargetStage;
+   double   runnerPartialStageStartVolume;
+   double   runnerPartialTargetVolume;
+   double   runnerPartialStageStartExitVolume;
+   double   runnerPartialFilledVolume;
+   double   runnerPartialRequestedVolume;
+   datetime runnerPartialRequestTime;
+   double   runnerRealizedExitVolume;
+   double   runnerActualCostMoney;
    datetime lastPartialTime;
    datetime lastStructureBarTime;
    ulong    lastLoserDeal;
@@ -1770,6 +1780,7 @@ int newsMicroHead = 0;
 int newsMicroCount = 0;
 
 #define NEWS_PENDING_DEAL_CAPACITY 16
+#define NEWS_PARTIAL_TIMEOUT_SECONDS 20
 ulong newsPendingDeals[NEWS_PENDING_DEAL_CAPACITY];
 int newsPendingDealCount = 0;
 
@@ -6079,7 +6090,7 @@ void NewsHedgeDeletePersistence()
                     "MPP","MPA","MPC","MPST","MPI","MIE","FPD","SPD","REF","RH","RL","ATR","HSD","DIR",
                     "BV","BFT","BW","BHT","BLT","BMC","BCI","NSP","IB","BB","FB","BFU","REL","RELT","RELE","RSM",
                     "DB","BDSL","SDSL","RSL","RBP",
-                    "BPR","PLM","RLM","COST","AC","REC","RRP","RPE","MAX","RIV","HI","LO","PS","LPT","LSB",
+                    "BPR","PLM","RLM","COST","AC","REC","RRP","RPE","MAX","RIV","HI","LO","PS","RPP","RPTS","RPSV","RPTV","RPSE","RPFV","RPRV","RPRT","RREV","RAC","LPT","LSB",
                     "LLD","LRD","PDEAL","PDC","LDN","LAK"};
    for(int i=0; i<ArraySize(keys); i++)
       GlobalVariableDel(NewsHedgeKey(keys[i]));
@@ -6092,7 +6103,7 @@ void NewsHedgeSaveState(bool force=true)
    datetime now = TimeCurrent();
    if(!force && 上次消息状态保存时间 > 0 && now == 上次消息状态保存时间) return;
    上次消息状态保存时间 = now;
-   GlobalVariableSet(NewsHedgeKey("VER"), 5.0);
+   GlobalVariableSet(NewsHedgeKey("VER"), 6.0);
    GlobalVariableSet(NewsHedgeKey("ST"),  newsState.stage);
    GlobalVariableSet(NewsHedgeKey("ATM"), newsState.adoptedTemplate);
    GlobalVariableSet(NewsHedgeKey("BT"),  (double)newsState.buyTicket);
@@ -6169,6 +6180,16 @@ void NewsHedgeSaveState(bool force=true)
    GlobalVariableSet(NewsHedgeKey("HI"),  newsState.runnerHigh);
    GlobalVariableSet(NewsHedgeKey("LO"),  newsState.runnerLow);
    GlobalVariableSet(NewsHedgeKey("PS"),  newsState.runnerPartialStage);
+   GlobalVariableSet(NewsHedgeKey("RPP"), newsState.runnerPartialPending ? 1.0 : 0.0);
+   GlobalVariableSet(NewsHedgeKey("RPTS"),newsState.runnerPartialTargetStage);
+   GlobalVariableSet(NewsHedgeKey("RPSV"),newsState.runnerPartialStageStartVolume);
+   GlobalVariableSet(NewsHedgeKey("RPTV"),newsState.runnerPartialTargetVolume);
+   GlobalVariableSet(NewsHedgeKey("RPSE"),newsState.runnerPartialStageStartExitVolume);
+   GlobalVariableSet(NewsHedgeKey("RPFV"),newsState.runnerPartialFilledVolume);
+   GlobalVariableSet(NewsHedgeKey("RPRV"),newsState.runnerPartialRequestedVolume);
+   GlobalVariableSet(NewsHedgeKey("RPRT"),(double)newsState.runnerPartialRequestTime);
+   GlobalVariableSet(NewsHedgeKey("RREV"),newsState.runnerRealizedExitVolume);
+   GlobalVariableSet(NewsHedgeKey("RAC"), newsState.runnerActualCostMoney);
    GlobalVariableSet(NewsHedgeKey("LPT"), (double)newsState.lastPartialTime);
    GlobalVariableSet(NewsHedgeKey("LSB"), (double)newsState.lastStructureBarTime);
    GlobalVariableSet(NewsHedgeKey("LLD"), (double)newsState.lastLoserDeal);
@@ -6200,6 +6221,10 @@ void NewsHedgeReset(bool clearPersistent=true)
    上次消息箱体尝试时间 = 0;
    if(clearPersistent) NewsHedgeDeletePersistence();
 }
+
+bool NewsRefreshRunnerDealTotals(bool adjustActualCost);
+bool NewsReconcileRunnerPartial(bool refreshHistory);
+void NewsMigrateLegacyRunnerPartialState(bool legacyFirstDone, bool legacySecondDone, int legacyStage);
 
 void NewsHedgeLoadState()
 {
@@ -6290,6 +6315,16 @@ void NewsHedgeLoadState()
    newsState.runnerHigh = NewsHedgeRead("HI");
    newsState.runnerLow = NewsHedgeRead("LO");
    newsState.runnerPartialStage = (int)MathRound(NewsHedgeRead("PS"));
+   newsState.runnerPartialPending = (NewsHedgeRead("RPP") > 0.5);
+   newsState.runnerPartialTargetStage = (int)MathRound(NewsHedgeRead("RPTS"));
+   newsState.runnerPartialStageStartVolume = NewsHedgeRead("RPSV");
+   newsState.runnerPartialTargetVolume = NewsHedgeRead("RPTV");
+   newsState.runnerPartialStageStartExitVolume = NewsHedgeRead("RPSE");
+   newsState.runnerPartialFilledVolume = NewsHedgeRead("RPFV");
+   newsState.runnerPartialRequestedVolume = NewsHedgeRead("RPRV");
+   newsState.runnerPartialRequestTime = (datetime)NewsHedgeRead("RPRT");
+   newsState.runnerRealizedExitVolume = NewsHedgeRead("RREV");
+   newsState.runnerActualCostMoney = NewsHedgeRead("RAC");
    newsState.lastPartialTime = (datetime)NewsHedgeRead("LPT");
    newsState.lastStructureBarTime = (datetime)NewsHedgeRead("LSB");
    newsState.lastLoserDeal = (ulong)NewsHedgeRead("LLD");
@@ -6360,6 +6395,14 @@ void NewsHedgeLoadState()
       ulong elapsed = (ulong)MathMax((long)(TimeCurrent()-newsState.unhedgeTime), 0) * 1000;
       newsState.unhedgeTimeMs = nowMs > elapsed ? nowMs-elapsed : 0;
       newsState.lastExtremeTimeMs = nowMs;
+   }
+   if(version > 0 && version < 6)
+      NewsMigrateLegacyRunnerPartialState(newsState.firstPartialDone, newsState.secondPartialDone,
+                                          newsState.runnerPartialStage);
+   else
+   {
+      NewsRefreshRunnerDealTotals(true);
+      NewsReconcileRunnerPartial(false);
    }
    if(newsState.stage == 消息阶段_待命) 消息对冲状态 = "待命: 请下等手数BUY+SELL";
    else if(newsState.stage == 消息阶段_配对安全) 消息对冲状态 = "已恢复配对安全，禁止拆锁";
@@ -6996,7 +7039,8 @@ void NewsCloseAll(string reason)
    if(!NewsPositionExists(newsState.buyTicket) && !NewsPositionExists(newsState.sellTicket) && !NewsPositionExists(newsState.runnerTicket))
    {
       if(newsState.groupFlatSince <= 0) newsState.groupFlatSince = TimeCurrent();
-      if(newsPendingDealCount > 0 || TimeCurrent()-newsState.groupFlatSince < 2)
+      if(newsPendingDealCount > 0 || newsState.runnerPartialTargetStage > 0 ||
+         TimeCurrent()-newsState.groupFlatSince < 2)
       {
          消息对冲状态 = StringFormat("%s，仓位已平，等待成交确认 %d笔", reason, newsPendingDealCount);
          lastStatus = 消息对冲状态;
@@ -7240,6 +7284,185 @@ double NewsEstimateDisasterLoserLoss(int direction, double volume)
    return NewsPriceDistanceToMoney(MathAbs(stopPrice-openPrice), volume);
 }
 
+bool NewsSelectRunnerPosition(double &volume)
+{
+   volume = 0.0;
+   if(newsState.runnerPositionId == 0) return false;
+   ulong ticket = newsState.runnerTicket;
+   if(ticket == 0 || !PositionSelectByTicket(ticket) ||
+      (ulong)PositionGetInteger(POSITION_IDENTIFIER) != newsState.runnerPositionId)
+   {
+      ticket = FindOpenPositionTicketByIdentifier(newsState.runnerPositionId);
+      if(ticket == 0 || !PositionSelectByTicket(ticket)) return false;
+   }
+   if(!NewsPositionEligibleSelected()) return false;
+   newsState.runnerTicket = ticket;
+   volume = PositionGetDouble(POSITION_VOLUME);
+   return true;
+}
+
+bool NewsRefreshRunnerDealTotals(bool adjustActualCost)
+{
+   if(newsState.runnerPositionId == 0 || !HistorySelectByPosition(newsState.runnerPositionId)) return false;
+   double netTotal = 0.0;
+   double exitVolume = 0.0;
+   double costTotal = 0.0;
+   datetime cutoff = newsState.unhedgeTime > 0 ? newsState.unhedgeTime : newsState.pairTime;
+   for(int i=0; i<HistoryDealsTotal(); i++)
+   {
+      ulong deal = HistoryDealGetTicket(i);
+      if(deal == 0 || (ulong)HistoryDealGetInteger(deal, DEAL_POSITION_ID) != newsState.runnerPositionId) continue;
+      if(HistoryDealGetString(deal, DEAL_SYMBOL) != _Symbol) continue;
+      ENUM_DEAL_ENTRY entry = (ENUM_DEAL_ENTRY)HistoryDealGetInteger(deal, DEAL_ENTRY);
+      if(entry != DEAL_ENTRY_OUT && entry != DEAL_ENTRY_OUT_BY && entry != DEAL_ENTRY_INOUT) continue;
+      if(cutoff > 0 && (datetime)HistoryDealGetInteger(deal, DEAL_TIME) < cutoff) continue;
+      double commission = HistoryDealGetDouble(deal, DEAL_COMMISSION);
+      double swap = HistoryDealGetDouble(deal, DEAL_SWAP);
+      double fee = HistoryDealGetDouble(deal, DEAL_FEE);
+      netTotal += HistoryDealGetDouble(deal, DEAL_PROFIT) + commission + swap + fee;
+      exitVolume += HistoryDealGetDouble(deal, DEAL_VOLUME);
+      costTotal += MathMax(-(commission+swap+fee), 0.0);
+   }
+   if(adjustActualCost)
+      newsState.actualCostMoney = MathMax(newsState.actualCostMoney + costTotal-newsState.runnerActualCostMoney, 0.0);
+   newsState.runnerActualCostMoney = costTotal;
+   newsState.realizedRunnerProfitMoney = netTotal;
+   newsState.runnerRealizedExitVolume = exitVolume;
+   newsState.runnerPendingEstimateMoney = 0.0;
+   return true;
+}
+
+void NewsClearRunnerPartialRequest(bool clearTarget)
+{
+   newsState.runnerPartialPending = false;
+   newsState.runnerPartialRequestedVolume = 0.0;
+   if(clearTarget)
+   {
+      newsState.runnerPartialRequestTime = 0;
+      newsState.runnerPartialTargetStage = 0;
+      newsState.runnerPartialStageStartVolume = 0.0;
+      newsState.runnerPartialTargetVolume = 0.0;
+      newsState.runnerPartialStageStartExitVolume = 0.0;
+      newsState.runnerPartialFilledVolume = 0.0;
+   }
+}
+
+bool NewsReconcileRunnerPartial(bool refreshHistory)
+{
+   if(newsState.runnerPartialTargetStage <= 0) return false;
+   if(refreshHistory && !NewsRefreshRunnerDealTotals(true)) return false;
+   double step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+   if(step <= 0.0) step = 0.01;
+   double currentVolume = 0.0;
+   bool runnerAlive = NewsSelectRunnerPosition(currentVolume);
+   if(!runnerAlive) currentVolume = 0.0;
+   double requiredFill = MathMax(newsState.runnerPartialStageStartVolume-newsState.runnerPartialTargetVolume, 0.0);
+   double actualFill = MathMax(newsState.runnerRealizedExitVolume-newsState.runnerPartialStageStartExitVolume, 0.0);
+   newsState.runnerPartialFilledVolume = actualFill;
+   bool dealConfirmed = (actualFill > step*0.5 && actualFill+step*0.5 >= requiredFill);
+   bool volumeConfirmed = (currentVolume <= newsState.runnerPartialTargetVolume+step*0.5);
+   if(dealConfirmed && volumeConfirmed)
+   {
+      int completedStage = newsState.runnerPartialTargetStage;
+      if(completedStage == 1) newsState.firstPartialDone = true;
+      else
+      {
+         newsState.firstPartialDone = true;
+         newsState.secondPartialDone = true;
+      }
+      newsState.runnerPartialStage = MathMax(newsState.runnerPartialStage, completedStage);
+      newsState.lastPartialTime = TimeCurrent();
+      newsState.estimatedRemainingExitCostMoney = NewsEstimateRemainingExitCost(currentVolume);
+      PrintFormat("[消息成交] 第%d段真实确认 filled=%.2f required=%.2f remaining=%.2f target=%.2f realizedNet=%.2f",
+                  completedStage, actualFill, requiredFill, currentVolume,
+                  newsState.runnerPartialTargetVolume, newsState.realizedRunnerProfitMoney);
+      NewsClearRunnerPartialRequest(true);
+      NewsHedgeSaveState();
+      消息对冲状态 = StringFormat("消息第%d段已由真实Deal确认 %.2f手，剩余%.2f",
+                                   completedStage, actualFill, currentVolume);
+      lastStatus = 消息对冲状态;
+      return true;
+   }
+   if(!newsState.runnerPartialPending || newsState.runnerPartialRequestTime <= 0 ||
+      TimeCurrent()-newsState.runnerPartialRequestTime < NEWS_PARTIAL_TIMEOUT_SECONDS) return false;
+   if(!runnerAlive || volumeConfirmed)
+   {
+      PrintRateLimited("news_runner_partial_wait_deal", 10,
+                       StringFormat("[消息成交] 第%d段仓量已到目标或仓位消失，但真实Deal量尚不足 filled=%.2f required=%.2f，继续等待",
+                                    newsState.runnerPartialTargetStage, actualFill, requiredFill));
+      return false;
+   }
+   PrintFormat("[消息成交] 第%d段请求超时，按服务器剩余量补发差额 current=%.2f target=%.2f actualFill=%.2f",
+               newsState.runnerPartialTargetStage, currentVolume,
+               newsState.runnerPartialTargetVolume, actualFill);
+   NewsClearRunnerPartialRequest(false);
+   NewsHedgeSaveState();
+   return false;
+}
+
+void NewsMigrateLegacyRunnerPartialState(bool legacyFirstDone, bool legacySecondDone, int legacyStage)
+{
+   newsState.realizedRunnerProfitMoney -= newsState.runnerPendingEstimateMoney;
+   newsState.runnerPendingEstimateMoney = 0.0;
+   newsState.firstPartialDone = false;
+   newsState.secondPartialDone = false;
+   newsState.runnerPartialStage = 0;
+   NewsClearRunnerPartialRequest(true);
+   NewsRefreshRunnerDealTotals(false);
+   double currentVolume = 0.0;
+   bool runnerAlive = NewsSelectRunnerPosition(currentVolume);
+   if(!runnerAlive) currentVolume = 0.0;
+   double step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+   double minVol = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   if(step <= 0.0) step = 0.01;
+   if(minVol <= 0.0) minVol = step;
+   double initialVolume = newsState.runnerInitialVolume;
+   double close1 = NormalizeVolumeDown(initialVolume * ClampDouble(消息对冲第1段平仓比例, 0.05, 0.90));
+   if(close1 >= initialVolume) close1 = NormalizeVolumeDown(initialVolume-minVol);
+   double target1 = NormalizeVolumeDown(MathMax(initialVolume-close1, 0.0));
+   bool firstConfirmed = (close1 >= minVol && newsState.runnerRealizedExitVolume+step*0.5 >= close1 &&
+                          currentVolume <= target1+step*0.5);
+   if(legacyFirstDone && firstConfirmed)
+   {
+      newsState.firstPartialDone = true;
+      newsState.runnerPartialStage = 1;
+   }
+   else if(legacyFirstDone || legacyStage >= 1)
+   {
+      newsState.runnerPartialTargetStage = 1;
+      newsState.runnerPartialStageStartVolume = initialVolume;
+      newsState.runnerPartialTargetVolume = target1;
+      newsState.runnerPartialStageStartExitVolume = 0.0;
+      newsState.runnerPartialFilledVolume = newsState.runnerRealizedExitVolume;
+      newsState.runnerPartialPending = true;
+      newsState.runnerPartialRequestTime = newsState.lastPartialTime > 0 ? newsState.lastPartialTime : TimeCurrent();
+   }
+   if(newsState.firstPartialDone && (legacySecondDone || legacyStage >= 2))
+   {
+      double close2 = NormalizeVolumeDown(initialVolume * ClampDouble(消息对冲第2段平仓初始手数比例, 0.05, 0.90));
+      if(close2 >= target1) close2 = NormalizeVolumeDown(target1-minVol);
+      double target2 = NormalizeVolumeDown(MathMax(target1-close2, 0.0));
+      bool secondConfirmed = (close2 >= minVol && newsState.runnerRealizedExitVolume+step*0.5 >= close1+close2 &&
+                              currentVolume <= target2+step*0.5);
+      if(secondConfirmed)
+      {
+         newsState.secondPartialDone = true;
+         newsState.runnerPartialStage = 2;
+      }
+      else
+      {
+         newsState.runnerPartialTargetStage = 2;
+         newsState.runnerPartialStageStartVolume = target1;
+         newsState.runnerPartialTargetVolume = target2;
+         newsState.runnerPartialStageStartExitVolume = close1;
+         newsState.runnerPartialFilledVolume = MathMax(newsState.runnerRealizedExitVolume-close1, 0.0);
+         newsState.runnerPartialPending = true;
+         newsState.runnerPartialRequestTime = newsState.lastPartialTime > 0 ? newsState.lastPartialTime : TimeCurrent();
+      }
+   }
+   NewsHedgeSaveState();
+}
+
 bool NewsRecordDeal(ulong dealTicket, string source)
 {
    if(dealTicket == 0 || !HistoryDealSelect(dealTicket)) return false;
@@ -7302,16 +7525,11 @@ bool NewsRecordDeal(ulong dealTicket, string source)
    if(runnerSide && dealTicket != newsState.lastRunnerDeal)
    {
       newsState.lastRunnerDeal = dealTicket;
-      if(newsState.runnerPendingEstimateMoney != 0.0)
-      {
-         newsState.realizedRunnerProfitMoney -= newsState.runnerPendingEstimateMoney;
-         newsState.runnerPendingEstimateMoney = 0.0;
-      }
-      newsState.realizedRunnerProfitMoney += net;
-      newsState.actualCostMoney += MathMax(-(commission+swap+fee), 0.0);
+      if(!NewsRefreshRunnerDealTotals(true)) return false;
       newsState.estimatedRemainingExitCostMoney = NewsEstimateRemainingExitCost(NewsPositionVolume(newsState.runnerTicket));
       PrintFormat("[消息成交] %s runner deal=%I64u pos=%I64u reason=%d price=%.5f profit=%.2f commission=%.2f swap=%.2f fee=%.2f net=%.2f",
                   source, dealTicket, positionId, reason, price, profit, commission, swap, fee, net);
+      NewsReconcileRunnerPartial(false);
       NewsHedgeSaveState();
       return true;
    }
@@ -7507,6 +7725,10 @@ void NewsContinueUnhedge()
       newsMicroCount = 0;
       newsState.firstPartialDone = false;
       newsState.secondPartialDone = false;
+      newsState.runnerPartialStage = 0;
+      NewsClearRunnerPartialRequest(true);
+      newsState.runnerRealizedExitVolume = 0.0;
+      newsState.runnerActualCostMoney = 0.0;
    }
    if(newsState.runnerStructureSL <= 0.0) newsState.runnerStructureSL = NewsDesiredRunnerStructureSL();
    newsState.estimatedRemainingExitCostMoney = NewsEstimateRemainingExitCost(NewsPositionVolume(newsState.runnerTicket));
@@ -7802,48 +8024,62 @@ bool NewsPullbackStructureSL(ENUM_POSITION_TYPE type, double atr, double &candid
 
 bool NewsExecuteRunnerPartial(double ratio, double combinedMoney, int stage)
 {
-   if(!PositionSelectByTicket(newsState.runnerTicket)) return false;
+   if(newsState.runnerPartialPending) return false;
+   double volume = 0.0;
+   if(!NewsSelectRunnerPosition(volume)) return false;
    // 与全平使用同一身份闸门，防止损坏的恢复状态把普通仓当作消息尾仓分批。
-   if(!NewsPositionEligibleSelected())
-   {
-      PrintFormat("[消息安全] 拒绝非消息冻结仓分批 ticket=%I64u", newsState.runnerTicket);
-      return false;
-   }
-   double volume = PositionGetDouble(POSITION_VOLUME);
    double minVol = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
    if(minVol <= 0.0) minVol = 0.01;
    if(newsState.runnerInitialVolume <= 0.0) newsState.runnerInitialVolume = volume;
-   double closeVolume = NormalizeVolumeDown(newsState.runnerInitialVolume * ClampDouble(ratio, 0.05, 0.90));
-   if(closeVolume >= volume) closeVolume = NormalizeVolumeDown(volume-minVol);
-   double remain = NormalizeVolumeDown(volume - closeVolume);
+   if(!NewsRefreshRunnerDealTotals(true))
+   {
+      PrintRateLimited("news_runner_partial_history_wait", 10,
+                       "[消息成交] runner历史暂不可读，拒绝发送分批请求");
+      return false;
+   }
+   if(newsState.runnerPartialTargetStage != stage)
+   {
+      double stageCloseVolume = NormalizeVolumeDown(newsState.runnerInitialVolume * ClampDouble(ratio, 0.05, 0.90));
+      if(stageCloseVolume >= volume) stageCloseVolume = NormalizeVolumeDown(volume-minVol);
+      newsState.runnerPartialTargetStage = stage;
+      newsState.runnerPartialStageStartVolume = volume;
+      newsState.runnerPartialTargetVolume = NormalizeVolumeDown(MathMax(volume-stageCloseVolume, 0.0));
+      newsState.runnerPartialStageStartExitVolume = newsState.runnerRealizedExitVolume;
+      newsState.runnerPartialFilledVolume = 0.0;
+      NewsHedgeSaveState();
+   }
+   if(newsState.runnerPartialRequestTime > 0 &&
+      TimeCurrent()-newsState.runnerPartialRequestTime < NEWS_PARTIAL_TIMEOUT_SECONDS) return false;
+   double closeVolume = NormalizeVolumeDown(volume-newsState.runnerPartialTargetVolume);
+   double remain = NormalizeVolumeDown(volume-closeVolume);
    if(closeVolume < minVol || remain < minVol)
    {
-      if(stage == 1) newsState.firstPartialDone = true;
-      else newsState.secondPartialDone = true;
-      newsState.runnerPartialStage = MathMax(newsState.runnerPartialStage, stage);
-      NewsHedgeSaveState();
-      PrintFormat("[消息短时] 第%d段因最小手数跳过 current=%.2f initial=%.2f target=%.2f min=%.2f",
-                  stage, volume, newsState.runnerInitialVolume, closeVolume, minVol);
+      PrintRateLimited(StringFormat("news_runner_partial_min:%d", stage), 10,
+                       StringFormat("[消息短时] 第%d段当前差额不满足最小手数，不推进阶段 current=%.2f targetRemain=%.2f close=%.2f min=%.2f",
+                                    stage, volume, newsState.runnerPartialTargetVolume, closeVolume, minVol));
       return false;
    }
 
-   double floatingBefore = PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP);
+   newsState.runnerPartialPending = true;
+   newsState.runnerPartialRequestedVolume = closeVolume;
+   newsState.runnerPartialRequestTime = TimeCurrent();
+   NewsHedgeSaveState(); // 先锁定请求，防止同步Deal事件或重启造成同阶段重复发送。
    manageTrade.SetDeviationInPoints(MathMax(消息对冲允许滑点点数, 0));
-   if(!manageTrade.PositionClosePartial(newsState.runnerTicket, closeVolume)) return false;
-   double realizedPart = floatingBefore * closeVolume / MathMax(volume, minVol);
-   ulong closeDeal = manageTrade.ResultDeal();
-   if(!NewsRecordDeal(closeDeal, "盈利边分批"))
+   bool sent = manageTrade.PositionClosePartial(newsState.runnerTicket, closeVolume);
+   uint retcode = manageTrade.ResultRetcode();
+   if(!sent || !IsTradeRetcodeAccepted(retcode))
    {
-      newsState.realizedRunnerProfitMoney += realizedPart;
-      newsState.runnerPendingEstimateMoney += realizedPart;
+      PrintFormat("[消息成交] 第%d段请求拒绝 volume=%.2f retcode=%u comment=%s",
+                  stage, closeVolume, retcode, manageTrade.ResultComment());
+      NewsClearRunnerPartialRequest(false);
+      NewsHedgeSaveState();
+      return false;
    }
-   newsState.runnerPartialStage = stage;
-   if(stage == 1) newsState.firstPartialDone = true;
-   else newsState.secondPartialDone = true;
-   newsState.lastPartialTime = TimeCurrent();
-   newsState.estimatedRemainingExitCostMoney = NewsEstimateRemainingExitCost(remain);
+   ulong closeDeal = manageTrade.ResultDeal();
+   if(closeDeal > 0 && !NewsRecordDeal(closeDeal, "盈利边分批")) NewsEnqueuePendingDeal(closeDeal);
    NewsHedgeSaveState();
-   消息对冲状态 = StringFormat("消息第%d段落袋 %.2f手，组合%.2f", stage, closeVolume, combinedMoney);
+   消息对冲状态 = StringFormat("消息第%d段请求 %.2f手已受理，等待真实Deal与剩余仓量确认，组合%.2f",
+                                stage, closeVolume, combinedMoney);
    lastStatus = 消息对冲状态;
    return true;
 }
@@ -7877,8 +8113,16 @@ double NewsPhaseDrawdownRatio(int phase)
 
 void ManageNewsRunner(double atr)
 {
-   if(!NewsPositionExists(newsState.runnerTicket))
+   NewsReconcileRunnerPartial(false);
+   double volume = 0.0;
+   if(!NewsSelectRunnerPosition(volume))
    {
+      if(newsState.runnerPartialTargetStage > 0)
+      {
+         消息对冲状态 = "runner仓位已消失，等待真实退出Deal确认";
+         lastStatus = 消息对冲状态;
+         return;
+      }
       PrintFormat("[消息短时] 剩余边结束 已实现=%.2f 亏损边=%.2f 实际成本=%.2f",
                   newsState.realizedRunnerProfitMoney, newsState.realizedLoserLossMoney, newsState.actualCostMoney);
       NewsRequestGroupExit("消息仓已结束");
@@ -7893,7 +8137,6 @@ void ManageNewsRunner(double atr)
 
    ENUM_POSITION_TYPE type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
    double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
-   double volume = PositionGetDouble(POSITION_VOLUME);
    if(newsState.runnerInitialVolume <= 0.0) newsState.runnerInitialVolume = volume;
    double scaleVolume = MathMax(newsState.runnerInitialVolume, 0.01);
    double combined = NewsRunnerCombinedMoney();
@@ -19471,7 +19714,9 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
       }
    }
    if(newsState.stage == 消息阶段_待命) return;
-   bool related = (trans.position == newsState.buyTicket || trans.position == newsState.sellTicket ||
+   bool related = (dealPositionId == newsState.buyPositionId || dealPositionId == newsState.sellPositionId ||
+                   dealPositionId == newsState.runnerPositionId || dealPositionId == newsState.loserPositionId ||
+                   trans.position == newsState.buyTicket || trans.position == newsState.sellTicket ||
                    trans.position == newsState.runnerTicket || trans.position == newsState.loserTicket ||
                    trans.position == newsState.buyPositionId || trans.position == newsState.sellPositionId ||
                    trans.position == newsState.runnerPositionId || trans.position == newsState.loserPositionId);
@@ -19493,6 +19738,7 @@ void OnTimer()
    FlushAllDirtyShortStates(false);
    TradeJournalWriteSnapshots();
    NewsTryPendingDeals();
+   NewsReconcileRunnerPartial(true);
    NewsManageClock();
    if(NewsHedgeGroupActive())
    {
