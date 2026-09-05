@@ -12,6 +12,7 @@
 CTrade manageTrade;
 CTrade markerTrade;
 CTrade teacherAutoTrade;
+CTrade newsStopTrade;
 
 // 老师点位自动反转单使用固定独立Magic，避免与手动单、托管单和手机标记混用。
 const long TEACHER_AUTO_SHORT_MAGIC = 560006;
@@ -105,6 +106,18 @@ enum 消息高点差超时处理模式
 {
    高点差超时处理_整组退出 = 0,
    高点差超时处理_安全条件满足后强制拆锁 = 1
+};
+
+enum 消息双Stop阶段
+{
+   消息双Stop_空闲 = 0,
+   消息双Stop_创建BUY待确认 = 1,
+   消息双Stop_创建SELL待确认 = 2,
+   消息双Stop_已武装 = 3,
+   消息双Stop_OCO撤单中 = 4,
+   消息双Stop_全部撤单中 = 5,
+   消息双Stop_单边托管 = 6,
+   消息双Stop_故障 = 7
 };
 
 enum 老师点位短线辅助模式
@@ -431,6 +444,10 @@ input group "13 常用｜消息对冲"
 // 只识别当前品种、受管范围内、且在真实成交时已冻结为“消息对冲”的一多一空。
 // 切换模板绝不能接管、修改或平掉任何既有仓位。
 input int      消息对冲配对等待秒 = 45;             // 单边先成交后，等待另一边的最长时间
+input bool     启用消息双Stop真实挂单 = false;     // 默认关闭；仅冻结箱体后由面板明确部署
+input long     消息双Stop挂单Magic = 910406;
+input double   消息双Stop固定手数 = 0.01;
+input int      消息双Stop有效秒数 = 120;
 input int      消息对冲最大开仓时间差秒 = 90;
 input bool     消息对冲配对失败自动平仓 = true;     // 等不到另一边时平掉孤立仓，避免裸奔
 input bool     消息对冲无效配对自动全平 = true;     // 兼容旧参数保留；待命期异常组合固定为仅告警，绝不自动平仓
@@ -1817,6 +1834,16 @@ struct NewsHedgeState
    ulong    lastRunnerDeal;
    double   loserDealNetMoney;
    bool     loserActualKnown;
+   int      stopStage;
+   long     stopToken;
+   ulong    buyStopOrder;
+   ulong    sellStopOrder;
+   datetime stopRequestTime;
+   datetime stopExpireTime;
+   bool     buyStopDeletePending;
+   bool     sellStopDeletePending;
+   datetime buyStopDeleteTime;
+   datetime sellStopDeleteTime;
 };
 
 NewsHedgeState newsState;
@@ -2264,6 +2291,7 @@ struct NewsStopPreview
    bool     sellMarginAvailable;
    double   buyMargin;
    double   sellMargin;
+   bool     deployValid;
    string   status;
 };
 
@@ -6185,6 +6213,19 @@ string NewsHedgeKey(string suffix)
    return "SMA_NH_" + IntegerToString((long)AccountInfoInteger(ACCOUNT_LOGIN)) + "_" + _Symbol + "_" + suffix;
 }
 
+void NewsHedgeWriteUlong(string suffix, ulong value)
+{
+   GlobalVariableSet(NewsHedgeKey(suffix+"L"), (double)(uint)(value & 0xFFFFFFFF));
+   GlobalVariableSet(NewsHedgeKey(suffix+"H"), (double)(uint)(value >> 32));
+}
+
+ulong NewsHedgeReadUlong(string suffix)
+{
+   ulong low=(ulong)(uint)MathRound(NewsHedgeRead(suffix+"L"));
+   ulong high=(ulong)(uint)MathRound(NewsHedgeRead(suffix+"H"));
+   return low | (high << 32);
+}
+
 void NewsHedgeDeletePersistence()
 {
    string keys[] = {"VER","ST","ATM","BT","STK","RT","LT","BI","SI","RI","LI","BOP","SOP","PT","UT","UTM","UP","IGR","LDR","RRR","ARSL","LCP","LCT","GFS","AUE","AUS","REP","LET","RPH",
@@ -6192,7 +6233,8 @@ void NewsHedgeDeletePersistence()
                     "BV","BFT","BW","BHT","BLT","BMC","BCI","NSP","IB","BB","FB","BFU","REL","RELT","RELE","RSM",
                     "DB","BDSL","SDSL","RSL","RBP",
                     "BPR","PLM","RLM","COST","AC","REC","RRP","RPE","MAX","RIV","HI","LO","PS","RPP","RPTS","RPSV","RPTV","RPSE","RPFV","RPRV","RPRT","RREV","RAC","LPT","LSB",
-                    "LLD","LRD","PDEAL","PDC","LDN","LAK"};
+                     "LLD","LRD","PDEAL","PDC","LDN","LAK",
+                     "NSS","NST","NSBL","NSBH","NSSL","NSSH","NSRQ","NSEX","NSBD","NSSD","NSBT","NSST"};
    for(int i=0; i<ArraySize(keys); i++)
       GlobalVariableDel(NewsHedgeKey(keys[i]));
    for(int i=0; i<NEWS_PENDING_DEAL_CAPACITY; i++)
@@ -6204,7 +6246,7 @@ void NewsHedgeSaveState(bool force=true)
    datetime now = TimeCurrent();
    if(!force && 上次消息状态保存时间 > 0 && now == 上次消息状态保存时间) return;
    上次消息状态保存时间 = now;
-   GlobalVariableSet(NewsHedgeKey("VER"), 6.0);
+   GlobalVariableSet(NewsHedgeKey("VER"), 7.0);
    GlobalVariableSet(NewsHedgeKey("ST"),  newsState.stage);
    GlobalVariableSet(NewsHedgeKey("ATM"), newsState.adoptedTemplate);
    GlobalVariableSet(NewsHedgeKey("BT"),  (double)newsState.buyTicket);
@@ -6300,6 +6342,16 @@ void NewsHedgeSaveState(bool force=true)
       GlobalVariableSet(NewsHedgeKey("PD"+IntegerToString(i)), (double)newsPendingDeals[i]);
    GlobalVariableSet(NewsHedgeKey("LDN"), newsState.loserDealNetMoney);
    GlobalVariableSet(NewsHedgeKey("LAK"), newsState.loserActualKnown ? 1.0 : 0.0);
+   GlobalVariableSet(NewsHedgeKey("NSS"), newsState.stopStage);
+   GlobalVariableSet(NewsHedgeKey("NST"), (double)newsState.stopToken);
+   NewsHedgeWriteUlong("NSB", newsState.buyStopOrder);
+   NewsHedgeWriteUlong("NSS", newsState.sellStopOrder);
+   GlobalVariableSet(NewsHedgeKey("NSRQ"), (double)newsState.stopRequestTime);
+   GlobalVariableSet(NewsHedgeKey("NSEX"), (double)newsState.stopExpireTime);
+   GlobalVariableSet(NewsHedgeKey("NSBD"), newsState.buyStopDeletePending ? 1.0 : 0.0);
+   GlobalVariableSet(NewsHedgeKey("NSSD"), newsState.sellStopDeletePending ? 1.0 : 0.0);
+   GlobalVariableSet(NewsHedgeKey("NSBT"), (double)newsState.buyStopDeleteTime);
+   GlobalVariableSet(NewsHedgeKey("NSST"), (double)newsState.sellStopDeleteTime);
 }
 
 double NewsHedgeRead(string suffix, double fallback=0.0)
@@ -6312,6 +6364,7 @@ void NewsHedgeReset(bool clearPersistent=true)
 {
    ZeroMemory(newsState);
    newsState.stage = 消息阶段_待命;
+   newsState.stopStage = 消息双Stop_空闲;
    消息对冲状态 = "待命: 请下等手数BUY+SELL";
    消息对冲箱体拒绝原因 = "";
    消息对冲退出原因 = "";
@@ -6442,6 +6495,18 @@ void NewsHedgeLoadState()
    }
    newsState.loserDealNetMoney = NewsHedgeRead("LDN");
    newsState.loserActualKnown = (NewsHedgeRead("LAK") > 0.5);
+   newsState.stopStage = (int)MathRound(NewsHedgeRead("NSS"));
+   newsState.stopToken = (long)MathRound(NewsHedgeRead("NST"));
+   newsState.buyStopOrder = NewsHedgeReadUlong("NSB");
+   newsState.sellStopOrder = NewsHedgeReadUlong("NSS");
+   newsState.stopRequestTime = (datetime)NewsHedgeRead("NSRQ");
+   newsState.stopExpireTime = (datetime)NewsHedgeRead("NSEX");
+   newsState.buyStopDeletePending = (NewsHedgeRead("NSBD") > 0.5);
+   newsState.sellStopDeletePending = (NewsHedgeRead("NSSD") > 0.5);
+   newsState.buyStopDeleteTime = (datetime)NewsHedgeRead("NSBT");
+   newsState.sellStopDeleteTime = (datetime)NewsHedgeRead("NSST");
+   if(newsState.stopStage < 消息双Stop_空闲 || newsState.stopStage > 消息双Stop_故障)
+      newsState.stopStage = 消息双Stop_故障;
    if(version < 4)
    {
       newsState.loserDealReady = newsState.loserActualKnown;
@@ -6525,6 +6590,8 @@ bool NewsPositionEligibleSelected()
    if(PositionGetString(POSITION_SYMBOL) != _Symbol) return false;
    long magic = (long)PositionGetInteger(POSITION_MAGIC);
    string cmt = PositionGetString(POSITION_COMMENT);
+   if(magic == 消息双Stop挂单Magic &&
+      (NewsStopCommentMatches(cmt,1) || NewsStopCommentMatches(cmt,-1))) return true;
    if(magic == 手机标记挂单Magic && StringFind(cmt, "SMA_MARK_") == 0) return false;
    if(只管理手动单 && magic != 0) return false;
    if(!只管理手动单 && magic != 指定管理Magic) return false;
@@ -6909,6 +6976,7 @@ void NewsBuildFrozenStopPreview(NewsStopPreview &preview)
    preview.sellMarginAvailable=false;
    preview.buyMargin=0.0;
    preview.sellMargin=0.0;
+   preview.deployValid=false;
    preview.status="";
    if(!preview.visible) return;
 
@@ -6923,10 +6991,18 @@ void NewsBuildFrozenStopPreview(NewsStopPreview &preview)
       preview.status="预览不可用：Tick size 或 Bid/Ask 无效";
       return;
    }
-   if(minVolume<=0.0 || maxVolume<minVolume || volumeStep<=0.0 ||
-      MathAbs(MathRound(minVolume/volumeStep)*volumeStep-minVolume)>1e-8)
+    if(minVolume<=0.0 || maxVolume<minVolume || volumeStep<=0.0)
+    {
+       preview.status="预览不可用：最小手数或手数步长无效";
+       return;
+    }
+   double requestedVolume=启用消息双Stop真实挂单 ? 消息双Stop固定手数 : minVolume;
+   double alignedVolume=MathRound(requestedVolume/volumeStep)*volumeStep;
+   if(requestedVolume<minVolume-1e-8 || requestedVolume>maxVolume+1e-8 ||
+      MathAbs(alignedVolume-requestedVolume)>1e-8)
    {
-      preview.status="预览不可用：最小手数或手数步长无效";
+      preview.status=StringFormat("预览不可用：固定手数%.4f不符合 min %.4f / max %.4f / step %.4f",
+                                  requestedVolume,minVolume,maxVolume,volumeStep);
       return;
    }
    if(newsState.rangeHigh<=newsState.rangeLow || newsState.breakoutBuffer<=0.0 || newsState.disasterBuffer<=0.0)
@@ -6935,7 +7011,7 @@ void NewsBuildFrozenStopPreview(NewsStopPreview &preview)
       return;
    }
 
-   preview.volume=minVolume; // 只读预览，不把最小手数当成未来实盘手数。
+   preview.volume=NormalizeDouble(alignedVolume,8);
    preview.buyStop=NormalizeDouble(MathCeil((newsState.rangeHigh+newsState.breakoutBuffer)/tickSize-1e-10)*tickSize,_Digits);
    preview.sellStop=NormalizeDouble(MathFloor((newsState.rangeLow-newsState.breakoutBuffer)/tickSize+1e-10)*tickSize,_Digits);
    preview.buyDisasterSL=NormalizeDouble(MathFloor((newsState.rangeLow-newsState.disasterBuffer)/tickSize+1e-10)*tickSize,_Digits);
@@ -6949,8 +7025,6 @@ void NewsBuildFrozenStopPreview(NewsStopPreview &preview)
       preview.status="预览不可用：候选价不满足 Bid/Ask、StopsLevel 或 FreezeLevel";
       return;
    }
-   preview.priceValid=true;
-
    double result=0.0;
    if(OrderCalcProfit(ORDER_TYPE_BUY,_Symbol,preview.volume,preview.buyStop,preview.buyDisasterSL,result) && result<0.0)
    {
@@ -6972,8 +7046,509 @@ void NewsBuildFrozenStopPreview(NewsStopPreview &preview)
       preview.sellMarginAvailable=true;
       preview.sellMargin=result;
    }
-   preview.status=(preview.buyLossAvailable && preview.sellLossAvailable && preview.buyMarginAvailable && preview.sellMarginAvailable) ?
-                  "最小手数预览" : "预览部分不可用：风险或保证金计算失败";
+   double spread=ask-bid;
+   double spreadLimit=NewsDynamicSpreadLimit();
+   double freeMargin=AccountInfoDouble(ACCOUNT_MARGIN_FREE);
+   bool spreadOk=(spreadLimit>0.0 && spread<=spreadLimit);
+   bool marginOk=(preview.buyMarginAvailable && preview.sellMarginAvailable &&
+                  preview.buyMargin+preview.sellMargin<=MathMax(freeMargin,0.0));
+   bool calculationValid=(preview.buyLossAvailable && preview.sellLossAvailable && marginOk && spreadOk);
+   preview.deployValid=(启用消息双Stop真实挂单 && calculationValid);
+   preview.priceValid=calculationValid;
+   if(!spreadOk)
+      preview.status=StringFormat("预览不可用：当前点差%.5f超过上限%.5f",spread,spreadLimit);
+   else if(!marginOk)
+      preview.status=StringFormat("预览不可用：双单保证金%.2f超过可用%.2f",
+                                  preview.buyMargin+preview.sellMargin,freeMargin);
+   else if(!preview.buyLossAvailable || !preview.sellLossAvailable)
+      preview.status="预览不可用：风险金额计算失败";
+   else
+      preview.status=启用消息双Stop真实挂单 ? "双Stop可部署" : "最小手数预览（真实挂单关闭）";
+}
+
+string NewsStopComment(int side)
+{
+   return "SMA_NSO_"+IntegerToString(newsState.stopToken)+(side>0 ? "_B" : "_S");
+}
+
+bool NewsStopCommentMatches(string comment,int side)
+{
+   return (newsState.stopToken>0 && comment==NewsStopComment(side));
+}
+
+bool NewsStopOrderSelected(int side)
+{
+   if(OrderGetString(ORDER_SYMBOL)!=_Symbol ||
+      (long)OrderGetInteger(ORDER_MAGIC)!=消息双Stop挂单Magic) return false;
+   ENUM_ORDER_TYPE type=(ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE);
+   if(side>0 && type!=ORDER_TYPE_BUY_STOP) return false;
+   if(side<0 && type!=ORDER_TYPE_SELL_STOP) return false;
+   return NewsStopCommentMatches(OrderGetString(ORDER_COMMENT),side);
+}
+
+bool NewsStopPositionSelected(int side)
+{
+   if(PositionGetString(POSITION_SYMBOL)!=_Symbol ||
+      (long)PositionGetInteger(POSITION_MAGIC)!=消息双Stop挂单Magic) return false;
+   ENUM_POSITION_TYPE type=(ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+   if(side>0 && type!=POSITION_TYPE_BUY) return false;
+   if(side<0 && type!=POSITION_TYPE_SELL) return false;
+   ulong positionId=(ulong)PositionGetInteger(POSITION_IDENTIFIER);
+   ulong expectedId=side>0 ? newsState.buyPositionId : newsState.sellPositionId;
+   if(expectedId>0) return positionId==expectedId;
+   return NewsStopCommentMatches(PositionGetString(POSITION_COMMENT),side);
+}
+
+void NewsRecoverStopPositionIds()
+{
+   bool changed=false;
+   if(newsState.buyPositionId==0 && newsState.buyStopOrder>0 && HistoryOrderSelect(newsState.buyStopOrder))
+   {
+      ulong positionId=(ulong)HistoryOrderGetInteger(newsState.buyStopOrder,ORDER_POSITION_ID);
+      if(positionId>0) { newsState.buyPositionId=positionId; changed=true; }
+   }
+   if(newsState.sellPositionId==0 && newsState.sellStopOrder>0 && HistoryOrderSelect(newsState.sellStopOrder))
+   {
+      ulong positionId=(ulong)HistoryOrderGetInteger(newsState.sellStopOrder,ORDER_POSITION_ID);
+      if(positionId>0) { newsState.sellPositionId=positionId; changed=true; }
+   }
+   if(changed) NewsHedgeSaveState();
+}
+
+ulong NewsFindStopOrder(int side,int &count)
+{
+   ulong found=0;
+   count=0;
+   for(int i=OrdersTotal()-1;i>=0;i--)
+   {
+      ulong ticket=OrderGetTicket(i);
+      if(ticket==0 || !NewsStopOrderSelected(side)) continue;
+      found=ticket;
+      count++;
+   }
+   return found;
+}
+
+ulong NewsFindStopPosition(int side,int &count)
+{
+   ulong found=0;
+   count=0;
+   for(int i=PositionsTotal()-1;i>=0;i--)
+   {
+      ulong ticket=PositionGetTicket(i);
+      if(ticket==0 || !NewsStopPositionSelected(side)) continue;
+      found=ticket;
+      count++;
+   }
+   return found;
+}
+
+bool NewsHasAnyStrategyStopObject()
+{
+   for(int i=OrdersTotal()-1;i>=0;i--)
+   {
+      if(OrderGetTicket(i)==0 || OrderGetString(ORDER_SYMBOL)!=_Symbol) continue;
+      if((long)OrderGetInteger(ORDER_MAGIC)==消息双Stop挂单Magic &&
+         StringFind(OrderGetString(ORDER_COMMENT),"SMA_NSO_")==0) return true;
+   }
+   for(int i=PositionsTotal()-1;i>=0;i--)
+   {
+      if(PositionGetTicket(i)==0 || PositionGetString(POSITION_SYMBOL)!=_Symbol) continue;
+      if((long)PositionGetInteger(POSITION_MAGIC)==消息双Stop挂单Magic &&
+         StringFind(PositionGetString(POSITION_COMMENT),"SMA_NSO_")==0) return true;
+   }
+   return false;
+}
+
+bool NewsSubmitStopOrder(int side,const NewsStopPreview &preview)
+{
+   newsStopTrade.SetExpertMagicNumber(消息双Stop挂单Magic);
+   newsStopTrade.SetDeviationInPoints(MathMax(消息对冲允许滑点点数,0));
+   datetime expiration=newsState.stopExpireTime;
+   bool sent=side>0 ?
+      newsStopTrade.BuyStop(preview.volume,preview.buyStop,_Symbol,preview.buyDisasterSL,0.0,
+                            ORDER_TIME_SPECIFIED,expiration,NewsStopComment(side)) :
+      newsStopTrade.SellStop(preview.volume,preview.sellStop,_Symbol,preview.sellDisasterSL,0.0,
+                             ORDER_TIME_SPECIFIED,expiration,NewsStopComment(side));
+   uint retcode=newsStopTrade.ResultRetcode();
+   if(!sent || !IsTradeRetcodeAccepted(retcode))
+   {
+      PrintFormat("[消息双Stop] %s创建请求失败 ret=%u %s",side>0?"BUY":"SELL",retcode,newsStopTrade.ResultComment());
+      return false;
+   }
+   ulong order=newsStopTrade.ResultOrder();
+   if(side>0) newsState.buyStopOrder=order;
+   else newsState.sellStopOrder=order;
+   newsState.stopRequestTime=TimeCurrent();
+   NewsHedgeSaveState();
+   PrintFormat("[消息双Stop] %s创建请求已受理 order=%I64u ret=%u，等待服务器订单确认",
+               side>0?"BUY":"SELL",order,retcode);
+   return true;
+}
+
+void NewsRequestStopDelete(int side,ulong ticket)
+{
+   if(ticket==0 || !OrderSelect(ticket)) return;
+   datetime now=TimeCurrent();
+   bool pending=side>0 ? newsState.buyStopDeletePending : newsState.sellStopDeletePending;
+   datetime last=side>0 ? newsState.buyStopDeleteTime : newsState.sellStopDeleteTime;
+   if(last>0 && now-last<5) return;
+   newsStopTrade.SetExpertMagicNumber(消息双Stop挂单Magic);
+   bool sent=newsStopTrade.OrderDelete(ticket);
+   uint retcode=newsStopTrade.ResultRetcode();
+   bool accepted=(sent && IsTradeRetcodeAccepted(retcode));
+   if(side>0)
+   {
+      newsState.buyStopDeletePending=accepted;
+      newsState.buyStopDeleteTime=now;
+   }
+   else
+   {
+      newsState.sellStopDeletePending=accepted;
+      newsState.sellStopDeleteTime=now;
+   }
+   PrintFormat("[消息双Stop] %s撤单请求 order=%I64u accepted=%d ret=%u %s",
+               side>0?"BUY":"SELL",ticket,accepted,retcode,newsStopTrade.ResultComment());
+   NewsHedgeSaveState();
+}
+
+bool NewsStopOrderCancellationConfirmed(ulong ticket)
+{
+   if(ticket==0) return true;
+   if(OrderSelect(ticket)) return false;
+   if(!HistoryOrderSelect(ticket)) return false;
+   ENUM_ORDER_STATE state=(ENUM_ORDER_STATE)HistoryOrderGetInteger(ticket,ORDER_STATE);
+   return (state==ORDER_STATE_CANCELED || state==ORDER_STATE_EXPIRED || state==ORDER_STATE_REJECTED);
+}
+
+void NewsStopSetFault(string reason)
+{
+   newsState.stopStage=消息双Stop_故障;
+   消息对冲状态="双Stop故障，需人工处理: "+reason;
+   lastStatus=消息对冲状态;
+   Print("[消息双Stop安全] "+消息对冲状态);
+   NewsHedgeSaveState();
+}
+
+void NewsAdoptStopPair(ulong buyTicket,ulong sellTicket)
+{
+   if(!NewsPairValid(buyTicket,sellTicket))
+   {
+      NewsStopSetFault("双边成交但手数或身份无法安全配对");
+      return;
+   }
+   newsState.buyTicket=buyTicket;
+   newsState.sellTicket=sellTicket;
+   newsState.runnerTicket=0;
+   newsState.loserTicket=0;
+   newsState.runnerPositionId=0;
+   newsState.loserPositionId=0;
+   newsState.runnerRiskReady=false;
+   newsState.actualRunnerRiskSL=0.0;
+   newsState.buyPositionId=NewsPositionIdentifier(buyTicket);
+   newsState.sellPositionId=NewsPositionIdentifier(sellTicket);
+   if(PositionSelectByTicket(buyTicket)) newsState.buyOpenPrice=PositionGetDouble(POSITION_PRICE_OPEN);
+   if(PositionSelectByTicket(sellTicket)) newsState.sellOpenPrice=PositionGetDouble(POSITION_PRICE_OPEN);
+   newsState.pairTime=TimeCurrent();
+   newsState.stage=消息阶段_箱体冻结;
+   newsState.stopStage=消息双Stop_空闲;
+   newsState.releaseEnabled=false;
+   NewsMaintainPairStructureSL();
+   NewsHedgeSaveState();
+   消息对冲状态="双Stop均已成交：保留等手数锁仓，已接入消息箱体状态机";
+   lastStatus=消息对冲状态;
+}
+
+void NewsAdoptSingleStopRunner(ulong ticket,int direction)
+{
+   if(!PositionSelectByTicket(ticket) || !NewsStopPositionSelected(direction))
+   {
+      NewsStopSetFault("单边成交仓身份校验失败");
+      return;
+   }
+   ENUM_POSITION_TYPE type=(ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+   double volume=PositionGetDouble(POSITION_VOLUME);
+   double openPrice=PositionGetDouble(POSITION_PRICE_OPEN);
+   double targetSL=direction>0 ? newsState.buyDisasterSL : newsState.sellDisasterSL;
+   double currentSL=PositionGetDouble(POSITION_SL);
+   if((currentSL<=0.0 || MoreProtective(type,targetSL,currentSL)) && SLTPValid(type,targetSL,0.0))
+      manageTrade.PositionModify(ticket,targetSL,0.0);
+   newsState.runnerTicket=ticket;
+   newsState.runnerPositionId=(ulong)PositionGetInteger(POSITION_IDENTIFIER);
+   newsState.runnerInitialVolume=volume;
+   newsState.breakoutDirection=direction;
+   newsState.breakoutPrice=openPrice;
+   newsState.unhedgePrice=openPrice;
+   newsState.unhedgeTime=TimeCurrent();
+   newsState.unhedgeTimeMs=GetTickCount64();
+   newsState.lastExtremeTimeMs=newsState.unhedgeTimeMs;
+   newsState.loserTicket=0;
+   newsState.loserPositionId=0;
+   newsState.loserDealReady=true;
+   newsState.loserActualKnown=true;
+   newsState.loserDealNetMoney=0.0;
+   newsState.pendingLoserLossMoney=0.0;
+   newsState.stage=消息阶段_冲击持仓;
+   newsState.stopStage=消息双Stop_单边托管;
+   NewsHedgeSaveState();
+   消息对冲状态=StringFormat("双Stop单边%s成交：另一边已确认撤销，交给现有runner托管",direction>0?"BUY":"SELL");
+   lastStatus=消息对冲状态;
+}
+
+void NewsReconcileStopDeployment()
+{
+   if(newsState.stopToken<=0 || newsState.stopStage==消息双Stop_空闲 ||
+      newsState.stopStage==消息双Stop_故障) return;
+   int previousStopStage=newsState.stopStage;
+   bool wasSingleRunner=(newsState.stopStage==消息双Stop_单边托管);
+   NewsRecoverStopPositionIds();
+   int buyOrderCount=0,sellOrderCount=0,buyPositionCount=0,sellPositionCount=0;
+   ulong buyOrder=NewsFindStopOrder(1,buyOrderCount);
+   ulong sellOrder=NewsFindStopOrder(-1,sellOrderCount);
+   ulong buyPosition=NewsFindStopPosition(1,buyPositionCount);
+   ulong sellPosition=NewsFindStopPosition(-1,sellPositionCount);
+   if(buyOrderCount>1 || sellOrderCount>1 || buyPositionCount>1 || sellPositionCount>1)
+   {
+      NewsStopSetFault("服务器上出现重复订单或仓位");
+      return;
+   }
+   if(buyOrder>0) newsState.buyStopOrder=buyOrder;
+   if(sellOrder>0) newsState.sellStopOrder=sellOrder;
+   if(buyOrder==0) newsState.buyStopDeletePending=false;
+   if(sellOrder==0) newsState.sellStopDeletePending=false;
+
+   bool anyPosition=(buyPositionCount+sellPositionCount>0);
+   if(anyPosition)
+   {
+      if(buyPositionCount==1 && sellPositionCount==1 && !NewsPairValid(buyPosition,sellPosition))
+      {
+         NewsStopSetFault("双边已成交但手数不等，禁止自动撤单或平仓");
+         return;
+      }
+      newsState.stopStage=消息双Stop_OCO撤单中;
+      if(buyOrder>0) NewsRequestStopDelete(1,buyOrder);
+      if(sellOrder>0) NewsRequestStopDelete(-1,sellOrder);
+      if(buyOrder>0 || sellOrder>0)
+      {
+         消息对冲状态="双Stop已触发，OCO撤销另一边等待服务器确认";
+         NewsHedgeSaveState();
+         return;
+      }
+      if(buyPositionCount==1 && sellPositionCount==1) NewsAdoptStopPair(buyPosition,sellPosition);
+      else if(buyPositionCount==1)
+      {
+         if(wasSingleRunner && newsState.breakoutDirection<0)
+         {
+            NewsStopSetFault("原SELL runner已不可见但BUY迟到成交，无法安全形成锁仓");
+            return;
+         }
+         bool sellNeverAccepted=(newsState.sellStopOrder==0 &&
+                                 (previousStopStage==消息双Stop_创建BUY待确认 ||
+                                  previousStopStage==消息双Stop_全部撤单中));
+         if(!sellNeverAccepted && !NewsStopOrderCancellationConfirmed(newsState.sellStopOrder))
+         {
+            newsState.stopStage=消息双Stop_OCO撤单中;
+            消息对冲状态="BUY已成交，对侧SELL订单尚未获得历史撤销/到期/拒绝确认";
+            lastStatus=消息对冲状态;
+            NewsHedgeSaveState();
+            return;
+         }
+         if(wasSingleRunner)
+         {
+            newsState.stopStage=消息双Stop_单边托管;
+            NewsHedgeSaveState();
+         }
+         else NewsAdoptSingleStopRunner(buyPosition,1);
+      }
+      else if(sellPositionCount==1)
+      {
+         if(wasSingleRunner && newsState.breakoutDirection>0)
+         {
+            NewsStopSetFault("原BUY runner已不可见但SELL迟到成交，无法安全形成锁仓");
+            return;
+         }
+         if(newsState.buyStopOrder==0 || !NewsStopOrderCancellationConfirmed(newsState.buyStopOrder))
+         {
+            newsState.stopStage=消息双Stop_OCO撤单中;
+            消息对冲状态="SELL已成交，对侧BUY订单尚未获得历史撤销/到期/拒绝确认";
+            lastStatus=消息对冲状态;
+            NewsHedgeSaveState();
+            return;
+         }
+         if(wasSingleRunner)
+         {
+            newsState.stopStage=消息双Stop_单边托管;
+            NewsHedgeSaveState();
+         }
+         else NewsAdoptSingleStopRunner(sellPosition,-1);
+      }
+      else NewsStopSetFault("成交仓方向无法唯一确定");
+      return;
+   }
+
+   datetime now=TimeCurrent();
+   bool expired=(newsState.stopExpireTime>0 && now>=newsState.stopExpireTime);
+   if(expired && newsState.stopStage!=消息双Stop_全部撤单中)
+      newsState.stopStage=消息双Stop_全部撤单中;
+   if(newsState.stopStage==消息双Stop_全部撤单中)
+   {
+      if(buyOrder>0) NewsRequestStopDelete(1,buyOrder);
+      if(sellOrder>0) NewsRequestStopDelete(-1,sellOrder);
+      if(buyOrder==0 && sellOrder==0)
+      {
+         bool buyConfirmed=NewsStopOrderCancellationConfirmed(newsState.buyStopOrder);
+         bool sellConfirmed=NewsStopOrderCancellationConfirmed(newsState.sellStopOrder);
+         if(buyConfirmed && sellConfirmed)
+         {
+            NewsHedgeReset(true);
+            消息对冲状态=expired?"双Stop已到期且服务器确认无遗留挂单":"用户取消已确认，无遗留挂单";
+            lastStatus=消息对冲状态;
+         }
+         else
+         {
+            消息对冲状态="双Stop活动单已不可见，仍等待历史订单确认撤销/到期";
+            lastStatus=消息对冲状态;
+            NewsHedgeSaveState();
+         }
+      }
+      else
+      {
+         消息对冲状态="双Stop撤单中，等待服务器确认";
+         NewsHedgeSaveState();
+      }
+      return;
+   }
+
+   NewsStopPreview preview;
+   NewsBuildFrozenStopPreview(preview);
+   if(newsState.stopStage==消息双Stop_创建BUY待确认)
+   {
+      if(buyOrder>0)
+      {
+         if(!preview.deployValid)
+         {
+            newsState.stopStage=消息双Stop_全部撤单中;
+            NewsHedgeSaveState();
+            NewsRequestStopDelete(1,buyOrder);
+            return;
+         }
+         newsState.stopStage=消息双Stop_创建SELL待确认;
+         newsState.stopRequestTime=now;
+         NewsHedgeSaveState();
+         if(!NewsSubmitStopOrder(-1,preview))
+         {
+            newsState.stopStage=消息双Stop_全部撤单中;
+            NewsHedgeSaveState();
+            NewsRequestStopDelete(1,buyOrder);
+         }
+      }
+      else if(now-newsState.stopRequestTime>=8)
+      {
+         newsState.stopStage=消息双Stop_全部撤单中;
+         NewsHedgeSaveState();
+      }
+      return;
+   }
+   if(newsState.stopStage==消息双Stop_创建SELL待确认)
+   {
+      if(buyOrder>0 && sellOrder>0)
+      {
+         newsState.stopStage=消息双Stop_已武装;
+         NewsHedgeSaveState();
+         消息对冲状态=StringFormat("双Stop ARMED | BUY #%I64u / SELL #%I64u",buyOrder,sellOrder);
+         lastStatus=消息对冲状态;
+      }
+      else if(now-newsState.stopRequestTime>=8)
+      {
+         newsState.stopStage=消息双Stop_全部撤单中;
+         NewsHedgeSaveState();
+         if(buyOrder>0) NewsRequestStopDelete(1,buyOrder);
+         if(sellOrder>0) NewsRequestStopDelete(-1,sellOrder);
+      }
+      return;
+   }
+   if(newsState.stopStage==消息双Stop_已武装 && (buyOrder==0 || sellOrder==0))
+   {
+      newsState.stopStage=消息双Stop_全部撤单中;
+      NewsHedgeSaveState();
+      if(buyOrder>0) NewsRequestStopDelete(1,buyOrder);
+      if(sellOrder>0) NewsRequestStopDelete(-1,sellOrder);
+   }
+}
+
+bool NewsDeployStopPair()
+{
+   if(!启用消息双Stop真实挂单)
+   {
+      lastStatus="消息双Stop参数开关已关闭，未发送任何订单";
+      return false;
+   }
+   bool magicConflict=(消息双Stop挂单Magic<=0 || 消息双Stop挂单Magic==手机标记挂单Magic ||
+                       消息双Stop挂单Magic==TEACHER_AUTO_SHORT_MAGIC ||
+                       (!只管理手动单 && 消息双Stop挂单Magic==指定管理Magic));
+   if(!IsHedgingAccount() || magicConflict)
+   {
+      lastStatus=!IsHedgingAccount() ? "双Stop部署拒绝：非Hedging账户" : "双Stop部署拒绝：Magic无效或与现有交易对象冲突";
+      return false;
+   }
+   if(newsState.stage!=消息阶段_箱体冻结 || !newsState.boxFrozenByUser || !newsState.boxValid ||
+      newsState.stopStage!=消息双Stop_空闲 || newsState.buyTicket>0 || newsState.sellTicket>0)
+   {
+      lastStatus="双Stop部署拒绝：阶段、箱体或已有消息仓不允许";
+      return false;
+   }
+   if(NewsHasAnyStrategyStopObject())
+   {
+      lastStatus="双Stop部署拒绝：服务器存在未对账的SMA_NSO订单或仓位，需人工处理";
+      return false;
+   }
+   NewsStopPreview preview;
+   NewsBuildFrozenStopPreview(preview);
+   if(!preview.deployValid)
+   {
+      lastStatus=preview.status;
+      return false;
+   }
+   newsState.stopToken=(long)TimeCurrent();
+   if(newsState.stopToken<=0) newsState.stopToken=1;
+   newsState.stopExpireTime=TimeCurrent()+MathMax(消息双Stop有效秒数,10);
+   newsState.stopRequestTime=TimeCurrent();
+   newsState.stopStage=消息双Stop_创建BUY待确认;
+   newsState.buyStopOrder=0;
+   newsState.sellStopOrder=0;
+   NewsHedgeSaveState();
+   if(!NewsSubmitStopOrder(1,preview))
+   {
+      newsState.stopStage=消息双Stop_空闲;
+      newsState.stopToken=0;
+      newsState.stopExpireTime=0;
+      NewsHedgeSaveState();
+      lastStatus="BUY Stop请求失败，未创建SELL Stop";
+      return false;
+   }
+   消息对冲状态="BUY Stop请求已受理，等待服务器确认后再创建SELL Stop";
+   lastStatus=消息对冲状态;
+   return true;
+}
+
+void NewsCancelStopDeployment()
+{
+   if(newsState.stopToken<=0)
+   {
+      lastStatus="当前没有本策略双Stop生命周期";
+      return;
+   }
+   int buyPositions=0,sellPositions=0;
+   NewsFindStopPosition(1,buyPositions);
+   NewsFindStopPosition(-1,sellPositions);
+   if(buyPositions+sellPositions>0 && newsState.stopStage==消息双Stop_空闲)
+   {
+      lastStatus="取消仅撤未成交挂单；已成交消息仓位保留并继续托管";
+      return;
+   }
+   newsState.stopStage=消息双Stop_全部撤单中;
+   NewsHedgeSaveState();
+   NewsReconcileStopDeployment();
 }
 
 ulong NewsPositionIdentifier(ulong ticket)
@@ -7055,6 +7630,55 @@ void NewsRequestGroupExit(string reason)
 
 bool NewsFreezeBoxByUser()
 {
+   if(newsState.stage == 消息阶段_待命 && 启用消息双Stop真实挂单)
+   {
+      if(!IsHedgingAccount())
+      {
+         lastStatus="冻结失败：双Stop只允许在Hedging账户使用";
+         return false;
+      }
+      ulong buyTicket=0,sellTicket=0;
+      int buyCount=0,sellCount=0;
+      NewsFindPairCandidates(buyTicket,sellTicket,buyCount,sellCount);
+      if(buyCount+sellCount>0 || NewsHasAnyStrategyStopObject())
+      {
+         消息对冲状态="冻结失败: 已有消息仓位或未对账的SMA_NSO对象";
+         lastStatus=消息对冲状态;
+         return false;
+      }
+      double atr=0.0;
+      GetATRPrice(atr);
+      double bid=SymbolInfoDouble(_Symbol,SYMBOL_BID);
+      double ask=SymbolInfoDouble(_Symbol,SYMBOL_ASK);
+      if(bid<=0.0 || ask<=bid) return false;
+      NewsHedgeReset(true);
+      newsState.adoptedTemplate=(int)配置_黄金消息对冲;
+      newsState.referencePrice=(bid+ask)*0.5;
+      newsState.atrAtPair=atr>0.0 ? atr : MathMax(GetRecentM1RangeAverage(14),_Point*10.0);
+      newsState.hardStopDistance=ClampDouble(newsState.atrAtPair*MathMax(消息对冲单边止损ATR倍数,0.10),
+                                             MathMax(消息对冲单边止损最小价格,0.10),
+                                             MathMax(消息对冲单边止损最大价格,消息对冲单边止损最小价格));
+      if(!NewsRefreshCandidateBox(true) || newsState.referencePrice<=newsState.rangeLow ||
+         newsState.referencePrice>=newsState.rangeHigh)
+      {
+         string reason=消息对冲箱体拒绝原因=="" ? "候选箱体无效" : 消息对冲箱体拒绝原因;
+         NewsHedgeReset(true);
+         消息对冲状态="冻结失败: "+reason;
+         lastStatus=消息对冲状态;
+         return false;
+      }
+      newsState.boxFrozenByUser=true;
+      newsState.boxFreezeTime=TimeCurrent();
+      newsState.stage=消息阶段_箱体冻结;
+      newsState.releaseEnabled=false;
+      NewsCalculateFrozenBuffers();
+      NewsHedgeSaveState();
+      NewsStopPreview preview;
+      NewsBuildFrozenStopPreview(preview);
+      消息对冲状态=preview.deployValid ? "箱体已冻结：风险预览有效，等待面板明确部署双Stop" : preview.status;
+      lastStatus=消息对冲状态;
+      return true;
+   }
    if(newsState.stage != 消息阶段_配对安全)
    {
       消息对冲状态 = "冻结不可用: 当前阶段" + NewsStageName();
@@ -7254,13 +7878,16 @@ bool NewsPairValid(ulong buyTicket, ulong sellTicket)
    if(!PositionSelectByTicket(buyTicket)) return false;
    double buyVol = PositionGetDouble(POSITION_VOLUME);
    datetime buyTime = (datetime)PositionGetInteger(POSITION_TIME);
+   bool stopBuy=NewsStopPositionSelected(1);
    if(!PositionSelectByTicket(sellTicket)) return false;
    double sellVol = PositionGetDouble(POSITION_VOLUME);
    datetime sellTime = (datetime)PositionGetInteger(POSITION_TIME);
+   bool stopSell=NewsStopPositionSelected(-1);
 
    double step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
    double volTolerance = MathMax(消息对冲手数容差, step * 0.5);
    if(MathAbs(buyVol - sellVol) > volTolerance) return false;
+   if(stopBuy && stopSell) return true;
    return (MathAbs((double)(buyTime - sellTime)) <= MathMax(消息对冲最大开仓时间差秒, 1));
 }
 
@@ -8527,6 +9154,7 @@ void ManageNewsHedge(double atr)
       lastStatus = 消息对冲状态;
       return;
    }
+   NewsReconcileStopDeployment();
    NewsTryPendingDeals();
 
    if(newsState.stage == 消息阶段_组合退出)
@@ -8545,6 +9173,19 @@ void ManageNewsHedge(double atr)
    if(newsState.stage == 消息阶段_冲击持仓 || newsState.stage == 消息阶段_延续持仓)
    {
       ManageNewsRunner(atr);
+      return;
+   }
+   if(newsState.stopStage==消息双Stop_创建BUY待确认 ||
+      newsState.stopStage==消息双Stop_创建SELL待确认 ||
+      newsState.stopStage==消息双Stop_已武装 ||
+      newsState.stopStage==消息双Stop_OCO撤单中 ||
+      newsState.stopStage==消息双Stop_全部撤单中 ||
+      newsState.stopStage==消息双Stop_故障) return;
+   if(newsState.stage==消息阶段_箱体冻结 && newsState.stopToken==0 &&
+      newsState.buyTicket==0 && newsState.sellTicket==0)
+   {
+      消息对冲状态="箱体已冻结：等待用户明确部署双Stop";
+      lastStatus=消息对冲状态;
       return;
    }
 
@@ -14142,10 +14783,17 @@ void DispatchCanvasPanelAction(PanelAction action)
       dirty=PANEL_DIRTY_RENDER;
    }
    else if(action==PANEL_ACTION_NEWS_FREEZE) { NewsFreezeBoxByUser(); dirty=PANEL_DIRTY_DATA|PANEL_DIRTY_RENDER; }
-   else if(action==PANEL_ACTION_NEWS_RELEASE) { NewsEnableRelease(); dirty=PANEL_DIRTY_DATA|PANEL_DIRTY_RENDER; }
+   else if(action==PANEL_ACTION_NEWS_RELEASE)
+   {
+      if(newsState.stage==消息阶段_箱体冻结 && newsState.buyTicket==0 && newsState.sellTicket==0)
+         NewsDeployStopPair();
+      else NewsEnableRelease();
+      dirty=PANEL_DIRTY_DATA|PANEL_DIRTY_RENDER;
+   }
    else if(action==PANEL_ACTION_NEWS_CANCEL)
    {
-      if(newsState.stage!=消息阶段_待命) NewsRequestGroupExit("用户取消本次消息");
+      if(newsState.stopToken>0) NewsCancelStopDeployment();
+      else if(newsState.stage!=消息阶段_待命) NewsRequestGroupExit("用户取消本次消息");
       else
       {
          NewsCloseEligiblePositions("用户取消本次消息");
@@ -14893,19 +15541,26 @@ void SyncCanvasNewsButtons(const HoldingPanelViewModel &model)
       return;
    }
    bool enabled[4];
-   enabled[0]=(newsState.stage==消息阶段_配对安全);
-   enabled[1]=(newsState.stage==消息阶段_箱体冻结 && newsState.boxFrozenByUser && newsState.boxValid);
-   enabled[2]=(newsState.stage!=消息阶段_待命 || newsState.waitTicket>0);
-   enabled[3]=(model.managedCount>0);
-   string texts[4]={enabled[0]?"冻结箱体":"冻结不可用",enabled[1]?"开放拆锁":"开放不可用","取消本次","消息紧急全平"};
+   bool preEntryFreeze=(启用消息双Stop真实挂单 && newsState.stage==消息阶段_待命 && !NewsHasAnyStrategyStopObject());
+   bool stopDeploy=(启用消息双Stop真实挂单 && newsState.stage==消息阶段_箱体冻结 &&
+                    newsState.boxFrozenByUser && newsState.boxValid && newsState.buyTicket==0 && newsState.sellTicket==0 &&
+                    newsState.stopStage==消息双Stop_空闲);
+   enabled[0]=(newsState.stage==消息阶段_配对安全 || preEntryFreeze);
+   bool manualRelease=(newsState.stage==消息阶段_箱体冻结 && newsState.boxFrozenByUser && newsState.boxValid &&
+                       newsState.buyTicket>0 && newsState.sellTicket>0);
+   enabled[1]=(stopDeploy || manualRelease);
+   enabled[2]=(newsState.stage!=消息阶段_待命 || newsState.waitTicket>0 || newsState.stopToken>0);
+   enabled[3]=(model.managedCount>0 || newsState.runnerTicket>0 || newsState.buyTicket>0 || newsState.sellTicket>0);
+   string texts[4]={enabled[0]?"冻结箱体":"冻结不可用",stopDeploy?"部署双Stop":(enabled[1]?"开放拆锁":"开放不可用"),"取消本次","消息紧急全平"};
    string signature=StringFormat("%d|%d|%d|%I64u|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d",
                                  CanvasPanelState.panelX,CanvasPanelState.panelY,(int)newsState.stage,newsState.waitTicket,model.managedCount,
                                  enabled[0],enabled[1],enabled[2],enabled[3],
                                  CanvasPanelLayout.newsButtons[0].x,CanvasPanelLayout.newsButtons[0].y,CanvasPanelLayout.newsButtons[0].w,CanvasPanelLayout.newsButtons[0].h,
                                  CanvasPanelLayout.newsButtons[1].x,CanvasPanelLayout.newsButtons[1].y,CanvasPanelLayout.newsButtons[1].w,CanvasPanelLayout.newsButtons[1].h,
                                  CanvasPanelLayout.newsButtons[2].x,CanvasPanelLayout.newsButtons[2].y,CanvasPanelLayout.newsButtons[2].w,CanvasPanelLayout.newsButtons[2].h,
-                                 CanvasPanelLayout.newsButtons[3].x,CanvasPanelLayout.newsButtons[3].y,CanvasPanelLayout.newsButtons[3].w,CanvasPanelLayout.newsButtons[3].h,
-                                 newsState.boxFrozenByUser,newsState.boxValid);
+                                  CanvasPanelLayout.newsButtons[3].x,CanvasPanelLayout.newsButtons[3].y,CanvasPanelLayout.newsButtons[3].w,CanvasPanelLayout.newsButtons[3].h,
+                                  newsState.boxFrozenByUser,newsState.boxValid);
+   signature+="|"+IntegerToString(newsState.stopStage)+"|"+texts[1];
    bool allAlive=true;
    for(int i=0;i<4;i++) if(ObjectFind(0,names[i])<0) { allAlive=false; break; }
    if(CanvasNewsButtonsVisible && allAlive && signature==CanvasNewsButtonsSignature) return;
@@ -18120,12 +18775,18 @@ void ShowPanel()
     if(当前模板使用消息对冲())
     {
        int newsButtonY = 98;
-      bool freezeEnabled = (newsState.stage == 消息阶段_配对安全);
-      bool releaseEnabled = (newsState.stage == 消息阶段_箱体冻结 && newsState.boxFrozenByUser && newsState.boxValid);
-      bool cancelEnabled = (newsState.stage != 消息阶段_待命 || newsState.waitTicket > 0);
-      bool flatEnabled = (managed > 0);
+      bool preEntryFreeze = (启用消息双Stop真实挂单 && newsState.stage == 消息阶段_待命 && !NewsHasAnyStrategyStopObject());
+      bool freezeEnabled = (newsState.stage == 消息阶段_配对安全 || preEntryFreeze);
+      bool stopDeploy = (启用消息双Stop真实挂单 && newsState.stage == 消息阶段_箱体冻结 &&
+                         newsState.boxFrozenByUser && newsState.boxValid && newsState.buyTicket==0 && newsState.sellTicket==0 &&
+                         newsState.stopStage==消息双Stop_空闲);
+      bool manualRelease = (newsState.stage == 消息阶段_箱体冻结 && newsState.boxFrozenByUser && newsState.boxValid &&
+                            newsState.buyTicket>0 && newsState.sellTicket>0);
+      bool releaseEnabled = (stopDeploy || manualRelease);
+      bool cancelEnabled = (newsState.stage != 消息阶段_待命 || newsState.waitTicket > 0 || newsState.stopToken>0);
+      bool flatEnabled = (managed > 0 || newsState.runnerTicket>0 || newsState.buyTicket>0 || newsState.sellTicket>0);
       CreatePanelButton("SMA_BTN_NEWS_FREEZE", freezeEnabled ? "冻结箱体" : "冻结不可用", 12, newsButtonY, 112, 24, freezeEnabled);
-      CreatePanelButton("SMA_BTN_NEWS_RELEASE", releaseEnabled ? "开放拆锁" : "开放不可用", 130, newsButtonY, 112, 24, releaseEnabled);
+      CreatePanelButton("SMA_BTN_NEWS_RELEASE", stopDeploy ? "部署双Stop" : (releaseEnabled ? "开放拆锁" : "开放不可用"), 130, newsButtonY, 112, 24, releaseEnabled);
       CreatePanelButton("SMA_BTN_NEWS_CANCEL", "取消本次", 248, newsButtonY, 106, 24, cancelEnabled);
       CreatePanelButton("SMA_BTN_NEWS_FLAT", "消息紧急全平", 360, newsButtonY, 128, 24, flatEnabled);
       finalPanelHeight = MathMax(finalPanelHeight, newsButtonY+34);
@@ -18357,6 +19018,8 @@ int OnInit()
 
    manageTrade.SetDeviationInPoints(30);
    markerTrade.SetDeviationInPoints(30);
+   newsStopTrade.SetExpertMagicNumber(消息双Stop挂单Magic);
+   newsStopTrade.SetDeviationInPoints(MathMax(消息对冲允许滑点点数,0));
    teacherAutoTrade.SetExpertMagicNumber(TEACHER_AUTO_SHORT_MAGIC);
    teacherAutoTrade.SetDeviationInPoints(30);
    ChartSetInteger(0, CHART_EVENT_MOUSE_MOVE, true);
@@ -18379,6 +19042,7 @@ int OnInit()
    for(int i=0; i<ArraySize(states); i++) ReconcilePendingTradeAction(i);
    TradeJournalImportAvailableHistory();
    EventSetTimer(1);
+   NewsReconcileStopDeployment();
    RefreshMarketStructureCaches(true);
    ManageMobileMarkerOrders(true);
    RefreshPanel(true);
@@ -19555,10 +20219,16 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
       if(sparam == "SMA_BTN_NEWS_FREEZE")
          NewsFreezeBoxByUser();
       else if(sparam == "SMA_BTN_NEWS_RELEASE")
-         NewsEnableRelease();
+      {
+         if(newsState.stage==消息阶段_箱体冻结 && newsState.buyTicket==0 && newsState.sellTicket==0)
+            NewsDeployStopPair();
+         else NewsEnableRelease();
+      }
       else if(sparam == "SMA_BTN_NEWS_CANCEL")
       {
-         if(newsState.stage != 消息阶段_待命)
+         if(newsState.stopToken>0)
+            NewsCancelStopDeployment();
+         else if(newsState.stage != 消息阶段_待命)
             NewsRequestGroupExit("用户取消本次消息");
          else
          {
@@ -19922,6 +20592,20 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
       return;
    }
    ENUM_DEAL_ENTRY dealEntry = (ENUM_DEAL_ENTRY)HistoryDealGetInteger(trans.deal, DEAL_ENTRY);
+   if((dealEntry==DEAL_ENTRY_IN || dealEntry==DEAL_ENTRY_INOUT) &&
+      HistoryDealGetString(trans.deal,DEAL_SYMBOL)==_Symbol &&
+      (long)HistoryDealGetInteger(trans.deal,DEAL_MAGIC)==消息双Stop挂单Magic && newsState.stopToken>0)
+   {
+      string stopComment=HistoryDealGetString(trans.deal,DEAL_COMMENT);
+      if(NewsStopCommentMatches(stopComment,1)) newsState.buyPositionId=dealPositionId;
+      else if(NewsStopCommentMatches(stopComment,-1)) newsState.sellPositionId=dealPositionId;
+      else
+      {
+         NewsStopSetFault("收到本Magic入场Deal，但comment与当前配对令牌不匹配");
+         return;
+      }
+      NewsHedgeSaveState();
+   }
    bool teacherAutoEntryDeal =
       HistoryDealGetString(trans.deal, DEAL_SYMBOL) == _Symbol &&
       (long)HistoryDealGetInteger(trans.deal, DEAL_MAGIC) == TEACHER_AUTO_SHORT_MAGIC &&
@@ -19976,6 +20660,7 @@ void OnTimer()
    CleanupConfirmedEntryTemplateStamps();
    FlushAllDirtyShortStates(false);
    TradeJournalWriteSnapshots();
+   NewsReconcileStopDeployment();
    NewsTryPendingDeals();
    NewsReconcileRunnerPartial(true);
    NewsManageClock();
