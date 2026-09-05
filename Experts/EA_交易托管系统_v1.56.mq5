@@ -1291,6 +1291,86 @@ struct TeacherAutoEntryState
 };
 TeacherAutoEntryState teacherAutoEntryState;
 
+string TeacherAutoStateKey(string field)
+{
+   return StringFormat("S55.AUTO.%I64d.%s.%s", AccountInfoInteger(ACCOUNT_LOGIN), _Symbol, field);
+}
+
+double TeacherAutoStateRead(string field, double fallback=0.0)
+{
+   string key = TeacherAutoStateKey(field);
+   return GlobalVariableCheck(key) ? GlobalVariableGet(key) : fallback;
+}
+
+void TeacherAutoStateWriteUlong(string field, const ulong value)
+{
+   GlobalVariableSet(TeacherAutoStateKey(field+"L"), (double)(uint)(value & 0xFFFFFFFF));
+   GlobalVariableSet(TeacherAutoStateKey(field+"H"), (double)(uint)(value >> 32));
+}
+
+ulong TeacherAutoStateReadUlong(string field)
+{
+   ulong low = (ulong)MathRound(TeacherAutoStateRead(field+"L"));
+   ulong high = (ulong)MathRound(TeacherAutoStateRead(field+"H"));
+   return (high << 32) | (low & 0xFFFFFFFF);
+}
+
+void TeacherAutoClearPendingStateFields()
+{
+   teacherAutoEntryState.pending = false;
+   teacherAutoEntryState.pendingDirection = 0;
+   teacherAutoEntryState.pendingLevel = 0.0;
+   teacherAutoEntryState.pendingVolume = 0.0;
+   teacherAutoEntryState.pendingSignalBarTime = 0;
+   teacherAutoEntryState.pendingRequestTime = 0;
+   teacherAutoEntryState.pendingOrder = 0;
+   teacherAutoEntryState.pendingDeal = 0;
+}
+
+void TeacherAutoStateSave()
+{
+   GlobalVariableSet(TeacherAutoStateKey("V"), 1.0);
+   GlobalVariableSet(TeacherAutoStateKey("P"), teacherAutoEntryState.pending ? 1.0 : 0.0);
+   GlobalVariableSet(TeacherAutoStateKey("PD"), teacherAutoEntryState.pendingDirection);
+   GlobalVariableSet(TeacherAutoStateKey("PL"), teacherAutoEntryState.pendingLevel);
+   GlobalVariableSet(TeacherAutoStateKey("PV"), teacherAutoEntryState.pendingVolume);
+   GlobalVariableSet(TeacherAutoStateKey("PS"), (double)teacherAutoEntryState.pendingSignalBarTime);
+   GlobalVariableSet(TeacherAutoStateKey("PR"), (double)teacherAutoEntryState.pendingRequestTime);
+   TeacherAutoStateWriteUlong("PO", teacherAutoEntryState.pendingOrder);
+   TeacherAutoStateWriteUlong("PE", teacherAutoEntryState.pendingDeal);
+   GlobalVariableSet(TeacherAutoStateKey("RR"), teacherAutoEntryState.rearmRequired ? 1.0 : 0.0);
+   GlobalVariableSet(TeacherAutoStateKey("LD"), teacherAutoEntryState.lastDirection);
+   GlobalVariableSet(TeacherAutoStateKey("LL"), teacherAutoEntryState.lastLevel);
+   GlobalVariableSet(TeacherAutoStateKey("LT"), (double)teacherAutoEntryState.lastEntryTime);
+}
+
+void TeacherAutoStateLoad()
+{
+   ZeroMemory(teacherAutoEntryState);
+   if((int)MathRound(TeacherAutoStateRead("V")) != 1) return;
+
+   teacherAutoEntryState.pending = TeacherAutoStateRead("P") > 0.5;
+   teacherAutoEntryState.pendingDirection = (int)MathRound(TeacherAutoStateRead("PD"));
+   teacherAutoEntryState.pendingLevel = TeacherAutoStateRead("PL");
+   teacherAutoEntryState.pendingVolume = TeacherAutoStateRead("PV");
+   teacherAutoEntryState.pendingSignalBarTime = (datetime)MathRound(TeacherAutoStateRead("PS"));
+   teacherAutoEntryState.pendingRequestTime = (datetime)MathRound(TeacherAutoStateRead("PR"));
+   teacherAutoEntryState.pendingOrder = TeacherAutoStateReadUlong("PO");
+   teacherAutoEntryState.pendingDeal = TeacherAutoStateReadUlong("PE");
+   teacherAutoEntryState.rearmRequired = TeacherAutoStateRead("RR") > 0.5;
+   teacherAutoEntryState.lastDirection = (int)MathRound(TeacherAutoStateRead("LD"));
+   teacherAutoEntryState.lastLevel = TeacherAutoStateRead("LL");
+   teacherAutoEntryState.lastEntryTime = (datetime)MathRound(TeacherAutoStateRead("LT"));
+
+   if(teacherAutoEntryState.pending &&
+      (teacherAutoEntryState.pendingDirection != POSITION_TYPE_BUY &&
+       teacherAutoEntryState.pendingDirection != POSITION_TYPE_SELL))
+   {
+      TeacherAutoClearPendingStateFields();
+      teacherAutoEntryState.rearmRequired = true;
+   }
+}
+
 struct TeacherMarkerOrderInfo
 {
    ulong ticket;
