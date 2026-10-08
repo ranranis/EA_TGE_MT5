@@ -18,6 +18,7 @@
 !/Experts/.codex/
 /Experts/.codex/*
 !/Experts/.codex/config.toml
+!/Experts/.codex/PROJECT_PROMPT.md
 !/Experts/.codex/skills/
 !/Experts/.codex/skills/**
 !/Experts/docs/

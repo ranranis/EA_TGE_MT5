@@ -26,6 +26,7 @@ metadata:
    - Global Variables、旧版本恢复和日志：[`references/persistence.md`](references/persistence.md)
    - Canvas、统计、CSV、图表对象和性能：[`references/ui-observability.md`](references/ui-observability.md)
    - 修改路由、任务文档和更新/交付检查：[`references/maintenance-map.md`](references/maintenance-map.md)
+   - 本文件夹中的 `references/trade-lifecycle.md` 是当前项目交易生命周期的唯一详细权威；通用维护 Skill 中的同名文件只保留入口说明。
 4. 修改前给出“允许改什么、保持什么、回归风险是什么”的调用链摘要。平仓、分批、SL/TP、保本、回撤、结构追踪、消息拆锁/runner、手机真实挂单、Netting 反转、Deal 归属、重启恢复或新增真实订单属于高风险；按 `AGENTS.md` 先展示最小方案并等待一次明确确认。
 
 ## 不可破坏的项目边界

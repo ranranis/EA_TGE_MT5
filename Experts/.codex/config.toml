@@ -1,0 +1,25 @@
+# MT5 development connections. Tokens are read from Windows user environment variables.
+
+[mcp_servers.metaeditor]
+url = "http://127.0.0.1:22345/mcp"
+enabled = true
+bearer_token_env_var = "MT5_METAEDITOR_MCP_TOKEN"
+startup_timeout_sec = 20
+tool_timeout_sec = 120
+enabled_tools = ["get_workspace_info", "get_time_information", "list_directory", "find_files_by_glob", "find_files_by_name_keyword", "read_file", "read_binary_file", "read_file_by_lines", "search_text", "search_regex", "compile_file", "syntax_check", "list_open_documents"]
+
+[mcp_servers.terminal]
+url = "http://127.0.0.1:22344/mcp"
+enabled = true
+bearer_token_env_var = "MT5_TERMINAL_MCP_TOKEN"
+startup_timeout_sec = 20
+tool_timeout_sec = 1800
+enabled_tools = ["get_workspace_info", "get_time_information", "list_available_mql5_programs", "get_expert_advisor_parameters", "get_trading_account_info", "get_trading_open_positions", "get_trading_history_orders", "get_trading_history_positions", "get_marketwatch_symbols", "tester_run_backtest", "tester_run_optimization", "tester_get_status", "tester_stop", "tester_wait", "tester_get_configuration", "tester_prepare_config", "tester_prepare_inputs", "tester_get_report", "get_terminal_journal", "get_expert_journal", "get_tester_journal", "list_directory", "find_files_by_glob", "find_files_by_name_keyword", "read_file", "read_file_by_lines", "search_text", "search_regex"]
+
+[mcp_servers.marketdata]
+url = "https://www.metatrader.com/mcp"
+enabled = true
+bearer_token_env_var = "MT5_MARKETDATA_MCP_TOKEN"
+startup_timeout_sec = 20
+tool_timeout_sec = 60
+enabled_tools = ["marketdata_symbol_search", "marketdata_symbol_history", "marketdata_symbol_holdings", "marketdata_symbol_income_statement", "marketdata_symbol_news", "marketdata_symbol_get"]
