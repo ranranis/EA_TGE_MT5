@@ -40,3 +40,11 @@ _backups/
 Backups/
 _release/
 .codex/backups/
+
+# Track maintained regression scripts and source review evidence.
+!/Experts/_dev/
+/Experts/_dev/*
+!/Experts/_dev/tests/
+/Experts/_dev/tests/*
+!/Experts/_dev/tests/*.cjs
+!/Experts/_dev/full-review-20260915.md

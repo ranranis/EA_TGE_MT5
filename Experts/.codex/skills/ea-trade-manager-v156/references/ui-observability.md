@@ -1,5 +1,9 @@
 # Canvas、图表对象、CSV、统计与性能
 
+2026-09-15 结构提取：`CanvasDirectionColor`至`RefreshCanvasPanelByDirtyFlags`原文移入 `Include/UI/CanvasPanel.mqh`，主文件原位include，类型及Renderer仍在主文件。`ClassifySRTradingIntent`按需共享本次完整四根M1，部分历史继续重试；不跨调用缓存。
+
+2026-09-15 性能修订：主文件 `OnTick` 不再直接执行周期面板刷新/结构绘图，`OnTimer` 保留原周期刷新，`OnChartEvent` 保留即时点击反馈。`ApplyPanelConfigTemplate` 不清空旧模板缓存、不重复创建参数未变的M1 ATR，不在点击内同步手机订单。`RefreshMarketStructureCaches` 命中有效缓存时不重复复制保存数组。`CPanelRenderer::Ellipsize` 改二分宽度探测并去除调用方重复FontSet。`SupportResistance.mqh::AddDensityLevelsByM1PriceBuckets` 改有界直接索引，保留首次出现/同分顺序，跨度过大或索引分配失败回退原搜索。新增PERF `TemplateSwitch/MobileMarkers/OnChartEvent`；默认仍关闭。离线模型对照不代表MT5实测延迟；未做实盘加载或视觉验收。
+
 证据核对：2026-09-04；正式主文件 Canvas 区约 1861-17857，事件区 18986-19534；直接 Include 的日志/统计实现也属于维护范围。显示信息不是服务器事实；任何能触发交易的按钮按高风险逻辑审查。
 
 ## Canvas 视图链

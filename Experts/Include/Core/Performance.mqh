@@ -15,6 +15,9 @@ enum PerformanceMetric
    PERF_HISTORY_QUERY,
    PERF_TRADE_JOURNAL,
    PERF_ON_TRADE_TRANSACTION,
+   PERF_TEMPLATE_SWITCH,
+   PERF_MOBILE_MARKERS,
+   PERF_ON_CHART_EVENT,
    PERF_METRIC_COUNT
 };
 
@@ -42,6 +45,9 @@ string PerformanceMetricName(int metric)
    if(metric == PERF_HISTORY_QUERY) return "HistoryQuery";
    if(metric == PERF_TRADE_JOURNAL) return "TradeJournal";
    if(metric == PERF_ON_TRADE_TRANSACTION) return "OnTradeTransaction";
+   if(metric == PERF_TEMPLATE_SWITCH) return "TemplateSwitch";
+   if(metric == PERF_MOBILE_MARKERS) return "MobileMarkers";
+   if(metric == PERF_ON_CHART_EVENT) return "OnChartEvent";
    return "Unknown";
 }
 

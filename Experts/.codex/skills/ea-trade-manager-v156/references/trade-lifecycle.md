@@ -1,5 +1,11 @@
 # 交易生命周期、请求确认与结算
 
+2026-09-15 五项风险修复：`ReconcilePendingTradeAction`快保确认必须实际SL和目标为有限正价，按BUY/SELL方向确认；两个普通超时补录先`SnapshotSelectedDealTickets`，再调用会重选历史的`ShortRecordDeal`，历史读取失败/空列表不解锁。`TradeJournalWriteDeal`返回实际写入/flush成功，启动导入仅完整成功才标记完成。`FinalizeTradeLifecycle`要求仓位不存在、分段入口有效、入出量匹配后写Summary，检查FileWrite/FileFlush并在CSV成功GV失败重试时识别完整已有行。原始信号/手数/阈值未改；旧GV导入/汇总标记及历史坏记录未自动重写。原报告中的中风险请求超时/归属等问题不等同本次五项全部消除。
+
+2026-09-13 五仓修订：主文件 `TeacherAutoFindPendingPosition/ConfirmEntryDeal` 精确关联Deal订单、position id或唯一comment；残余服务器订单期间不结束pending，避免旧仓误确认第五笔。`TeacherAutoFinalOrderReconciled` 对超时最终订单进一步核对真实入/出量，FILLED无Deal继续等待；TIMEOUT/CONNECTION/ERROR不按拒绝补发。固定手数逐单验证，搜索与提交前都过 `TeacherActiveCanOpen`，最多5笔仅指当前品种老师仓位，非Hedging不发积极新单；其他手动/策略交易仍隔离。独占句柄防同终端重复实例，不保证多个终端/VPS共用账户的并发行为，不能把离线模拟视为券商验收。
+
+2026-09-13 老师积极策略：新单comment `TEACHER_ACTIVE_1/2/3`，沿用老师Magic及 `SubmitTeacherAutoReversal` pending链。`EnsureState` 只在真实仓位存在时识别积极管理并通过TAP持久化；分批仍由 `SubmitManagedPartialClose` 请求及 `ShortRecordDeal` 真实退出累计，未提前写分批完成。AX/AC/AB在请求前消耗（拒绝也计尝试），不代表成交；新单继续受live/pending/当前品种其他交易限制。`TeacherActiveRefreshRisk` 按入场Magic＋position id归属完整退出，保留费用，分批不算连败，最新事件Deal不可读时门禁不放行，Timer重试；本模块外部净额反转不猜归属。尚未实测延迟/部分成交/重启和多实例；只在同品种单实例下验证设计。
+
 证据核对：2026-09-04；正式源码 `EA_交易托管系统_v1.56.mq5`。行号是辅助锚点，定位时同时搜索函数名。这里的“已实现”描述源码路径，不等于已在真实券商环境验收。
 
 ## 身份和管理范围

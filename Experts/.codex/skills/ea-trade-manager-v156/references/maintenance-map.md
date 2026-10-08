@@ -1,5 +1,11 @@
 # 维护地图、证据来源与更新协议
 
+2026-09-15 已授权五项修复入口：主文件快保确认/两个超时补录，StateStore V7，TradeJournal ticket快照与写入返回值，TradeSummary完整退出/写入及已有行检查，Trading/MobileMarkerSafety撤单等待跨重启。测试 `_dev/tests/trade-risk-regression.cjs`；旧全审报告保留历史发现并在顶部注明已处理边界。
+
+2026-09-13 多仓补充：`TeacherActiveCanOpen/Range/RecordTouch`、`TeacherAutoFindPendingPosition/PendingOrderFinal/FinalOrderReconciled` 是当前五仓和请求确认定位入口。当前修订不新增TicketState字段，PM/AT在主文件AUTO键空间；对应风险、生命周期、持久化和手机老师文档已同步。离线测试扩展固定0.01、5仓封顶、Netting禁止、旧仓误确认、残余订单和震荡识别场景。
+
+2026-09-13 老师积极交易路由补充：正式主文件17B inputs、`TeacherActiveContext/FindCandidate/BuildOrder/RefreshRisk/ManageTeacherActivePosition`，逐仓 `teacherActivePlan` 对应StateStore可选TAP；`_dev/tests/teacher-active-regression.cjs` 提取源码表达式做确定性模拟检查，不能替代MetaEditor编译/MT5回测。对应机制已同步本目录architecture/mobile-markers/risk-management/persistence/trade-lifecycle；后文旧行号仅作历史辅助。
+
 证据核对：2026-09-04；本文件记录如何接手当前 v1.56，不把历史文档或副本冒充现行源码。行号会漂移，所以每个定位都同时保留“文件 + 符号/搜索词 + 当前辅助行号”。
 
 ## 快速定位表

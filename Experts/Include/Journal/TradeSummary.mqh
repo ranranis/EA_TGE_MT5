@@ -11,11 +11,42 @@ bool TradeJournalSummaryWritten(ulong positionIdentifier)
    return positionIdentifier > 0 && GlobalVariableCheck(TradeSummaryKey(positionIdentifier));
 }
 
+// Called only after full history reconciliation, with the journal's writer lock held.
+// Covers a crash/failed GV commit after a complete CSV row was already flushed.
+bool FindCompleteTradeSummaryRecord(int handle,ulong id,ulong lastDeal,int columns,bool &found)
+{
+   found=false;
+   if(!FileSeek(handle,0,SEEK_SET)) return false;
+   while(!FileIsEnding(handle))
+   {
+      int column=0;
+      string account="",position="",symbol="",exitDeal="";
+      while(!FileIsEnding(handle))
+      {
+         ResetLastError();
+         string value=FileReadString(handle);
+         if(GetLastError()!=0) return false;
+         if(column==1) account=value;
+         else if(column==2) position=value;
+         else if(column==3) symbol=value;
+         else if(column==33) exitDeal=value;
+         column++;
+         if(FileIsLineEnding(handle)) break;
+      }
+      if(column==columns && account==(string)AccountInfoInteger(ACCOUNT_LOGIN) &&
+         position==(string)id && symbol==_Symbol && exitDeal==(string)lastDeal)
+      { found=true; break; }
+   }
+   return FileSeek(handle,0,SEEK_END);
+}
+
 // 仓位消失后才汇总历史Deal；成功写入一行Summary后才允许清理持久化状态。
 bool FinalizeTradeLifecycle(int stateIdx)
 {
    PerformanceScope perfScope(PERF_HISTORY_QUERY);
    if(stateIdx < 0 || stateIdx >= ArraySize(states)) return false;
+   if(states[stateIdx].positionIdentifier==0 ||
+      FindOpenPositionTicketByIdentifier(states[stateIdx].positionIdentifier)>0) return false;
    FinalizeFloatingPnlTiming(stateIdx);
    TicketState st = states[stateIdx];
    if(st.tradeFinalized || TradeJournalSummaryWritten(st.positionIdentifier))
@@ -33,10 +64,13 @@ bool FinalizeTradeLifecycle(int stateIdx)
    ulong lastExitDeal=0;
    double lastExitPrice=0.0;
    long actualExitReason=0;
+   bool segmentEntrySeen=(!st.nettingReversalDetected || st.lifecycleSegmentStartTime<=0);
    for(int i=0; i<HistoryDealsTotal(); i++)
    {
       ulong deal = HistoryDealGetTicket(i);
-      if(deal == 0) continue;
+      if(deal == 0) return false;
+      if((ulong)HistoryDealGetInteger(deal,DEAL_POSITION_ID)!=st.positionIdentifier ||
+         HistoryDealGetString(deal,DEAL_SYMBOL)!=_Symbol) return false;
       ENUM_DEAL_ENTRY entry = (ENUM_DEAL_ENTRY)HistoryDealGetInteger(deal, DEAL_ENTRY);
       double vol = HistoryDealGetDouble(deal, DEAL_VOLUME);
       double price = HistoryDealGetDouble(deal, DEAL_PRICE);
@@ -44,6 +78,7 @@ bool FinalizeTradeLifecycle(int stateIdx)
       if(st.lifecycleSegmentStartTime > 0 && time < st.lifecycleSegmentStartTime) continue;
       bool reversalEntry = (st.nettingReversalDetected && entry == DEAL_ENTRY_INOUT &&
                             st.lifecycleSegmentStartTime > 0 && MathAbs((long)(time-st.lifecycleSegmentStartTime)) <= 2);
+      if(reversalEntry) segmentEntrySeen=true;
       if(!reversalEntry)
       {
          double dealProfit = HistoryDealGetDouble(deal, DEAL_PROFIT);
@@ -79,6 +114,12 @@ bool FinalizeTradeLifecycle(int stateIdx)
       }
    }
    if(entryVolume <= 0.0 || exitVolume <= 0.0 || lastExit == 0) return false;
+   double volumeStep=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_STEP);
+   if(volumeStep<=0.0 || !MathIsValidNumber(entryVolume) || !MathIsValidNumber(exitVolume)) return false;
+   double volumeTolerance=volumeStep*0.5;
+   if(!segmentEntrySeen || entryVolume+volumeTolerance<st.initialVolume ||
+      MathAbs(exitVolume-entryVolume)>volumeTolerance) return false;
+   if(FindOpenPositionTicketByIdentifier(st.positionIdentifier)>0) return false;
    if(states[stateIdx].pendingAction == 待确认动作_全部平仓)
    {
       TradeJournalWriteLifecycle(stateIdx, "FULL_CLOSE_FILL",
@@ -130,7 +171,16 @@ bool FinalizeTradeLifecycle(int stateIdx)
                      "max_lifecycle_profit_money","max_lifecycle_loss_money"};
    int handle = TradeJournalOpen("TradeSummary", header);
    if(handle == INVALID_HANDLE) return false;
-   FileWrite(handle, TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS), (string)AccountInfoInteger(ACCOUNT_LOGIN),
+   bool alreadyWritten=false;
+   if(!FindCompleteTradeSummaryRecord(handle,st.positionIdentifier,lastExitDeal,ArraySize(header),alreadyWritten))
+   {
+      FileClose(handle);
+      return false;
+   }
+   ResetLastError();
+   uint written=1;
+   if(!alreadyWritten)
+      written=FileWrite(handle, TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS), (string)AccountInfoInteger(ACCOUNT_LOGIN),
              (string)st.positionIdentifier, _Symbol, (string)st.positionDirection, (string)st.adoptedTemplate, (string)st.tradeArchetype,
              TimeToString(firstEntry, TIME_DATE|TIME_SECONDS), TimeToString(lastExit, TIME_DATE|TIME_SECONDS), (string)(lastExit-firstEntry),
              DoubleToString(st.initialVolume,2), DoubleToString(entryVolume,2), DoubleToString(exitVolume,2), DoubleToString(entryPrice,_Digits), DoubleToString(exitPrice,_Digits),
@@ -147,8 +197,16 @@ bool FinalizeTradeLifecycle(int stateIdx)
              DoubleToString(floatingObservedSeconds,3),DoubleToString(floatingCoverageRatio,6),
              st.floatingTimingHasData ? "1" : "0",
              DoubleToString(st.maxLifecycleProfitMoney,2),DoubleToString(st.maxLifecycleLossMoney,2));
+   bool saved=(written>0 && GetLastError()==0);
+   if(saved)
+   {
+      ResetLastError();
+      FileFlush(handle);
+      saved=(GetLastError()==0);
+   }
    FileClose(handle);
-   GlobalVariableSet(TradeSummaryKey(st.positionIdentifier), (double)TimeCurrent());
+   if(!saved) return false; // 汇总写入/刷新失败时保留生命周期，后续重试。
+   if(GlobalVariableSet(TradeSummaryKey(st.positionIdentifier), (double)TimeCurrent())==0) return false;
    InvalidateStatsCache();
    st.tradeFinalized = true;
    st.lifecyclePhase = 生命周期_已结束;

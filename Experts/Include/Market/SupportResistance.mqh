@@ -1,6 +1,8 @@
 #ifndef SMA_MARKET_SUPPORT_RESISTANCE_MQH
 #define SMA_MARKET_SUPPORT_RESISTANCE_MQH
 
+#include "IndicatorHandles.mqh"
+
 double SRZoneHalfWidth(double mergeDistance)
 {
    double half = MathMax(mergeDistance * 0.5, 0.0);
@@ -506,6 +508,23 @@ void AddDensityLevelsByM1PriceBuckets(SRLevel &allRes[], SRLevel &allSup[], doub
 
    double buckets[];
    int counts[];
+   // Preserve first-seen order (including score ties), but avoid scanning all
+   // existing buckets for every bar/price cell. Bound temporary memory to 1 MiB.
+   int minBucket=(int)MathFloor(rates[0].low/bucketSize);
+   int maxBucket=(int)MathFloor(rates[0].high/bucketSize);
+   for(int i=1; i<copied; i++)
+   {
+      minBucket=MathMin(minBucket,(int)MathFloor(rates[i].low/bucketSize));
+      maxBucket=MathMax(maxBucket,(int)MathFloor(rates[i].high/bucketSize));
+   }
+   long bucketSpan=(long)maxBucket-(long)minBucket+1;
+   int bucketIndexes[];
+   bool indexed=(bucketSpan>0 && bucketSpan<=262144);
+   if(indexed)
+   {
+      indexed=(ArrayResize(bucketIndexes,(int)bucketSpan)==(int)bucketSpan);
+      if(indexed) ArrayInitialize(bucketIndexes,-1);
+   }
    for(int i=0; i<copied; i++)
    {
       int fromBucket = (int)MathFloor(rates[i].low / bucketSize);
@@ -516,7 +535,8 @@ void AddDensityLevelsByM1PriceBuckets(SRLevel &allRes[], SRLevel &allSup[], doub
       {
          double center = (b + 0.5) * bucketSize;
          int idx = -1;
-         for(int k=0; k<ArraySize(buckets); k++)
+         if(indexed) idx=bucketIndexes[b-minBucket];
+         else for(int k=0; k<ArraySize(buckets); k++)
          {
             if(MathAbs(buckets[k] - center) < bucketSize * 0.1)
             {
@@ -527,10 +547,11 @@ void AddDensityLevelsByM1PriceBuckets(SRLevel &allRes[], SRLevel &allSup[], doub
          if(idx < 0)
          {
             int n = ArraySize(buckets);
-            ArrayResize(buckets, n + 1);
-            ArrayResize(counts, n + 1);
+            ArrayResize(buckets, n + 1, 256);
+            ArrayResize(counts, n + 1, 256);
             buckets[n] = center;
             counts[n] = 1;
+            if(indexed) bucketIndexes[b-minBucket]=n;
          }
          else
          {
@@ -646,11 +667,8 @@ bool IsSRHighVolatilityMode()
            spreadWide);
 }
 
-bool HasM1ReactionAtLevel(const SRLevel &lv, bool resistance)
+bool HasM1ReactionAtLevel(const SRLevel &lv, bool resistance, MqlRates &rates[], int copied)
 {
-   MqlRates rates[];
-   ArraySetAsSeries(rates, true);
-   int copied = CopyRates(_Symbol, PERIOD_M1, 1, 4, rates);
    if(copied < 2) return false;
 
    double lowEdge = (lv.zoneLow > 0.0) ? lv.zoneLow : lv.price;
@@ -715,6 +733,11 @@ void ClassifySRTradingIntent(SRLevel &arr[], bool resistance, double refPrice, i
 {
    double atr = 0.0;
    if(!GetATRPrice(atr) || atr <= 0.0) atr = MathMax(支撑压力合并距离价格, 1.0);
+   // 同次分类共享已收M1快照；只在确实需要到位提示时读取。
+   // 不跨调用缓存；历史未齐时继续重试，避免把暂时缺失当成有效缓存。
+   MqlRates reactionBars[];
+   ArraySetAsSeries(reactionBars,true);
+   int reactionBarCount=0;
 
    for(int i=0; i<ArraySize(arr); i++)
    {
@@ -774,7 +797,9 @@ void ClassifySRTradingIntent(SRLevel &arr[], bool resistance, double refPrice, i
 
       if(支撑压力启用到位提示 && distance <= 支撑压力接近距离价格)
       {
-         if(HasM1ReactionAtLevel(arr[i], resistance))
+         if(reactionBarCount<4)
+            reactionBarCount=CopyRates(_Symbol,PERIOD_M1,1,4,reactionBars);
+         if(HasM1ReactionAtLevel(arr[i], resistance, reactionBars, reactionBarCount))
             arr[i].statusText = resistance ? "空头反应" : "多头反应";
          else
             arr[i].statusText = resistance ? "等空确认" : "等多确认";
@@ -858,27 +883,18 @@ int DetectTrendRegimeM5()
 {
    if(!支撑压力启用趋势环境过滤) return 0;
 
-   int fastHandle = iMA(_Symbol, PERIOD_M5, MathMax(趋势EMA快线周期, 1), 0, MODE_EMA, PRICE_CLOSE);
-   int slowHandle = iMA(_Symbol, PERIOD_M5, MathMax(趋势EMA慢线周期, 1), 0, MODE_EMA, PRICE_CLOSE);
-   int adxHandleLocal = iADX(_Symbol, PERIOD_M5, MathMax(趋势ADX周期, 1));
+   int fastHandle = GetManagedIndicatorHandle(MANAGED_EMA, PERIOD_M5, 趋势EMA快线周期);
+   int slowHandle = GetManagedIndicatorHandle(MANAGED_EMA, PERIOD_M5, 趋势EMA慢线周期);
+   int adxHandleLocal = GetManagedIndicatorHandle(MANAGED_ADX, PERIOD_M5, 趋势ADX周期);
    if(fastHandle == INVALID_HANDLE || slowHandle == INVALID_HANDLE || adxHandleLocal == INVALID_HANDLE)
    {
-      if(fastHandle != INVALID_HANDLE) IndicatorRelease(fastHandle);
-      if(slowHandle != INVALID_HANDLE) IndicatorRelease(slowHandle);
-      if(adxHandleLocal != INVALID_HANDLE) IndicatorRelease(adxHandleLocal);
       return 0;
    }
 
-   double fast[], slow[], adx[];
-   ArraySetAsSeries(fast, true);
-   ArraySetAsSeries(slow, true);
-   ArraySetAsSeries(adx, true);
+   double fast[1], slow[1], adx[1];
    bool ok = (CopyBuffer(fastHandle, 0, 1, 1, fast) == 1 &&
               CopyBuffer(slowHandle, 0, 1, 1, slow) == 1 &&
               CopyBuffer(adxHandleLocal, 0, 1, 1, adx) == 1);
-   IndicatorRelease(fastHandle);
-   IndicatorRelease(slowHandle);
-   IndicatorRelease(adxHandleLocal);
    if(!ok) return 0;
    if(adx[0] <= 趋势ADX阈值) return 0;
    if(fast[0] > slow[0]) return 1;

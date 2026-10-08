@@ -1,5 +1,11 @@
 # 持久化、Global Variables 与重启恢复
 
+2026-09-15 五项风险修复：实际StateStore升级V7，新增PC保护字段提交标记；`ShortStateWrite`检查GV返回值，写入失败保留dirty，不提交PC。新增TRR/TRU/TIR/TIS/THI/TLO趋势R与极值、RAR/RAT/RAL/RAG恢复武装、TPI/TPV/TPSL/TPSH/TPMD/TPT1/TPT2老师冻结计划（签名拆32位）。保存/恢复/删除同步，`trendRiskUnknown`在创建初始化及INOUT重置。旧V6/缺键/未提交保护字段不猜原始R、不套当前老师文本；离线加仓/均价变化不继承保护。原始R已遗失无法自动补回。`MobileMarkerSafety.mqh`使用S55.MD.<account>.<magic>.<symbol>.<ticket>持久化撤单等待，ticket在键名中不转double；历史最终撤销或成交仓完整退出后清除。
+
+2026-09-13 多仓修订：AUTO V1增加可选PM（pendingMode，缺省0兼容旧请求），保存/恢复/清pending同步；新请求comment为 `TEACHER_ACTIVE_<mode>_<signalTime>`。AC/AB旧键不再用于限额/首次回踩，保留旧键清理；新增AT0..39记录点位方向请求信号，签名变化清理、跨重启保留，真实确认可补录请求返回前崩溃丢失的AT。AX仍只防同M1重复请求，不是日额度。pending结果不明保持占位；订单FILLED还须精确Position确认或完整入出Deal量对账，未读取真实成交时不释放。TAP逐仓管理及日内AH保护键语义不变。
+
+2026-09-13 当前源码专项核对：本次实际 `Include/Persistence/StateStore.mqh::ShortStateSave` 写V6（下文历史V9描述不适用于此工作树）。新增可选 `TAP` 保存/恢复/删除 `teacherActivePlan`，旧状态缺键时保留真实仓位comment识别结果。老师AUTO原V1 pending不变；新增AD日、AE首次日净值、AH停机锁、AS拆分点位签名、AF首次接收时间、AX最后请求信号、AC0..39点位方向日请求计数、AB0..39突破收盘时间。AC每日或点位签名变化清理，AB签名变化清理，AH换日重置；请求前和停机时flush，EA卸载不删除保护状态。历史风险缓存为运行态，重启Init/Timer按完整position id重建，不把请求计数当成交次数。
+
 证据核对：2026-09-04；正式源码 `Include/Persistence/StateStore.mqh`（568 行）、主文件 `TicketState`/`NewsHedgeState`。项目旧架构文档 `docs/architecture/persistence-and-restart.md` 仍写短线 `V=8`；当前源码 `ShortStateSave` 已写 `V=9`（约 231），源码优先。
 
 ## 短线 TicketState 键空间

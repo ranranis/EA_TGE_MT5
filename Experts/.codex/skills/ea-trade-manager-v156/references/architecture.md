@@ -1,5 +1,15 @@
 # v1.56 架构与主调用链
 
+2026-09-15 五项风险修复：新增MobileMarkerSafety撤单持久化确认模块，创建闸门复用原同步入口；StateStore V7补保护字段和保守旧档恢复；普通历史补录先快照ticket列表；Summary完整退出与写入成功后才清理。新增 `_dev/tests/trade-risk-regression.cjs` 提取源码离线验证，不加载终端或实盘。
+
+2026-09-15 全范围复查：主文件原位提取 `Include/Trading/TeacherAuto.mqh`（老师自动管理实现）和 `Include/UI/CanvasPanel.mqh`（Canvas页面/交互），保留调用顺序和共享状态。用户明确要求后第17组自动交易默认改true，仍受有效点位、权限和风控约束；不能再把默认关闭当当前事实。审查证据及未修复风险见 `_dev/full-review-20260915.md`，旧消息/持久化地图部分描述已漂移。
+
+2026-09-15 性能修订（以当前符号为准）：`OnTick` 的直接结构刷新统一 `updateVisuals=false`，不再直接调用 `RefreshPanel`；周期绘图保留于 `OnTimer`，点击仍即时渲染。`ApplyPanelConfigTemplate` 复用有效模板缓存、不先清空旧缓存；手机标记仅置现有dirty，由后续Tick/Timer原入口同步。新增 `Include/Market/IndicatorHandles.mqh` 复用EMA/ATR/ADX资源，参数键为种类/周期/长度；不缓存CopyBuffer数值，正式主文件 `OnDeinit` 无条件释放。持仓管理、交易请求/确认、持久化及结算语义未改。
+
+2026-09-13 多仓修订：`TeacherActiveCanOpen` 在搜索和发送前核对Hedging、当前品种老师仓位硬上限5及其他策略隔离；请求仍串行，真实持仓可并行多空。`TeacherAutoFindPendingPosition` 按真实Deal position id或唯一请求comment匹配，不再让任意旧仓结束pending。Init持有同账户同品种独占文件句柄，Deinit释放，避免同终端重复实例超额；初始化失败不会覆盖老师持久化状态。新增 `TeacherActiveRange` 仅消费已收M5，模式4为震荡上下沿双向交易。
+
+2026-09-13 专项更新：主文件 `ManageTeacherAutoReversal` 按17B `老师自动使用积极策略` 路由到 `TeacherActiveFindCandidate`/`TeacherActiveBuildOrder` 或旧反转；真实仓位 `EnsureState` 冻结 `teacherActivePlan`，`ManagePosition` 在初始R确认后对积极单调用 `ManageTeacherActivePosition`，复用统一修改/分批/全平及Deal确认，不叠加旧短线快保。`TeacherActiveRefreshRisk` 只在Init/Timer查询历史，交易事件置dirty，新M1只读取门禁；独立D1 EMA20/M5 ATR14句柄按需创建、Deinit释放。其余历史地图行号以当前符号为准。
+
 证据核对：2026-09-04；正式源码 `EA_交易托管系统_v1.56.mq5`，约 19,535 行。以下行号只是当前辅助锚点；优先使用相对路径、符号和搜索词。旧版、`.bak`、`Backups/`、`_backups/`、`_release/` 不属于正式实现。
 
 ## 正式文件边界

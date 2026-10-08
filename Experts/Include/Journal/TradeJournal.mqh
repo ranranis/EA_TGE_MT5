@@ -24,10 +24,31 @@ int TradeJournalOpen(string kind, string &header[])
          if(i > 0) headerLine += ",";
          headerLine += header[i];
       }
-      FileWriteString(handle, headerLine+"\r\n");
+      if(FileWriteString(handle, headerLine+"\r\n") == 0)
+      {
+         FileClose(handle);
+         return INVALID_HANDLE;
+      }
    }
-   FileSeek(handle, 0, SEEK_END);
+   if(!FileSeek(handle, 0, SEEK_END))
+   {
+      FileClose(handle);
+      return INVALID_HANDLE;
+   }
    return handle;
+}
+
+// Capture before calling code that can replace the terminal's selected history.
+bool SnapshotSelectedDealTickets(ulong &tickets[])
+{
+   int count=HistoryDealsTotal();
+   if(ArrayResize(tickets,count)!=count) return false;
+   for(int i=0;i<count;i++)
+   {
+      tickets[i]=HistoryDealGetTicket(i);
+      if(tickets[i]==0) return false;
+   }
+   return true;
 }
 
 bool TradeJournalDealSeen(ulong dealTicket)
@@ -62,16 +83,20 @@ bool TradeJournalDealInScope(ulong dealTicket)
    return magic == 指定管理Magic;
 }
 
-void TradeJournalWriteDeal(ulong dealTicket, string source)
+bool TradeJournalWriteDeal(ulong dealTicket, string source)
 {
    PerformanceScope perfScope(PERF_TRADE_JOURNAL);
-   if(!启用交易生命周期记录 || !交易生命周期记录原始Deal || dealTicket == 0) return;
-   if(TradeJournalDealSeen(dealTicket) || !HistoryDealSelect(dealTicket) || !TradeJournalDealInScope(dealTicket)) return;
+   if(!启用交易生命周期记录 || !交易生命周期记录原始Deal) return true;
+   if(dealTicket == 0) return false;
+   if(TradeJournalDealSeen(dealTicket)) return true;
+   if(!HistoryDealSelect(dealTicket)) return false;
+   if(!TradeJournalDealInScope(dealTicket)) return true;
    string header[] = {"record_time","source","login","symbol","deal_ticket","position_id","order_ticket",
                       "entry","deal_type","reason","deal_time_msc","volume","price","profit","commission","swap","fee","magic"};
    int handle = TradeJournalOpen("TradeDeals", header);
-   if(handle == INVALID_HANDLE) return;
-   FileWrite(handle,
+   if(handle == INVALID_HANDLE) return false;
+   ResetLastError();
+   uint written=FileWrite(handle,
              TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS), source,
              (string)AccountInfoInteger(ACCOUNT_LOGIN), HistoryDealGetString(dealTicket, DEAL_SYMBOL),
              (string)dealTicket, (string)HistoryDealGetInteger(dealTicket, DEAL_POSITION_ID),
@@ -85,8 +110,16 @@ void TradeJournalWriteDeal(ulong dealTicket, string source)
              DoubleToString(HistoryDealGetDouble(dealTicket, DEAL_SWAP), 2),
              DoubleToString(HistoryDealGetDouble(dealTicket, DEAL_FEE), 2),
              (string)HistoryDealGetInteger(dealTicket, DEAL_MAGIC));
+   bool saved=(written>0 && GetLastError()==0);
+   if(saved)
+   {
+      ResetLastError();
+      FileFlush(handle);
+      saved=(GetLastError()==0);
+   }
    FileClose(handle);
-   TradeJournalMarkDealSeen(dealTicket);
+   if(saved) TradeJournalMarkDealSeen(dealTicket);
+   return saved;
 }
 
 void TradeJournalWriteLifecycle(int stateIdx, string eventName, string detail)
@@ -179,15 +212,19 @@ void TradeJournalImportAvailableHistory()
    if(!启用交易生命周期记录 || !交易生命周期记录原始Deal || !交易生命周期启动时导入终端历史) return;
    string key = TradeJournalImportKey();
    if(GlobalVariableCheck(key) || !HistorySelect(0, TimeCurrent())) return;
+   ulong deals[];
+   if(!SnapshotSelectedDealTickets(deals)) return;
    int imported = 0;
-   for(int i=0; i<HistoryDealsTotal(); i++)
+   bool complete=true;
+   for(int i=0; i<ArraySize(deals); i++)
    {
-      ulong deal = HistoryDealGetTicket(i);
-      if(deal == 0 || !TradeJournalDealInScope(deal)) continue;
-      TradeJournalWriteDeal(deal, "startup_history_import");
-      imported++;
+      ulong deal = deals[i];
+      if(!HistoryDealSelect(deal)) { complete=false; continue; }
+      if(!TradeJournalDealInScope(deal)) continue;
+      if(TradeJournalWriteDeal(deal, "startup_history_import")) imported++;
+      else complete=false;
    }
-   GlobalVariableSet(key, (double)TimeCurrent());
+   if(complete) GlobalVariableSet(key, (double)TimeCurrent());
    PrintFormat("[交易日志] 已补录当前品种/管理范围的终端历史Deal: %d", imported);
 }
 
