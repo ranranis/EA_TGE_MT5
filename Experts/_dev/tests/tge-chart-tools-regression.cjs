@@ -7,7 +7,7 @@ function body(name) {
  return src.slice(start+1,end-1);
 }
 function convert(s) {
- return s.replace(/C'(\d+),(\d+),(\d+)'/g,'[$1,$2,$3]').replace(/\((?:int|double|long)\)/g,'')
+ return s.replace(/C'(\d+),(\d+),(\d+)'/g,'[$1,$2,$3]').replace(/\((?:int|double|long|ulong)\)/g,'')
  .replace(/\b(?:string|int) (\w+)\[\d+\]=\{([\s\S]*?)\};/g,'let $1=[$2];')
  .replace(/\b(?:int|string) (\w+)\[\d+\];/g,'let $1=[];')
  .replace(/\b(?:double|MqlRates) (\w+)\[\];/g,'let $1=[];')
@@ -361,5 +361,60 @@ for(const file of ['TgeChartOverlay.mq5','TgeChartOscillator.mq5']){
  }
  assert(!/\b(?:OrderSend|CTrade|execution)\b/.test(indicator));assert(indicator.includes('IndicatorRelease(viewHandle)'));
 }
+
+
+// 使用生产Panel与IndicatorPage，分别记录内存绘制和Update发布，防止“画了但没显示”。
+resetIndicators();resetHits();props.set('width',1000);props.set('height',1000);
+let backBuffer=[],frames=[];
+Object.assign(cx,{
+ uiCollapsed:false,uiIndicators:false,uiStatistics:false,levels:[],启用真实交易:false,
+ UI_ROOT:3,UI_CARD:4,UI_ROW:5,UI_TEXT:6,UI_DIM:7,UI_WARN:8,UI_BORDER:9,UI_GAIN:10,UI_LOSS:11,UI_SELL:12,
+ PositionsTotal:()=>0,EnsurePanel:h=>{cx.panelHeight=h;return true;},UIInk:v=>v,UIRound:()=>{},
+ panelCanvas:{Erase:()=>{backBuffer=[];},FillRectangle:()=>{},Update:()=>{frames.push(backBuffer.slice());}},
+ UIText:text=>backBuffer.push(String(text)),ObjectSetString:()=>true,OBJPROP_TOOLTIP:0,
+ TimeGMT:()=>0,TimeToString:()=>'',TIME_SECONDS:1,TIME_DATE:2,TIME_MINUTES:4,
+ feedStatus:'等待',sourceSender:'',identity:'',healthBeat:0,healthSync:0,sourceTime:0,sourceKind:'',
+ feedActive:false,dayStopped:false,entryView:{ready:false},trend:0,reason:'等待点位',
+ pending:{kind:0},每日权益回撤上限百分比:1,最大点差价格:0.5,_Digits:2,
+ DoubleToString:(v,n)=>v.toFixed(n),AccountInfoString:()=>'USD',ACCOUNT_CURRENCY:0,
+ StringFormat:(s,...values)=>s.replace(/%\.\df|%d|%s/g,()=>String(values.shift())),
+ SyncStatus:()=>'等待同步',ExecutionBlock:()=>'观察模式'
+});
+for(const [name,args] of [['PageTabs','y'],['IndicatorPage',''],['Panel','']]){
+ const code=convert(body(name)).replace(/let (\w+)\[\];/g,'let $1=[];').replace(/MqlTick (\w+);/g,'let $1={};');
+ vm.runInContext('function '+name+'('+args+'){'+code+'}',cx);
+}
+const displayed=()=>frames.at(-1)||[];
+check('actual watch-tab click publishes the new bitmap before returning',()=>{
+ cx.Panel();assert(displayed().includes('当前没有本EA持仓'));
+ const before=frames.length;gesture(4);
+ assert.equal(cx.uiIndicators,true);assert.equal(cx.uiStatistics,false);
+ assert.equal(frames.length,before+1,'watch page must call Canvas.Update');
+ assert(displayed().includes('看盘设置'));assert(displayed().includes('MA5关'));
+ assert(!displayed().includes('当前没有本EA持仓'));
+ assert.equal(cx.uiHits.length,23);assert.equal(globals.get(cx.uiPrefix+'page'),2);
+});
+check('watch indicator clicks and redraws publish matching state without toggling back',()=>{
+ const before=frames.length;gesture(50);
+ assert.equal(frames.length,before+1);assert.equal(cx.UIIndicatorWindow(0),0);
+ assert(displayed().includes('MA5开'));assert(!displayed().includes('MA5关'));
+ cx.OnChartEvent(4,0,0,'');cx.Panel();
+ assert.equal(cx.uiIndicators,true);assert.equal(cx.UIIndicatorWindow(0),0);assert(displayed().includes('MA5开'));
+ gesture(50);assert.equal(cx.UIIndicatorWindow(0),-1);assert(displayed().includes('MA5关'));
+});
+check('returning from monitor or restored watch page publishes only current-page buttons',()=>{
+ for(let i=0;i<3;i++){
+  gesture(2);assert(displayed().includes('当前没有本EA持仓'));assert.equal(cx.uiHits.length,5);
+  gesture(4);assert(displayed().includes('看盘设置'));assert.equal(cx.uiHits.length,23);
+ }
+ cx.SaveView();cx.uiIndicators=false;cx.uiStatistics=true;cx.InitView();
+ const before=frames.length;cx.Panel();assert.equal(frames.length,before+1);
+ assert.equal(cx.uiIndicators,true);assert.equal(cx.uiStatistics,false);assert(displayed().includes('看盘设置'));
+});
+check('collapsed watch page removes hidden indicator hit targets and expands with refreshed state',()=>{
+ gesture(1);assert.equal(cx.uiCollapsed,true);assert.equal(cx.uiHits.length,5);
+ assert(!displayed().includes('MA5关'));assert(displayed().includes('看盘页 · 指标显示设置'));
+ gesture(1);assert.equal(cx.uiCollapsed,false);assert.equal(cx.uiHits.length,23);assert(displayed().includes('MA5关'));
+});
 
 console.log(checks+' production-source chart UI checks passed; native MT5 clicks not exercised.');

@@ -1,5 +1,5 @@
 #property strict
-#property version "1.21"
+#property version "1.22"
 #property description "T哥点位地图 / M5 MA5 / M1收线 / 0.02手分批。独立Magic，仅管理本EA持仓。"
 #include <Trade/Trade.mqh>
 #include <Canvas/Canvas.mqh>
@@ -935,6 +935,8 @@ void IndicatorPage()
    UIText("MA5、EMA和结构线放主图；RSI、MACD、ATR、ADX、KD进入副图。",24,322,500,9,UI_MUTED);
    UIText("副图同一时间只显示一种量纲，关闭失败时会保留原指标。",24,344,500,9,UI_MUTED);
    UIText("当前图表周期："+IntegerToString((int)ChartPeriod(0))+" · T哥策略仍固定使用M5/M1",24,358,500,8.5,UI_DIM);
+   // 绘制完成后发布位图；ChartRedraw本身不会上传Canvas缓冲区。
+   panelCanvas.Update();
 }
 void UIButton(const string text,const int x,const int y,const int w,const int action,const bool active=false)
 {
