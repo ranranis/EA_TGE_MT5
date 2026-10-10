@@ -25,7 +25,7 @@ const cx=vm.createContext({Math,
  MODE_SMA:0,MODE_EMA:1,MODE_SMMA:2,MODE_LWMA:3,
  clrWhite:'white',clrOrangeRed:'red',clrGold:'gold',clrOrange:'orange',clrMediumTurquoise:'teal',clrDeepSkyBlue:'blue',clrMediumPurple:'purple',clrHotPink:'pink',uiX:8,uiY:24,panelWidth:560,panelHeight:565,panelScale:1,uiPrefix:'TGUI.42.',
  uiIndicatorLabels:['MA5','EMA20','布林','RSI','MACD','ATR','MA10','MA50','MA100','MA200','M5·MA5','M15·MA5','确认拐点','昨高低','ADX','随机KD'],uiIndicatorHandles:Array(16).fill(-1),uiIndicatorNotice:'',INVALID_HANDLE:-1,
- uiCollapsed:false,uiPointLines:true,uiStatistics:false,statsPeriod:0,statsOffsets:[0,0,0],statsFilter:0,statsDetail:0,statsReview:0,statsDirty:true,statsLastAttempt:0,statsTrades:[],uiHits:[],uiPeriods:[1,5,15,30,16385,16388,16408],
+ uiCollapsed:false,uiPointLines:true,uiStatistics:false,uiIndicators:false,statsPeriod:0,statsOffsets:[0,0,0],statsFilter:0,statsDetail:0,statsReview:0,statsDirty:true,statsLastAttempt:0,statsTrades:[],uiHits:[],uiPeriods:[1,5,15,30,16385,16388,16408],
  uiInitialized:false,uiOldMouseMove:false,uiDragging:false,uiOldScroll:false,uiLeftWasDown:false,uiPressedAction:0,uiDragDX:0,uiDragDY:0,panelReady:true,
  VIEW:'TGE_',_Symbol:'XAUUSD.c',UI_HEADER:0,UI_ACCENT:1,UI_MUTED:2,
  CHART_SCALE:'scale',CHART_AUTOSCROLL:'follow',CHART_SHOW_GRID:'grid',CHART_SHIFT:'shift',CHART_MODE:'mode',
@@ -132,6 +132,12 @@ check('drag requires a new header press and restores original chart scrolling',(
 check('holding/statistics page buttons are display-only and repeat notifications cannot undo them',()=>{
  resetHits();cx.UIButton('持仓',12,49,68,2);cx.UIButton('统计',88,49,68,3);
  cx.uiStatistics=false;gesture(3);assert.equal(cx.uiStatistics,true);gesture(2);assert.equal(cx.uiStatistics,false);
+});
+check('monitor, statistics and watch pages are mutually exclusive',()=>{
+  cx.uiStatistics=false;cx.uiIndicators=false;cx.ViewAction(4);
+  assert.equal(cx.uiIndicators,true);assert.equal(cx.uiStatistics,false);
+  cx.ViewAction(3);assert.equal(cx.uiIndicators,false);assert.equal(cx.uiStatistics,true);
+  cx.ViewAction(2);assert.equal(cx.uiIndicators,false);assert.equal(cx.uiStatistics,false);
 });
 check('statistics dates, periods, filters and review arrows stay within display state',()=>{
  cx.statsPeriod=0;cx.statsOffsets=[0,0,0];cx.ViewAction(33);assert.equal(cx.statsOffsets[0],-1);
