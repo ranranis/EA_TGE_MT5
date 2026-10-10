@@ -9,10 +9,10 @@ function body(name) {
   return src.slice(start+1,end-1);
 }
 function translate(text) {
-  return text.replace(/\((?:ENUM_ORDER_STATE|ENUM_ORDER_TYPE|double|long|ulong|int|datetime)\)/g,'')
+  return text.replace(/\bstatic\s+/g,'').replace(/\((?:ENUM_ORDER_STATE|ENUM_ORDER_TYPE|double|long|ulong|int|datetime)\)/g,'')
     .replace(/\b(?:double|string|MqlRates) (\w+)\[\],(\w+)\[\];/g,'let $1=[], $2=[];')
     .replace(/\b(?:double|string) (\w+)\[\];/g,'let $1=[];')
-    .replace(/\bMqlTick (\w+);/g,'let $1={};')
+    .replace(/\b(?:MqlTick|Candidate) (\w+);/g,'let $1={};')
     .replace(/\b(?:double|long|ulong|int|datetime|bool|string|uint|ushort|ENUM_ORDER_STATE|ENUM_ORDER_TYPE)\s+/g,'let ')
     .replace(/PositionVolumes\(id,initial,closed\)/g,'((r)=>{initial=r.initial;closed=r.closed;return r.ok;})(PositionVolumes(id))');
 }
@@ -32,6 +32,8 @@ function env() {
     TimeCurrent:()=>1000,TimeTradeServer:()=>1000,
     PrintFormat:()=>{},GlobalVariablesFlush:()=>{},CanExecute:()=>true,
     pending:{kind:0},reason:'',TerminalInfoInteger:()=>true,TERMINAL_CONNECTED:1,
+    entryView:{},checkingMinute:0,signalRetry:false,EMPTY_VALUE:Number.MAX_VALUE,
+    ZeroMemory:p=>{for(const k of Object.keys(p))delete p[k];},DecisionLog:()=>{},ExecutionBlock:()=>'',
     Store:()=>true,ClearPending:()=>{e.pending={kind:0};},SavePending:()=>{},
     HistoryDealSelect:()=>false,EA魔法号:560056,DEAL_ORDER:10,
     execution:{ResultRetcode:()=>0,ResultOrder:()=>0,ResultDeal:()=>0,ResultComment:()=>''}
@@ -228,6 +230,124 @@ test('closed candle indices and startup fence retained',()=>{
  assert(body('Signal').includes('PERIOD_M1,1,2'));assert(body('Signal').includes('PERIOD_M5,1,7'));
  assert(body('Signal').includes('m1[0].time<readyFrom'));
  assert(body('Signal').includes('Load(VisitKey(level))>0'));
+});
+test('data unavailable retries same candle then evaluates only once',()=>{
+ const r=signal(),x=r.x;let pulls=0,opens=0,logs=0;
+ const copy=x.CopyRates;
+ Object.assign(x,{busy:false,lastMinute:0,ReadFeed:()=>{},ReadHealth:()=>{},UpdateDay:()=>{},Reconcile:()=>{},Manage:()=>{},Panel:()=>{},
+   iTime:()=>1740,Open:()=>opens++,DecisionLog:()=>logs++,TimeTradeServer:()=>1810,
+   CopyRates:(...a)=>++pulls===1?0:copy(...a)});
+ install(x,'OnTimer','');x.OnTimer();assert.equal(x.lastMinute,0);assert.equal(opens,0);
+ x.OnTimer();assert.equal(x.lastMinute,1740);assert.equal(opens,1);
+ x.OnTimer();assert.equal(opens,1);assert.equal(logs,2);
+});
+test('retry deadline ends even when data remains unavailable',()=>{
+ const {x}=signal();x.checkingMinute=1740;x.TimeTradeServer=()=>1831;x.CopyRates=()=>0;
+ assert(!x.Signal({}));assert.equal(x.signalRetry,false);assert(x.reason.includes('窗口已结束'));
+});
+test('strategy rejection and large spread do not retry old bar',()=>{
+ const {x}=signal({newLow:true});assert.equal(x.signalRetry,false);
+ x.FreshQuote=q=>Object.assign(q,{bid:100,ask:101});x.Signal({});assert.equal(x.signalRetry,false);
+});
+test('quote disconnect waits but startup fence still rejects historical bar',()=>{
+ const {x}=signal({fence:1741});const fresh=x.FreshQuote;x.FreshQuote=()=>false;
+ x.Signal({});assert.equal(x.signalRetry,true);
+ x.FreshQuote=fresh;assert(!x.Signal({}));assert.equal(x.signalRetry,false);
+});
+test('candidate card explains exact selected point and M1',()=>{
+ const {x,out}=signal();assert.equal(x.entryView.level,out.level);assert.equal(x.entryView.direction,out.direction);
+ assert(x.entryView.reaction);assert.equal(x.entryView.method,out.method);assert(Math.abs(x.entryView.space-9.55)<1e-8);
+});
+test('consumed point explains wait without silently rearming',()=>{
+ const r=signal({memory:{'visit100.00':1740}});assert(!r.ok);assert(r.x.reason.includes('已消费'));assert.equal(r.store.length,0);
+});
+test('execution block records reason without making request',()=>{
+ const {x,out}=signal();x.ExecutionBlock=()=> '本EA持仓已达上限';install(x,'Open','signal');
+ x.Open(out);assert.equal(x.reason,'本EA持仓已达上限');assert.equal(x.pending.kind,0);
+});
+test('same-bar attempt guard still stops a duplicate request',()=>{
+ const {x,out}=signal({memory:{attemptBar:1740}});install(x,'Open','signal');
+ x.Open(out);assert.equal(x.reason,'本根M1已发送过请求');assert.equal(x.pending.kind,0);
+});
+function progress({closed=0,remaining=.02,sl=90,pending={kind:0},history=true,quote=true}={}) {
+ const x=env();Object.assign(x,{pending,PositionVolumes:()=>({initial:.02,closed,ok:history}),
+  FreshQuote:q=>quote&&Object.assign(q,{bid:103,ask:103.02}),DoubleToString:(v,n)=>v.toFixed(n)});
+ install(x,'PositionProgress','id,sign,open,remaining,sl');return x.PositionProgress(7,1,100,remaining,sl);
+}
+test('progress measures remaining first target distance',()=>assert(progress().includes('还差 2.00')));
+test('pending partial never displays a confirmed reduction',()=>{
+ const s=progress({pending:{kind:2,position:7}});assert(s.includes('已减 0.00'));assert(s.includes('待确认'));
+});
+test('confirmed partial with unapplied SL remains awaiting BE',()=>{
+ const s=progress({closed:.01,remaining:.01,pending:{kind:3,position:7}});assert(s.includes('已减 0.01'));assert(s.includes('保本请求待确认'));
+});
+test('only actual protective SL displays confirmed BE',()=>assert(progress({closed:.01,remaining:.01,sl:100}).includes('保本已确认')));
+test('history mismatch and quote loss never invent progress',()=>{
+ assert(progress({remaining:.01}).includes('历史待核对'));assert(progress({quote:false}).includes('不可用'));
+});
+function health(row='HEALTH,1,2000,1990,1980,1,0,120,END',now=2000) {
+ const x=feed().x;Object.assign(x,{healthBeat:0,healthSync:0,healthCheckpoint:0,healthOK:false,healthPaused:false,healthMaxAge:120,
+  TimeGMT:()=>now,FileSize:()=>100,FileReadString:()=>row});
+ install(x,'ReadHealth','');install(x,'SyncStatus','');x.ReadHealth();return x;
+}
+test('health describes online sync independently from old valid map',()=>{
+ const x=health();assert(x.SyncStatus().includes('同步正常'));assert(x.feedActive);
+});
+test('dead exporter heartbeat is distinct from failed Feishu sync',()=>{
+ assert(health(undefined,2011).SyncStatus().includes('心跳中断'));
+ assert(health('HEALTH,1,2000,1990,1980,0,0,120,END').SyncStatus().includes('同步失败'));
+});
+test('lagged checkpoint warns but does not expire points',()=>{
+ const x=health('HEALTH,1,2000,1990,1800,1,0,120,END');assert(x.SyncStatus().includes('延迟'));assert(x.feedActive);
+});
+test('partial and future health snapshots are ignored',()=>{
+ assert.equal(health('HEALTH,1,2000').healthBeat,0);
+ assert.equal(health('HEALTH,1,2010,1990,1980,1,0,120,END').healthBeat,0);
+});
+test('delayed latest M5 is retried within the same M1 window',()=>{
+ const {x}=signal();const copy=x.CopyRates;
+ x.CopyRates=(s,tf,a,b,out)=>{const n=copy(s,tf,a,b,out);if(tf===5)out.forEach(v=>v.time-=300);return n;};
+ assert(!x.Signal({}));assert.equal(x.signalRetry,true);
+});
+test('order request and successful reconciliation are separate journal events',()=>{
+ const x=env(),events=[];x.DecisionLog=(...a)=>events.push(a);
+ x.pending={kind:1,at:900,order:7};x.execution.ResultOrder=()=>7;
+ x.execution.ResultRetcode=()=>9999;
+ install(x,'ExplicitReject','code');install(x,'RecordResult','');install(x,'Reconcile','');
+ x.RecordResult();assert.equal(events[0][0],'REQUEST_RESULT');assert.equal(x.pending.kind,1);
+ x.FinalOrderConfirmed=()=>false;x.Reconcile();assert.equal(events.length,1);
+ x.FinalOrderConfirmed=()=>true;x.Reconcile();assert.equal(events[1][0],'ORDER_RECONCILED');assert.equal(x.pending.kind,0);
+});
+test('decision CSV deduplicates retries and retains request correlation',()=>{
+ const x=env(),rows=[];Object.assign(x,{identity:'msg|revision',sourceKind:'teacher',sourceSender:'teacher-test',sourceTime:800,
+  entryView:{bar:900,level:100,direction:1,distance:.5,space:9.5,ma:100,m1close:100.3,crossings:0,reaction:true,method:'pullback'},
+  checkingMinute:900,atr:2,trend:1,lastDecisionKey:'',prefix:'test.',
+  pending:{kind:1,at:970,bar:900,level:100,order:71,position:0,volume:.02,sl:90,tp:110},
+  IntegerToString:String,FolderCreate:()=>true,TimeGMT:()=>1000,TimeToString:()=> '2026.10.10',StringReplace:()=>{},
+  TIME_DATE:1,FILE_READ:1,FILE_WRITE:2,FILE_CSV:4,FILE_ANSI:8,FILE_COMMON:16,FILE_SHARE_READ:32,CP_UTF8:65001,INVALID_HANDLE:-1,SEEK_END:2,
+  FileOpen:()=>1,FileSize:()=>rows.length,FileWrite:(_, ...a)=>{rows.push(a);return 1;},FileSeek:()=>true,FileFlush:()=>{},FileClose:()=>{}});
+ install(x,'DecisionLog','event,detail,retcode=0,deal=0');
+ x.DecisionLog('EVALUATE','waiting');x.DecisionLog('EVALUATE','waiting');assert.equal(rows.length,2);
+ x.DecisionLog('EVALUATE','ready');x.DecisionLog('REQUEST_RESULT','accepted',10009,88);
+ const header=rows[0],record=rows.at(-1);assert.equal(record.length,header.length);
+ for(const [key,value] of [['context_identity','msg|revision'],['request_bar',900],['order',71],['retcode',10009],['deal',88]])
+  assert.equal(record[header.indexOf(key)],value);
+ x.FileOpen=()=>-1;x.GetLastError=()=>5004;x.Print=()=>{};x.DecisionLog('EVALUATE','write fail');
+ assert.equal(x.pending.order,71);assert(!x.lastDecisionKey.includes('write fail'));
+});
+test('real execution diagnostics keep pending and position limits blocked',()=>{
+ const x=env();Object.assign(x,{启用真实交易:true,stateOK:true,lockHandle:1,INVALID_HANDLE:-1,
+  accountLogin:7,accountServer:'test',ACCOUNT_LOGIN:1,ACCOUNT_SERVER:2,ACCOUNT_MARGIN_MODE:3,ACCOUNT_MARGIN_MODE_RETAIL_HEDGING:4,
+  ACCOUNT_TRADE_ALLOWED:5,ACCOUNT_TRADE_EXPERT:6,TERMINAL_TRADE_ALLOWED:7,MQL_TRADE_ALLOWED:8,
+  AccountInfoInteger:k=>k===1?7:k===3?4:1,AccountInfoString:()=> 'test',MQLInfoInteger:()=>true,
+  dayStopped:false,最大同时持仓:3,OwnCount:()=>0});
+ install(x,'ExecutionBlock','');assert.equal(x.ExecutionBlock(),'');
+ x.pending={kind:1};assert(x.ExecutionBlock().includes('待服务器确认'));
+ x.pending={kind:0};x.OwnCount=()=>3;assert(x.ExecutionBlock().includes('上限'));
+ x.OwnCount=()=>0;x.TerminalInfoInteger=k=>k!==7;assert(x.ExecutionBlock().includes('算法交易未开启'));
+});
+test('changed map clears previous candle explanation',()=>{
+ const r=feed();assert.equal(r.x.entryView.ready,undefined);assert(r.x.reason.includes('等待随后完整M1'));
 });
 test('level persistence independent from snapshot age',()=>{
  assert(!/TimeGMT\(\)\s*-\s*|86400/.test(body('ReadFeed')));

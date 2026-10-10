@@ -159,6 +159,12 @@ def export_teacher_levels(db,c,paused,now):
     for level in selected: w.writerow(['LEVEL',format(level,'.10f')])
     w.writerow(['END',len(selected)])
     atomic_text(folder/'tge_levels.csv',out.getvalue())
+    # 独立健康快照只解释同步状态，不给长期点位新增过期条件。
+    health=io.StringIO(newline=''); hw=csv.writer(health,lineterminator='\r\n')
+    hw.writerow(['HEALTH','1',int(now),int(state(db,'last_sync_at',0)),
+                 int(state(db,'checkpoint',0)),int(bool(state(db,'last_sync_ok',False))),
+                 int(paused),int(c['sync_max_age_seconds']),'END'])
+    atomic_text(folder/'tge_health.csv',health.getvalue())
     # 保留旧EA的24小时来源上限、90秒心跳及指定老师身份；新规则不绕过旧EA。
     healthy=bool(state(db,'last_sync_ok',False)) and now-state(db,'last_sync_at',0)<=c['sync_max_age_seconds'] and now-state(db,'checkpoint',0)<=c['sync_max_age_seconds']
     ttl=c['levels_ttl_seconds'] or 86400

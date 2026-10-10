@@ -250,6 +250,27 @@ class ObserverTests(unittest.TestCase):
         self.assertEqual(len(rows),5)
         self.assertFalse((self.home/'common/FeishuMT5SignalMonitor/tge_levels.csv.tmp').exists())
 
+    def test_health_snapshot_separates_heartbeat_sync_and_checkpoint(self):
+        self.seed()
+        self.assertEqual(self.feed('tge_health.csv')[0],
+                         ['HEALTH','1',str(self.now),str(self.now),str(self.now),'1','0','120','END'])
+        self.assertFalse((self.home/'common/FeishuMT5SignalMonitor/tge_health.csv.tmp').exists())
+
+    def test_failed_sync_health_preserves_last_success_and_points(self):
+        self.seed()
+        with self.db: set_state(self.db,'last_sync_ok',False)
+        row=self.feed('tge_health.csv',now=self.now+600)[0]
+        self.assertEqual(row[2:7],[str(self.now+600),str(self.now),str(self.now),'0','0'])
+        self.assertEqual(self.feed(now=self.now+600)[0][3],'1')
+
+    def test_paused_health_does_not_claim_running(self):
+        self.seed()
+        self.assertEqual(self.feed('tge_health.csv',paused=True)[0][6],'1')
+        self.assertEqual(self.feed(paused=True)[0][3],'0')
+
+    def test_health_before_first_sync_is_explicitly_unknown(self):
+        self.assertEqual(self.feed('tge_health.csv')[0][3:7],['0','0','0','0'])
+
     def test_legacy_feed_keeps_age_limit(self):
         self.seed()
         self.assertEqual(self.feed('teacher_levels.csv',now=self.now+86400)[0][4],'0')
