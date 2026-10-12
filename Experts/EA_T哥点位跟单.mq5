@@ -1,5 +1,5 @@
 #property strict
-#property version "1.22"
+#property version "1.23"
 #property description "T哥点位地图 / M5 MA5 / M1收线 / 0.02手分批。独立Magic，仅管理本EA持仓。"
 #include <Trade/Trade.mqh>
 #include <Canvas/Canvas.mqh>
@@ -208,8 +208,10 @@ bool FreshQuote(MqlTick &q)
 {
    if(!TerminalInfoInteger(TERMINAL_CONNECTED) || !SymbolInfoTick(_Symbol,q) ||
       q.bid<=0 || q.ask<q.bid || TickSize()<=0) return false;
-   // TimeTradeServer估算当前服务器时刻；不能用可能随最后Tick一起停住的TimeCurrent判鲜。
-   long age=(long)TimeTradeServer()*1000-q.time_msc;
+   // TimeTradeServer依赖本机时钟，可能落后券商数秒；TimeCurrent是已观测的券商时间。
+   // 取较晚者：跟随真实新Tick，同时让估算时钟在断流后继续使旧报价过期。
+   long serverNow=(long)MathMax((long)TimeTradeServer(),(long)TimeCurrent());
+   long age=serverNow*1000-q.time_msc;
    return age>=-2000 && age<=5000;
 }
 bool OwnSelected()
@@ -391,7 +393,10 @@ bool Signal(Candidate &out)
    if(checkingMinute>0 && m1[0].time!=checkingMinute) { signalRetry=true; reason="M1序列尚未对齐"; return false; }
    if(m1[0].time<readyFrom || TimeCurrent()-m1[0].time>90)
    { reason="等待启动/更新后的完整收线"; return false; }
-   if(m1[0].time-m1[1].time!=60 || TimeCurrent()-m5[0].time>360)
+   // K线time是开盘时刻；上一根M5在整个当前M5周期内都是有效的已收盘数据。
+   // 索引0只取时间校验连续性，价格、均线和ATR判断仍使用索引1及以前。
+   datetime currentM5=iTime(_Symbol,PERIOD_M5,0);
+   if(m1[0].time-m1[1].time!=60 || currentM5<=0 || m5[0].time+300!=currentM5)
    { signalRetry=true; reason="收线序列尚未完整，窗口内重试"; return false; }
    for(int i=0;i<6;i++) if(m5[i].time-m5[i+1].time!=300) { signalRetry=true; reason="M5数据缺口，窗口内重试"; return false; }
    atr=vol[0]; if(!MathIsValidNumber(atr) || atr<=TickSize()) { signalRetry=true; reason="ATR数据未就绪"; return false; }

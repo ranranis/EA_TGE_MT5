@@ -102,18 +102,28 @@ test('pause snapshot disables trading but preserves visible levels',()=>{
 test('missing snapshot retains last complete map',()=>{const r=feed({missing:true});assert(!r.ok&&r.x.feedActive);assert.equal(r.x.levels[0],50);});
 test('future snapshot cannot replace map',()=>assert(!feed({generated:2010}).ok));
 test('new map establishes startup fence',()=>assert.equal(feed().x.readyFrom,1000));
-function quote(at,connected=true) {
- const x=env();x.TerminalInfoInteger=()=>connected;x.SymbolInfoTick=(_,q)=>Object.assign(q,{bid:100,ask:100.1,time_msc:at});
+function quote(at,connected=true,observedServer=1000,estimatedServer=1000) {
+ const x=env();x.TimeCurrent=()=>observedServer;x.TimeTradeServer=()=>estimatedServer;x.TerminalInfoInteger=()=>connected;x.SymbolInfoTick=(_,q)=>Object.assign(q,{bid:100,ask:100.1,time_msc:at});
  install(x,'FreshQuote','q');return x.FreshQuote({});
 }
 test('stale ticks cannot trade',()=>assert(!quote(990000)));
 test('fresh ticks accepted',()=>assert(quote(999000)));
 test('disconnected terminal cannot trade',()=>assert(!quote(999000,false)));
 test('future clock mismatch rejected',()=>assert(!quote(1010000)));
+test('broker clock ahead of local estimate still accepts current tick',()=>assert(quote(1003450,true,1003,1000)));
+test('millisecond part of an observed server second stays valid',()=>assert(quote(1003999,true,1003,1000)));
+test('estimated server time continues aging a tick when observed server time stops',()=>assert(!quote(1003450,true,1003,1009)));
+test('later Market Watch tick still detects stale chart-symbol quote',()=>assert(!quote(1000000,true,1006,1000)));
+test('future tick without matching broker time remains rejected',()=>assert(!quote(1010000,true,1003,1000)));
+test('five-second quote freshness limit is retained',()=>{
+ assert(quote(995000));assert(!quote(994999));
+});
+
 function signal(options={}) {
- const x=env(),memory=options.memory??{},store=[];
- const m1=[{time:1740,...b},{time:1680,...p}];
- const m5=Array.from({length:7},(_,i)=>({time:1500-i*300,open:100.3,close:100.5,low:100.1,high:100.8}));
+ const x=env(),memory=options.memory??{},store=[],now=options.now??1810;
+ const m1time=Math.floor(now/60)*60-60,currentM5=Math.floor(now/300)*300;
+ const m1=[{time:m1time,...b},{time:m1time-60,...p}];
+ const m5=Array.from({length:7},(_,i)=>({time:currentM5-300-i*300,open:100.3,close:100.5,low:100.1,high:100.8}));
  const ma=[100,99.8,99.7,99.6,99.5,99.4,99.3];
  if(options.weave) for(let i=3;i<7;i++)m5[i].close=ma[i]+(i%2?.5:-.5);
  if(options.broken) {m5[0].close=99.5;m5[0].low=99;ma[0]=ma[1];}
@@ -123,7 +133,7 @@ function signal(options={}) {
   levels:[90,100,110],feedActive:true,FreshQuote:q=>Object.assign(q,{bid:100.4,ask:100.45}),
   最大点差价格:.5,允许震荡点位反应:!options.noReaction,
   maHandle:1,atrHandle:2,PERIOD_M1:1,PERIOD_M5:5,
-  TimeCurrent:()=>1810,readyFrom:options.fence??1000,trend:0,atr:0,DBL_MAX:Number.MAX_VALUE,
+  TimeCurrent:()=>now,TimeTradeServer:()=>now,iTime:(_s,tf,shift)=>tf===5?currentM5:shift===1?m1time:m1time+60,readyFrom:options.fence??1000,trend:0,atr:0,DBL_MAX:Number.MAX_VALUE,
   ArraySetAsSeries:()=>{},CopyRates:(_,tf,_shift,_count,out)=>{out.push(...(tf===1?m1:m5));return out.length;},
   CopyBuffer:(h,_buf,_shift,_count,out)=>{out.push(...(h===1?ma:[2]));return out.length;},
   MathIsValidNumber:Number.isFinite,DoubleToString:(v,n)=>v.toFixed(n),
@@ -135,6 +145,20 @@ function signal(options={}) {
  const out={};return {ok:x.Signal(out),out,x,store};
 }
 test('complete production candidate selects MA5 pullback',()=>{const r=signal();assert(r.ok);assert.equal(r.out.method,'M5 MA5顺势回踩');});
+test('valid closed M5 is usable in every minute of its five-minute cycle',()=>{
+ for(const phase of [1,61,121,181,241]){
+  const r=signal({now:1800+phase});assert(r.ok,'valid M5 blocked at cycle second '+phase);
+  assert.equal(r.out.bar,Math.floor((1800+phase)/60)*60-60);
+ }
+});
+test('missing current M5 timestamp retries without producing a candidate',()=>{
+ const {x}=signal();x.iTime=()=>0;assert(!x.Signal({}));assert.equal(x.signalRetry,true);
+});
+test('unclosed or future M5 cannot be used as the latest completed candle',()=>{
+ const {x}=signal();const copy=x.CopyRates;
+ x.CopyRates=(s,tf,a,b,out)=>{const n=copy(s,tf,a,b,out);if(tf===5)out.forEach(v=>v.time+=300);return n;};
+ assert(!x.Signal({}));assert.equal(x.signalRetry,true);
+});
 test('full candidate rejects still-making-low minute',()=>assert(!signal({newLow:true}).ok));
 test('full candidate rejects startup historical bars',()=>assert(!signal({fence:1741}).ok));
 test('full candidate rejects consumed visit after restart',()=>assert(!signal({memory:{'visit100.00':1740}}).ok));
@@ -235,7 +259,7 @@ test('data unavailable retries same candle then evaluates only once',()=>{
  const r=signal(),x=r.x;let pulls=0,opens=0,logs=0;
  const copy=x.CopyRates;
  Object.assign(x,{busy:false,lastMinute:0,ReadFeed:()=>{},ReadHealth:()=>{},UpdateDay:()=>{},Reconcile:()=>{},Manage:()=>{},Panel:()=>{},
-   iTime:()=>1740,Open:()=>opens++,DecisionLog:()=>logs++,TimeTradeServer:()=>1810,
+   iTime:(_s,tf)=>tf===5?1800:1740,Open:()=>opens++,DecisionLog:()=>logs++,TimeTradeServer:()=>1810,
    CopyRates:(...a)=>++pulls===1?0:copy(...a)});
  install(x,'OnTimer','');x.OnTimer();assert.equal(x.lastMinute,0);assert.equal(opens,0);
  x.OnTimer();assert.equal(x.lastMinute,1740);assert.equal(opens,1);
