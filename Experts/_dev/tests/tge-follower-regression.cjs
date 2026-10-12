@@ -30,7 +30,6 @@ let checks=0;
 function test(name,fn) {fn();checks++;console.log('PASS '+name);}
 function env() {
   const e=vm.createContext({
-    点位提前容差:3,HasAILimit:()=>false,AILimitCount:()=>0,RefreshAITrend:()=>{},SyncAILimits:()=>{},AITrendEntry:()=>false,PrepareAILimit:()=>{},ReconcileAILimitCreation:()=>false,ORDER_TIME_SETUP:900,
     读取AI即时策略:false,aiReady:false,aiMode:"WAIT",ReadAISetups:()=>{},AIMarketSignal:()=>false,MathMin:Math.min,MathMax:Math.max,MathAbs:Math.abs,MathFloor:Math.floor,MathCeil:Math.ceil,
     NormalizeDouble:(v,n)=>+v.toFixed(n),TickSize:()=>.01,
     SYMBOL_VOLUME_MIN:1,SYMBOL_VOLUME_STEP:2,SYMBOL_VOLUME_MAX:3,
@@ -42,7 +41,7 @@ function env() {
     pending:{kind:0},reason:'',TerminalInfoInteger:()=>true,TERMINAL_CONNECTED:1,
     entryView:{},checkingMinute:0,signalRetry:false,EMPTY_VALUE:Number.MAX_VALUE,
     ZeroMemory:p=>{for(const k of Object.keys(p))delete p[k];},DecisionLog:()=>{},ExecutionBlock:()=>'',
-    StringFind:(a,b)=>a.indexOf(b),Store:()=>true,ClearPending:()=>{e.pending={kind:0};},SavePending:()=>{},
+    Store:()=>true,ClearPending:()=>{e.pending={kind:0};},SavePending:()=>{},
     HistoryDealSelect:()=>false,EA魔法号:560056,DEAL_ORDER:10,
     execution:{ResultRetcode:()=>0,ResultOrder:()=>0,ResultDeal:()=>0,ResultComment:()=>''}
   });
@@ -181,15 +180,14 @@ test('pending request prevents duplicate management',()=>{
  const x=env();x.pending={kind:2};x.PositionsTotal=()=>{throw Error('duplicate');};
  install(x,'Manage','');x.Manage();
 });
-function management({initial=.02,closed=0,remaining=.02,bid=105.1,sl=90,can=true,tp=110,tag="",sign=1}={}) {
+function management({initial=.02,closed=0,remaining=.02,bid=105.1,sl=90,can=true}={}) {
  const x=env(),events=[];
  Object.assign(x,{CanExecute:()=>can,FreshQuote:q=>Object.assign(q,{bid,ask:bid+.02}),
   PositionsTotal:()=>1,PositionGetTicket:()=>7,OwnSelected:()=>true,
   POSITION_IDENTIFIER:1,POSITION_TYPE:2,POSITION_TYPE_BUY:0,
   POSITION_PRICE_OPEN:3,POSITION_VOLUME:4,POSITION_SL:5,POSITION_TP:6,
-  PositionGetInteger:k=>k===1?700:sign>0?0:1,
-  POSITION_COMMENT:7,PositionGetString:()=>tag,
-  PositionGetDouble:k=>({3:100,4:remaining,5:sl,6:tp})[k],
+  PositionGetInteger:k=>k===1?700:0,
+  PositionGetDouble:k=>({3:100,4:remaining,5:sl,6:110})[k],
   PositionVolumes:()=>({initial,closed,ok:true}),PositionSelectByTicket:()=>true,
   Align:(v)=>v,Modify:(...a)=>{events.push(['modify',...a]);x.pending.kind=3;},
   ZeroMemory:p=>{for(const k of Object.keys(p))delete p[k];},
@@ -218,11 +216,6 @@ test('history/position mismatch never trades',()=>{
 });
 test('indivisible lot uses +5 full TP',()=>{
  const a=management({initial:.01,remaining:.01});assert.equal(a[0][0],'modify');assert.equal(a[0][5],105);
-});
-test('favorable limit fills cap BUY and SELL tail targets from actual price',()=>{
- const buy=management({bid:101,tp:113,tag:'TGLbuy'});assert.equal(buy[0][5],110);
- const sell=management({bid:99,sl:110,tp:87,tag:'TGLsell',sign:-1});assert.equal(sell[0][5],90);
- assert.equal(management({bid:101,tp:108,tag:'TGLbuy'}).length,0);
 });
 test('delayed partial remains pending on unknown retcode',()=>{
  const x=env();x.pending={kind:2};install(x,'ExplicitReject','code');install(x,'RecordResult','');x.RecordResult();assert.equal(x.pending.kind,2);
@@ -402,7 +395,7 @@ function aiEnv(options={}){
   aiPlans:options.plans||[{sign:1,level:100,market:false},{sign:-1,level:112,market:false}],
   feedActive:true,aiIdentity:'msg-new',aiSource:'msg-new',aiSourceTime:990,aiGenerated:1000,TimeGMT:()=>1000,
   atr:2,atrHandle:2,MathIsValidNumber:Number.isFinite,tp:0,DBL_MAX:Number.MAX_VALUE,levels:[90,100,104],最大点差价格:.5,Hash:s=>[...s].reduce((a,v)=>a+v.charCodeAt(0),0),
-  点位提前容差:1.5,IntegerToString:String,DoubleToString:(v,n)=>v.toFixed(n),Align:v=>v,
+  IntegerToString:String,DoubleToString:(v,n)=>v.toFixed(n),Align:v=>v,
   Load:k=>memory[k]||0,Store:(k,v)=>memory[k]=v,ArraySetAsSeries:()=>{},
   FreshQuote:q=>Object.assign(q,{bid:100.4,ask:100.45}),CopyBuffer:(_h,_b,shift,n,out)=>{out.push(2);return 1;}});
  for(const [name,args] of [['Target','entry,sign'],['AIVisitKey','level,sign'],['AISignal','bar,q,out'],['AIMarketSignal','out']])install(x,name,args);
@@ -419,13 +412,6 @@ test('near/prefix wording allows a bounded price zone instead of missing an inte
  assert(x.AISignal(bar,{bid:108,ask:108.05},{}));
  x.aiPlans[0].near=false;assert(!x.AISignal(bar,{bid:108,ask:108.05},{}));
  x.aiPlans[0].near=true;assert(!x.AISignal(bar,{bid:110,ask:110.05},{}));
-});
-test('advance zone cannot rearm a consumed opportunity while still inside three units',()=>{
- const {x,memory}=aiEnv();x.点位提前容差=3;const key=x.AIVisitKey(100,1);memory[key]=990;
- x.AISignal({time:1000,open:102,low:101.5,high:103,close:102.5},{bid:102.5,ask:102.55},{});
- assert.equal(memory[key],990);
- x.AISignal({time:1000,open:103,low:103,high:104,close:104},{bid:104,ask:104.05},{});
- assert.equal(memory[key],0);
 });
 test('AI SELL reference is not mistaken for a bidirectional neutral level',()=>{
  const {x}=aiEnv({plans:[{sign:-1,level:100,market:false},{sign:1,level:88,market:false}]});

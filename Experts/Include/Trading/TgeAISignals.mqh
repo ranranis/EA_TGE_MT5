@@ -5,8 +5,6 @@ struct AIPlan { int sign; double level; bool market,near; };
 AIPlan aiPlans[];
 string aiMode="WAIT",aiReason="等待AI策略桥接",aiSource="",aiIdentity="";
 datetime aiGenerated=0,aiSourceTime=0;
-int aiTrend=0;
-bool aiTrendReady=false;
 bool aiReady=false;
 
 bool ReadAISetups()
@@ -82,9 +80,9 @@ bool AISignal(const MqlRates &bar,const MqlTick &q,Candidate &out)
       double entry=sign>0 ? q.ask : q.bid,gap=sign*(entry-level);
       string key=AIVisitKey(level,sign);
       datetime consumed=(datetime)Load(key);
-      if(!aiPlans[i].market && !HasAILimit(level,sign) && consumed>0 && bar.time>consumed && MathAbs(bar.close-level)>MathMax(atr,aiPlans[i].near ? 保险价格距离 : MathMax(点位提前容差,2.0))) Store(key,0);
+      if(!aiPlans[i].market && consumed>0 && bar.time>consumed && MathAbs(bar.close-level)>MathMax(atr,2.0)) Store(key,0);
       // “接近/附近/60开”允许同一价格档的参考区域；宽度来自既有10点保险预算，不由AI编造。
-      double allowed=aiPlans[i].near && !aiPlans[i].market ? 保险价格距离 : MathMax(点位提前容差,MathMin(atr*0.75,首批止盈价格距离*0.8));
+      double allowed=aiPlans[i].near && !aiPlans[i].market ? 保险价格距离 : MathMin(atr*0.75,首批止盈价格距离*0.8);
       double touch=aiPlans[i].near ? allowed : tolerance;
       bool reaction=sign>0 ? bar.low<=level+touch && bar.high>=level-tolerance &&
                             bar.close>level+escape && bar.close>bar.open :
@@ -92,7 +90,7 @@ bool AISignal(const MqlRates &bar,const MqlTick &q,Candidate &out)
                             bar.close<level-escape && bar.close<bar.open;
       double tp;
       string blocked=aiPlans[i].market && TimeGMT()-aiSourceTime>180 ? "市价喊单已过时，不补历史单" :
-                     Load(key)>0 || HasAILimit(level,sign) ? "本次AI点位机会已消费/已挂单，等待重新离开" :
+                     Load(key)>0 ? "本次AI点位机会已消费，等待重新离开" :
                      gap<0 || gap>=allowed ? "等待靠近AI即时点位，不追价" :
                      !aiPlans[i].market && !reaction ? "等待M1在AI点位止跌/受阻" :
                      !Target(entry,sign,tp) ? "AI区间不足首批止盈空间" : "";

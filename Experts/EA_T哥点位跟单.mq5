@@ -1,5 +1,5 @@
 #property strict
-#property version "1.26"
+#property version "1.25"
 #property description "T哥点位地图 / M5 MA5 / M1收线 / 0.02手分批。独立Magic，仅管理本EA持仓。"
 #include <Trade/Trade.mqh>
 #include <Canvas/Canvas.mqh>
@@ -16,8 +16,6 @@ input ulong  EA魔法号=560056;
 input bool   读取AI即时策略=true;     // 读取本地DeepSeek语义桥；未就绪时等待，不猜方向
 input group "T哥点位节奏与退出"
 input bool   允许震荡点位反应=true;
-input bool   启用趋势提前挂单=true;
-input double 点位提前容差=3.0;       // 黄金报价价格差：4160多可提前到4163，不是_Point倍数
 input double 保险价格距离=10.0;
 input double 首批止盈价格距离=5.0;
 input double 尾仓目标价格距离=10.0;
@@ -88,9 +86,8 @@ string lastDecisionKey="";
 // 一个实例只允许一个未确认请求。持久化的是意图，不是“已成交”。
 struct Pending
 {
-   int kind;                 // 1开仓，2分批，3保护修改，4限价创建，5限价撤销
+   int kind;                 // 1开仓，2分批，3保护修改
    ulong order,position;
-   long sourceHash;
    datetime at,bar;
    double volume,sl,tp,level;
    int direction;
@@ -141,7 +138,7 @@ void SavePending()
    Store("order",(double)pending.order); Store("position",(double)pending.position);
    Store("at",(double)pending.at); Store("bar",(double)pending.bar);
    Store("volume",pending.volume); Store("sl",pending.sl); Store("tp",pending.tp);
-   Store("level",pending.level); Store("direction",pending.direction); Store("sourceHash",(double)pending.sourceHash);
+   Store("level",pending.level); Store("direction",pending.direction);
    Store("kind",pending.kind); GlobalVariablesFlush();
 }
 void ClearPending()
@@ -153,7 +150,7 @@ void RestorePending()
    pending.kind=(int)Load("kind"); pending.order=(ulong)Load("order");
    pending.position=(ulong)Load("position"); pending.at=(datetime)Load("at"); pending.bar=(datetime)Load("bar");
    pending.volume=Load("volume"); pending.sl=Load("sl"); pending.tp=Load("tp");
-   pending.level=Load("level"); pending.direction=(int)Load("direction"); pending.sourceHash=(long)Load("sourceHash");
+   pending.level=Load("level"); pending.direction=(int)Load("direction");
 }
 bool CanExecute()
 {
@@ -178,7 +175,7 @@ string ExecutionBlock()
    if(!MQLInfoInteger(MQL_TRADE_ALLOWED)) return "当前EA交易权限未开启";
    if(!AccountInfoInteger(ACCOUNT_TRADE_ALLOWED) || !AccountInfoInteger(ACCOUNT_TRADE_EXPERT)) return "账户不允许EA交易";
    if(pending.kind!=0) return pending.kind<0 ? "状态写入中断，待人工核对" : "上一请求待服务器确认";
-   if(OwnCount()+AILimitCount()>=最大同时持仓) return "本EA持仓已达上限";
+   if(OwnCount()>=最大同时持仓) return "本EA持仓已达上限";
    return "";
 }
 void DecisionLog(const string event,const string detail,const uint retcode=0,const ulong deal=0)
@@ -497,13 +494,12 @@ bool ExplicitReject(const uint code)
           code==TRADE_RETCODE_INVALID_STOPS || code==TRADE_RETCODE_TRADE_DISABLED ||
           code==TRADE_RETCODE_MARKET_CLOSED || code==TRADE_RETCODE_NO_MONEY ||
           code==TRADE_RETCODE_PRICE_CHANGED || code==TRADE_RETCODE_PRICE_OFF ||
-          code==TRADE_RETCODE_INVALID_FILL || code==TRADE_RETCODE_LIMIT_VOLUME ||
-          code==TRADE_RETCODE_INVALID_EXPIRATION || code==TRADE_RETCODE_INVALID_ORDER || code==TRADE_RETCODE_LIMIT_ORDERS;
+          code==TRADE_RETCODE_INVALID_FILL || code==TRADE_RETCODE_LIMIT_VOLUME;
 }
 void RecordResult()
 {
    uint code=execution.ResultRetcode();
-   if(pending.kind!=5) pending.order=execution.ResultOrder();
+   pending.order=execution.ResultOrder();
    if(pending.order==0 && execution.ResultDeal()>0 && HistoryDealSelect(execution.ResultDeal()))
       pending.order=(ulong)HistoryDealGetInteger(execution.ResultDeal(),DEAL_ORDER);
    PrintFormat("[T哥请求] 动作=%d retcode=%u order=%I64u deal=%I64u %s",
@@ -512,7 +508,7 @@ void RecordResult()
    if(ExplicitReject(code)) { ClearPending(); reason="请求被明确拒绝，见日志"; }
    else { SavePending(); reason="请求已发送，等待真实成交/持仓确认"; } // 未知结果不补发
 }
-string EntryTag() { if(pending.kind==4) return AILimitTag(pending.sourceHash,pending.level,pending.direction); return "TG"+IntegerToString((long)pending.bar)+"_"+IntegerToString((long)Hash(DoubleToString(pending.level,_Digits))); }
+string EntryTag() { return "TG"+IntegerToString((long)pending.bar)+"_"+IntegerToString((long)Hash(DoubleToString(pending.level,_Digits))); }
 bool FinalOrderConfirmed(const ulong order)
 {
    if(OrderSelect(order)) return false;
@@ -520,8 +516,7 @@ bool FinalOrderConfirmed(const ulong order)
    ENUM_ORDER_STATE state=(ENUM_ORDER_STATE)HistoryOrderGetInteger(order,ORDER_STATE);
    if(state!=ORDER_STATE_FILLED && state!=ORDER_STATE_CANCELED && state!=ORDER_STATE_REJECTED && state!=ORDER_STATE_EXPIRED) return false;
    double filled=HistoryOrderGetDouble(order,ORDER_VOLUME_INITIAL)-HistoryOrderGetDouble(order,ORDER_VOLUME_CURRENT);
-   datetime setup=(datetime)HistoryOrderGetInteger(order,ORDER_TIME_SETUP);
-   if(!HistorySelect(MathMin(pending.at,setup>0 ? setup : pending.at)-60,TimeCurrent()+1)) return false;
+   if(!HistorySelect(pending.at-60,TimeCurrent()+1)) return false;
    double actual=0;
    for(int i=0;i<HistoryDealsTotal();i++)
    {
@@ -535,10 +530,6 @@ void Reconcile()
 {
    if(pending.kind==0 || !TerminalInfoInteger(TERMINAL_CONNECTED)) return;
    if(pending.kind<0) { reason="上次状态写入中断，待人工核对请求"; return; }
-   if(pending.kind==4)
-   {
-      if(ReconcileAILimitCreation()) return;
-   }
    if(pending.kind==3)
    {
       ulong ticket=PositionById(pending.position);
@@ -564,7 +555,7 @@ void Reconcile()
       }
       return;
    }
-   if(pending.order==0 && (pending.kind==1 || pending.kind==4) && HistorySelect(pending.at-60,TimeCurrent()+1))
+   if(pending.order==0 && pending.kind==1 && HistorySelect(pending.at-60,TimeCurrent()+1))
    {
       string tag=EntryTag();
       for(int i=HistoryOrdersTotal()-1;i>=0;i--)
@@ -603,16 +594,13 @@ void Open(const Candidate &signal)
    if(!CanExecute() || blocked!="") { reason=blocked=="" ? "执行条件未就绪" : blocked; return; }
    if((datetime)Load("attemptBar")>=signal.bar) { reason="本根M1已发送过请求"; return; }
    string visit=signal.ai ? AIVisitKey(signal.level,signal.direction) : VisitKey(signal.level);
-   if(Load(visit)>0 || (signal.ai && HasAILimit(signal.level,signal.direction))) { reason="本点位机会已消费/已挂单"; return; }
+   if(Load(visit)>0) { reason="本点位机会已消费"; return; }
    MqlTick q;
    if(!FreshQuote(q)) { signalRetry=true; reason="发送前报价失效，窗口内重试"; return; }
    if(q.ask-q.bid>最大点差价格) { reason="发送前点差超过上限"; return; }
    if(!ExactLot(每次开仓手数)) { reason="开仓手数不符合券商规格"; return; }
    int sign=signal.direction;
    double entry=sign>0 ? q.ask : q.bid,sl=Align(entry-sign*保险价格距离,sign),tp;
-   if(StringFind(signal.method,"T哥顺趋势提前入场")==0 &&
-      (!AIAdvanceReady() || aiTrend!=sign || MathAbs(entry-signal.level)>点位提前容差))
-   { reason="提前入场的趋势/价格条件已变化"; return; }
    if(!Target(entry,sign,tp) || !Stops(sign,sl,tp,q)) { reason="价格保护不符合券商规格"; return; }
    ENUM_ORDER_TYPE type=sign>0 ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
    double margin=0;
@@ -710,9 +698,6 @@ void Manage()
       double target=tp;
       if(target<=0) target=Align(open+sign*(split ? 尾仓目标价格距离 : 首批止盈价格距离),-sign);
       if(!split) target=Align(open+sign*首批止盈价格距离,-sign);
-      // 限价可能以更优价格成交，按真实均价压住尾仓10点上限，不扩大止损。
-      if(StringFind(PositionGetString(POSITION_COMMENT),"TGL")==0 && sign*(target-open)>尾仓目标价格距离)
-         target=Align(open+sign*尾仓目标价格距离,-sign);
       if(sl<=0 || sign*(required-sl)>TickSize()*0.5 || MathAbs(target-tp)>TickSize()*0.5)
       {
          Modify(ticket,id,sign,required,target);
@@ -730,7 +715,6 @@ void Manage()
       RecordResult(); return;
    }
 }
-#include "Include/Trading/TgeLimitOrders.mqh"
 #include "Include/Trading/TgeMobileMarkers.mqh"
 
 // 视图层沿用交易托管系统的Canvas、深蓝底色与四格概览，只读取状态。
@@ -1102,7 +1086,7 @@ void Panel()
    panelCanvas.FillRectangle(0,0,UIPx(3),UIPx(39),UIInk(UI_ACCENT));
    string pageTitle=uiStatistics ? "交易统计" : uiIndicators ? "看盘设置" : "T哥点位监控";
    UIText(_Symbol+" · "+pageTitle,14,10,220,12,UI_TEXT);
-   UIText("v1.26",240,13,40,8,UI_DIM);
+   UIText("v1.25",240,13,40,8,UI_DIM);
    UIText(TimeToString(TimeGMT()+8*3600,TIME_SECONDS),286,12,100,10,UI_MUTED,true);
    UIButton(uiCollapsed ? "+" : "−",396,7,30,1);
    UIText(启用真实交易 ? "交易" : "观察",434,13,112,9.5,启用真实交易 ? UI_ACCENT : UI_WARN);
@@ -1196,14 +1180,10 @@ void Panel()
    UIText(SyncStatus()+" · 最近成功 "+syncAt,24,pointY+pointHeight-18,494,8.5,UI_MUTED);
 
    UICard(12,signalY,536,104,UI_CARD);
-   bool advance=启用趋势提前挂单 && 读取AI即时策略 && aiMode=="SETUP";
-   int displayedTrend=advance ? aiTrend : trend;
-   bool trendReady=advance ? aiTrendReady : entryView.ready;
-   string trendText=!trendReady ? "等待数据" : displayedTrend>0 ? "M5偏多" : displayedTrend<0 ? "M5偏空" : "M5方向未明";
+   string trendText=!entryView.ready ? "等待数据" : trend>0 ? "M5偏多" : trend<0 ? "M5偏空" : "M5方向未明";
    UIText("入场判断 · "+trendText,24,signalY+9,210,10,
-          !trendReady ? UI_MUTED : displayedTrend>0 ? UI_ACCENT : displayedTrend<0 ? UI_SELL : UI_MUTED);
-   UIText(advance ? StringFormat("顺势提前 %.1f · 逆势等M1",点位提前容差) :
-          entryView.ready ? StringFormat("M5换边%d次 · M1 %s",entryView.crossings,TimeToString(entryView.bar,TIME_MINUTES)) : "等待完整收线数据",
+          !entryView.ready ? UI_MUTED : trend>0 ? UI_ACCENT : trend<0 ? UI_SELL : UI_MUTED);
+   UIText(entryView.ready ? StringFormat("M5换边%d次 · M1 %s",entryView.crossings,TimeToString(entryView.bar,TIME_MINUTES)) : "等待完整收线数据",
            238,signalY+10,296,9,UI_MUTED,true);
    string near=entryView.ready ? StringFormat("%s参考 %.2f · 距点位 %.2f",
                  entryView.direction>0 ? "多" : "空",entryView.level,entryView.distance) : "点位距离：尚未评估";
@@ -1217,9 +1197,8 @@ void Panel()
    string gate=ExecutionBlock(); MqlTick displayQuote;
    if(gate=="" && feedActive && !FreshQuote(displayQuote)) gate="报价过期/断线，暂停新请求";
    else if(gate=="" && feedActive && displayQuote.ask-displayQuote.bid>最大点差价格) gate="当前点差超过上限";
-   if(gate=="") gate=feedActive ? "执行通道就绪 · 按策略等待机会" : "等待有效点位地图";
+   if(gate=="") gate=feedActive ? "执行通道就绪 · 按收线条件等待机会" : "等待有效点位地图";
    UICard(12,signalY+112,536,28,UI_HEADER);
-   if(AILimitCount()>0) gate=StringFormat("策略挂单%d笔 · ",AILimitCount())+gate;
    UIText("状态："+gate,24,signalY+118,508,9.5,
           pending.kind!=0 ? UI_WARN : UI_MUTED);
    panelCanvas.Update();
@@ -1227,7 +1206,7 @@ void Panel()
 int OnInit()
 {
    if(每次开仓手数<=0 || 最大同时持仓<1 || 最大同时持仓>10 ||
-      最大点差价格<=0 || 点位提前容差<=0 || 点位提前容差>=保险价格距离 ||
+      最大点差价格<=0 ||
       保险价格距离<=0 || 首批止盈价格距离<=0 || 尾仓目标价格距离<=首批止盈价格距离 ||
       TickSize()<=0 || !ExactLot(每次开仓手数))
       return INIT_PARAMETERS_INCORRECT;
@@ -1258,12 +1237,8 @@ void OnTimer()
 {
    if(busy) return; busy=true;
    ReadFeed(); ReadHealth(); ReadAISetups(); Reconcile(); Manage();
-   RefreshAITrend(); SyncAILimits();
    Candidate immediate; ZeroMemory(immediate);
    if(AIMarketSignal(immediate)) Open(immediate);
-   Candidate early; ZeroMemory(early);
-   if(AITrendEntry(early)) Open(early);
-   PrepareAILimit();
    datetime minute=iTime(_Symbol,PERIOD_M1,1);
    if(minute>0 && minute!=lastMinute)
    {

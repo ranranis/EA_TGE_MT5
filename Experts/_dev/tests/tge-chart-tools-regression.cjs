@@ -386,7 +386,7 @@ Object.assign(cx,{
  pending:{kind:0},每日权益回撤上限百分比:1,最大点差价格:0.5,_Digits:2,
  DoubleToString:(v,n)=>v.toFixed(n),AccountInfoString:()=>'USD',ACCOUNT_CURRENCY:0,
  StringFormat:(s,...values)=>s.replace(/%\.\df|%d|%s/g,()=>String(values.shift())),
- 启用趋势提前挂单:true,点位提前容差:3,aiMode:"WAIT",aiTrend:0,aiTrendReady:false,SyncStatus:()=>'等待同步',AILimitCount:()=>0,ExecutionBlock:()=>'观察模式'
+ SyncStatus:()=>'等待同步',ExecutionBlock:()=>'观察模式'
 });
 for(const [name,args] of [['PageTabs','y'],['IndicatorPage',''],['Panel','']]){
  const code=convert(body(name)).replace(/let (\w+)\[\];/g,'let $1=[];').replace(/MqlTick (\w+);/g,'let $1={};');
@@ -429,10 +429,5 @@ check('monitor page presents AI reference independently of the old map and daily
  cx.读取AI即时策略=true;cx.aiReady=true;cx.AIPlanCaption=()=>'AI即时：BUY 4160 / SELL 4175';
  cx.ViewAction(2);assert(displayed().includes('AI即时：BUY 4160 / SELL 4175'));
  assert(!displayed().some(v=>v.includes('日亏损上限')));
-});
-check('monitor shows the advance trend actually used and confirmed pending order count',()=>{
- cx.aiMode='SETUP';cx.aiTrendReady=true;cx.aiTrend=-1;cx.AILimitCount=()=>1;cx.Panel();
- assert(displayed().some(v=>v.includes('M5偏空')));assert(displayed().some(v=>v.includes('顺势提前 3')));
- assert(displayed().some(v=>v.includes('策略挂单1笔')));
 });
 console.log(checks+' production-source chart UI checks passed; native MT5 clicks not exercised.');
