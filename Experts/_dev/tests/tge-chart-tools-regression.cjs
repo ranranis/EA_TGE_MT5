@@ -27,7 +27,8 @@ const cx=vm.createContext({Math,
  uiIndicatorLabels:['MA5','EMA20','布林','RSI','MACD','ATR','MA10','MA50','MA100','MA200','M5·MA5','M15·MA5','确认拐点','昨高低','ADX','随机KD'],uiIndicatorHandles:Array(16).fill(-1),uiIndicatorNotice:'',INVALID_HANDLE:-1,
  uiCollapsed:false,uiPointLines:true,uiStatistics:false,uiIndicators:false,statsPeriod:0,statsOffsets:[0,0,0],statsFilter:0,statsDetail:0,statsReview:0,statsDirty:true,statsLastAttempt:0,statsTrades:[],uiHits:[],uiPeriods:[1,5,15,30,16385,16388,16408],
  uiInitialized:false,uiOldMouseMove:false,uiDragging:false,uiOldScroll:false,uiLeftWasDown:false,uiPressedAction:0,uiDragDX:0,uiDragDY:0,panelReady:true,
- VIEW:'TGE_',_Symbol:'XAUUSD.c',UI_HEADER:0,UI_ACCENT:1,UI_MUTED:2,
+ VIEW:'TGE_',_Symbol:'XAUUSD.c',UI_HEADER:0,UI_ACCENT:1,UI_MUTED:2,UI_DIM:3,
+ uiMobileMarkers:true,启用手机标记挂单:true,markerStatus:'等待同步',markerPrefix:'TGM.test.',markerDirty:false,GlobalVariablesFlush:()=>{},
  CHART_SCALE:'scale',CHART_AUTOSCROLL:'follow',CHART_SHOW_GRID:'grid',CHART_SHIFT:'shift',CHART_MODE:'mode',
  CHART_MOUSE_SCROLL:'scroll',CHART_EVENT_MOUSE_MOVE:'move',CHART_WIDTH_IN_PIXELS:'width',CHART_HEIGHT_IN_PIXELS:'height',
  CHART_WINDOWS_TOTAL:'windows',
@@ -139,6 +140,13 @@ check('monitor, statistics and watch pages are mutually exclusive',()=>{
   cx.ViewAction(3);assert.equal(cx.uiIndicators,false);assert.equal(cx.uiStatistics,true);
   cx.ViewAction(2);assert.equal(cx.uiIndicators,false);assert.equal(cx.uiStatistics,false);
 });
+check('phone TP button saves preference once and defers requests to timer',()=>{
+ resetHits();cx.UIButton('手机TP开',240,49,100,28);cx.uiMobileMarkers=true;cx.markerDirty=false;
+ gesture(28);assert.equal(cx.uiMobileMarkers,false);assert.equal(cx.markerDirty,true);
+ assert.equal(globals.get('TGM.test.enabled'),0);
+ gesture(28);assert.equal(cx.uiMobileMarkers,true);assert.equal(globals.get('TGM.test.enabled'),1);
+ assert(!/CancelTgeMobileMarkers|SubmitTgeMobileMarker|SyncTgeMobileMarkers/.test(body('ViewAction')));
+});
 check('statistics dates, periods, filters and review arrows stay within display state',()=>{
  cx.statsPeriod=0;cx.statsOffsets=[0,0,0];cx.ViewAction(33);assert.equal(cx.statsOffsets[0],-1);
  cx.ViewAction(31);cx.ViewAction(35);assert.equal(cx.statsPeriod,1);assert.equal(cx.statsOffsets[1],1);
@@ -152,7 +160,7 @@ check('panel is clamped into resized chart boundaries',()=>{
  props.set('width',600);props.set('height',600);cx.uiX=999;cx.uiY=-5;cx.MovePanel();assert.equal(cx.uiX,36);assert.equal(cx.uiY,0);
  props.set('width',100);props.set('height',100);cx.MovePanel();assert.equal(cx.uiX,0);assert.equal(cx.uiY,0);
 });
-check('chart tools cannot call order or trading-state functions',()=>{
+check('UI callbacks cannot send requests or alter core trading state directly',()=>{
  for(const name of ['ViewAction','OnChartEvent','SaveView','InitView','MovePanel','HitAction','ChartTools','UIButton'])
   assert(!/\bexecution\s*\.|\b(?:Open|Manage|Reconcile|Store|SavePending|ClearPending|Signal)\s*\(/.test(body(name)),name);
 });
@@ -392,7 +400,7 @@ check('actual watch-tab click publishes the new bitmap before returning',()=>{
  assert.equal(frames.length,before+1,'watch page must call Canvas.Update');
  assert(displayed().includes('看盘设置'));assert(displayed().includes('MA5关'));
  assert(!displayed().includes('当前没有本EA持仓'));
- assert.equal(cx.uiHits.length,23);assert.equal(globals.get(cx.uiPrefix+'page'),2);
+ assert.equal(cx.uiHits.length,24);assert.equal(globals.get(cx.uiPrefix+'page'),2);
 });
 check('watch indicator clicks and redraws publish matching state without toggling back',()=>{
  const before=frames.length;gesture(50);
@@ -404,17 +412,17 @@ check('watch indicator clicks and redraws publish matching state without togglin
 });
 check('returning from monitor or restored watch page publishes only current-page buttons',()=>{
  for(let i=0;i<3;i++){
-  gesture(2);assert(displayed().includes('当前没有本EA持仓'));assert.equal(cx.uiHits.length,5);
-  gesture(4);assert(displayed().includes('看盘设置'));assert.equal(cx.uiHits.length,23);
+  gesture(2);assert(displayed().includes('当前没有本EA持仓'));assert.equal(cx.uiHits.length,6);
+  gesture(4);assert(displayed().includes('看盘设置'));assert.equal(cx.uiHits.length,24);
  }
  cx.SaveView();cx.uiIndicators=false;cx.uiStatistics=true;cx.InitView();
  const before=frames.length;cx.Panel();assert.equal(frames.length,before+1);
  assert.equal(cx.uiIndicators,true);assert.equal(cx.uiStatistics,false);assert(displayed().includes('看盘设置'));
 });
 check('collapsed watch page removes hidden indicator hit targets and expands with refreshed state',()=>{
- gesture(1);assert.equal(cx.uiCollapsed,true);assert.equal(cx.uiHits.length,5);
+ gesture(1);assert.equal(cx.uiCollapsed,true);assert.equal(cx.uiHits.length,6);
  assert(!displayed().includes('MA5关'));assert(displayed().includes('看盘页 · 指标显示设置'));
- gesture(1);assert.equal(cx.uiCollapsed,false);assert.equal(cx.uiHits.length,23);assert(displayed().includes('MA5关'));
+ gesture(1);assert.equal(cx.uiCollapsed,false);assert.equal(cx.uiHits.length,24);assert(displayed().includes('MA5关'));
 });
 
 console.log(checks+' production-source chart UI checks passed; native MT5 clicks not exercised.');

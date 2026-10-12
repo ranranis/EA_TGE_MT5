@@ -1,5 +1,5 @@
 #property strict
-#property version "1.23"
+#property version "1.24"
 #property description "T哥点位地图 / M5 MA5 / M1收线 / 0.02手分批。独立Magic，仅管理本EA持仓。"
 #include <Trade/Trade.mqh>
 #include <Canvas/Canvas.mqh>
@@ -19,6 +19,10 @@ input bool   允许震荡点位反应=true;
 input double 保险价格距离=10.0;
 input double 首批止盈价格距离=5.0;
 input double 尾仓目标价格距离=10.0;
+
+input group "手机点位 TP 标记"
+input bool   启用手机标记挂单=true;       // 真实0.01手Buy Limit，仅用TP显示老师点位
+input double 手机标记挂单固定价格=100.0; // 仅黄金；接近挂单价20点时请求撤销
 
 // 以下参数只配置图表显示，不改变M5/M1交易规则。
 input group "看盘指标 · 均线"
@@ -49,9 +53,9 @@ input int    看盘KD信号=3;
 
 const string FEED="FeishuMT5SignalMonitor\\tge_levels.csv";
 const string VIEW="TGE_";
-// 图表工具仅控制显示；独立于交易状态与输入参数。
+// 图表显示和手机TP开关独立于短线候选、仓位及pending状态。
 int uiX=8,uiY=24;
-bool uiCollapsed=false,uiPointLines=true;
+bool uiCollapsed=false,uiPointLines=true,uiMobileMarkers=true;
 
 CTrade execution;
 double levels[];
@@ -711,6 +715,8 @@ void Manage()
       RecordResult(); return;
    }
 }
+#include "Include/Trading/TgeMobileMarkers.mqh"
+
 // 视图层沿用交易托管系统的Canvas、深蓝底色与四格概览，只读取状态。
 CCanvas panelCanvas;
 bool panelReady=false;
@@ -921,6 +927,8 @@ void PageTabs(const int y)
    UIButton("监控",12,y,68,2,!uiStatistics && !uiIndicators);
    UIButton("统计",88,y,68,3,uiStatistics);
    UIButton("看盘",164,y,68,4,uiIndicators);
+   UIButton(uiMobileMarkers && 启用手机标记挂单 ? "手机TP开" : "手机TP关",240,y,100,28,uiMobileMarkers && 启用手机标记挂单);
+   UIText(markerStatus,350,y+7,104,8,UI_DIM);
    UIButton(uiPointLines ? "点位线开" : "点位线关",462,y,82,27,uiPointLines);
 }
 void IndicatorPage()
@@ -1017,6 +1025,13 @@ void ViewAction(const int action)
    else if(action>=70 && action<=75) UIIndicatorSet(action-60,UIIndicatorWindow(action-60)<0);
    else if(action==60 || action==61) UIMovingAverageGroup(action==61);
    else if(action==27) { uiPointLines=!uiPointLines; DrawLevels(); }
+   else if(action==28)
+   {
+      if(markerPrefix=="" || !启用手机标记挂单) return;
+      bool enabled=!uiMobileMarkers;
+      if(GlobalVariableSet(markerPrefix+"enabled",enabled ? 1 : 0)==0) return;
+      uiMobileMarkers=enabled; markerDirty=true; GlobalVariablesFlush();
+   }
    else return;
    // 先完成图表命令，再按实际状态画工具栏。
    ChartRedraw(0); Panel(); SaveView();
@@ -1076,10 +1091,10 @@ void Panel()
    UIText(启用真实交易 ? "交易" : "观察",434,13,112,9.5,启用真实交易 ? UI_ACCENT : UI_WARN);
    PageTabs(49);
    ObjectSetString(0,VIEW+"CANVAS",OBJPROP_TOOLTIP,
-                   "拖动标题移动面板；−收起 / +展开；页面和指标只影响显示 · "+feedStatus+
+                   "拖动标题移动面板；−收起 / +展开；指标只影响显示，手机TP为服务器提示挂单 · "+feedStatus+
                    " · 来源 "+sourceSender+" · 消息 "+identity+
                    " · 监控心跳(北京) "+(healthBeat>0 ? TimeToString(healthBeat+8*3600,TIME_DATE|TIME_SECONDS) : "未知")+
-                   " · "+uiIndicatorNotice);
+                   " · "+uiIndicatorNotice+" · 手机TP标记："+markerStatus);
 
    if(uiCollapsed)
    {
@@ -1212,7 +1227,7 @@ int OnInit()
    maHandle=iMA(_Symbol,PERIOD_M5,5,0,MODE_SMA,PRICE_CLOSE); atrHandle=iATR(_Symbol,PERIOD_M5,14);
    if(maHandle==INVALID_HANDLE || atrHandle==INVALID_HANDLE) return INIT_FAILED;
    RestorePending(); dayKey=(long)Load("day"); dayBase=Load("base"); dayStopped=Load("stopped")>0;
-   InitView();
+   InitView(); InitTgeMobileMarkers();
    readyFrom=TimeCurrent(); ReadFeed(); ReadHealth(); EventSetTimer(1); Panel();
    return INIT_SUCCEEDED;
 }
@@ -1229,7 +1244,7 @@ void OnTimer()
       DecisionLog("EVALUATE",(gate!="" ? gate+" · " : "")+reason);
       if(!signalRetry) lastMinute=minute;
    }
-   Panel(); busy=false;
+   SyncTgeMobileMarkers(); Panel(); busy=false;
 }
 void OnTick() { }
 void OnTradeTransaction(const MqlTradeTransaction &trans,const MqlTradeRequest &request,const MqlTradeResult &result)
@@ -1283,7 +1298,7 @@ void OnChartEvent(const int id,const long &lparam,const double &dparam,const str
 }
 void OnDeinit(const int why)
 {
-   EventKillTimer();
+   EventKillTimer(); StopTgeMobileMarkers();
    if(uiInitialized)
    {
       if(uiDragging) ChartSetInteger(0,CHART_MOUSE_SCROLL,uiOldScroll);

@@ -30,7 +30,7 @@ function env() {
     LotDown:v=>Math.floor(v/.01+1e-8)*.01,ArraySize:a=>a.length,
     首批止盈价格距离:5,保险价格距离:10,尾仓目标价格距离:10,
     TimeCurrent:()=>1000,TimeTradeServer:()=>1000,
-    PrintFormat:()=>{},GlobalVariablesFlush:()=>{},CanExecute:()=>true,
+    PrintFormat:()=>{},GlobalVariablesFlush:()=>{},CanExecute:()=>true,SyncTgeMobileMarkers:()=>{},
     pending:{kind:0},reason:'',TerminalInfoInteger:()=>true,TERMINAL_CONNECTED:1,
     entryView:{},checkingMinute:0,signalRetry:false,EMPTY_VALUE:Number.MAX_VALUE,
     ZeroMemory:p=>{for(const k of Object.keys(p))delete p[k];},DecisionLog:()=>{},ExecutionBlock:()=>'',
@@ -244,7 +244,7 @@ test('live server order stays blocked',()=>assert(!reconcileOrder({visible:true}
 test('canceled remainder still needs executed volume reconciled',()=>assert(!reconcileOrder({state:2,filled:.01,actual:0})));
 test('canceled untouched order can unlock',()=>assert(reconcileOrder({state:2,filled:0,actual:0})));
 
-test('source only has three guarded trading call sites',()=>{
+test('core strategy retains its three guarded trading call sites',()=>{
  const calls=[...src.matchAll(/execution\.(PositionOpen|PositionClosePartial|PositionModify)\(/g)];
  assert.equal(calls.length,3);
  for(const name of ['Open','Manage','Modify']) assert(body(name).includes('!CanExecute()'));

@@ -14,12 +14,12 @@ bool LoadMobileMarkerDeleteTracking()
 {
    if(mobileMarkerDeleteTrackingLoaded) return true;
    ArrayResize(mobileMarkerDeleteTickets,0);
-   string prefix=MobileMarkerDeletePrefix();
+   string deletePrefix=MobileMarkerDeletePrefix();
    for(int i=0;i<GlobalVariablesTotal();i++)
    {
       string key=GlobalVariableName(i);
-      if(StringFind(key,prefix)!=0) continue;
-      ulong ticket=(ulong)StringToInteger(StringSubstr(key,StringLen(prefix)));
+      if(StringFind(key,deletePrefix)!=0) continue;
+      ulong ticket=(ulong)StringToInteger(StringSubstr(key,StringLen(deletePrefix)));
       if(ticket==0) continue;
       int n=ArraySize(mobileMarkerDeleteTickets);
       if(ArrayResize(mobileMarkerDeleteTickets,n+1,32)!=n+1) return false;
