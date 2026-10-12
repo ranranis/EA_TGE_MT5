@@ -1,4 +1,4 @@
-"""Windows 独立监控入口：python app.py --help。所有订单均为本地模拟。"""
+"""Windows 独立监控入口：python app.py --help。Python不调用真实交易接口；AI参考由独立EA读取。"""
 import argparse
 import csv
 import io
@@ -22,6 +22,7 @@ from mt5_reader import MT5Reader, QuoteError
 from paper import PaperEngine
 from teacher_strategy import TeacherAnalysis, source_levels
 from dashboard import serve
+from deepseek_ai import ai_worker, ai_snapshot
 
 ROOT=Path(__file__).resolve().parent
 DEFAULT_HOME=Path(os.environ.get('LOCALAPPDATA',str(Path.home())))/'FeishuMT5SignalMonitor'
@@ -46,7 +47,8 @@ def config_load(home):
     loaded=json.loads(path.read_text(encoding='utf-8'))
     if set(loaded)-set(defaults): raise ValueError('配置有未知字段：'+','.join(set(loaded)-set(defaults)))
     c=defaults|loaded
-    if c['mode'] not in ('monitor','paper') or c['ai_enabled'] is not False: raise ValueError('只允许 monitor / paper 模式，未接入 AI 服务')
+    if c['mode'] not in ('monitor','paper') or type(c['ai_enabled']) is not bool: raise ValueError('只允许 monitor / paper 模式，AI开关须为布尔值')
+    if c['ai_model'] not in ('deepseek-flash','deepseek-v4-pro'): raise ValueError('DeepSeek模型不支持')
     for key in ('poll_seconds','quote_seconds','overlap_seconds','window_seconds','max_pages','reconcile_batch','thread_batch','signal_ttl_seconds','pending_ttl_seconds','quote_max_age_seconds','sync_max_age_seconds','initial_equity','max_spread_points'):
         if type(c[key]) not in (int,float) or c[key]<=0: raise ValueError('配置应为正数：'+key)
     if c['poll_seconds']<5 or c['quote_seconds']<0.5: raise ValueError('轮询周期过短')
@@ -165,6 +167,15 @@ def export_teacher_levels(db,c,paused,now):
                  int(state(db,'checkpoint',0)),int(bool(state(db,'last_sync_ok',False))),
                  int(paused),int(c['sync_max_age_seconds']),'END'])
     atomic_text(folder/'tge_health.csv',health.getvalue())
+    ai=ai_snapshot(db,c,now,paused) if c.get('ai_enabled') else dict(active=False,mode='WAIT',plans=[],reason='AI未启用')
+    bridge=io.StringIO(newline=''); aw=csv.writer(bridge,lineterminator='\r\n')
+    note=str(ai['reason']).replace(',','，').replace('\r',' ').replace('\n',' ')[:160]
+    aw.writerow(['TGA','1',int(now),int(ai['active']),c['symbols'][c['teacher_symbol']],
+                 ai.get('message_id',''),ai.get('revision',''),int(ai.get('created',0)),len(ai['plans']),ai['mode'],note])
+    for plan in ai['plans']: aw.writerow(['SETUP',plan['side'],format(plan['price'],'.10f'),plan['mode'],'NEAR' if plan.get('near') else 'POINT'])
+    aw.writerow(['END',len(ai['plans'])])
+    atomic_text(folder/'tge_ai_setups.csv',bridge.getvalue())
+
     # 保留旧EA的24小时来源上限、90秒心跳及指定老师身份；新规则不绕过旧EA。
     healthy=bool(state(db,'last_sync_ok',False)) and now-state(db,'last_sync_at',0)<=c['sync_max_age_seconds'] and now-state(db,'checkpoint',0)<=c['sync_max_age_seconds']
     ttl=c['levels_ttl_seconds'] or 86400
@@ -223,7 +234,7 @@ def run(home,c,once=False,with_dashboard=True):
         if c['mode']=='paper': c['currency']=quotes.account_currency()
         engine=PaperEngine(db,c,quotes) if c['mode']=='paper' else None
         analysis=TeacherAnalysis(db,c,quotes,time.time())
-        worker=None; dashboard=None
+        worker=None; ai_thread=None; dashboard=None
         def shutdown(*_): stop.set()
         signal.signal(signal.SIGINT,shutdown); signal.signal(signal.SIGTERM,shutdown)
         (home/'control'/'stop').unlink(missing_ok=True)
@@ -238,6 +249,9 @@ def run(home,c,once=False,with_dashboard=True):
             else:
                 worker=threading.Thread(target=sync_worker,args=(home,c,stop),name='lark-reader')
                 worker.start()
+            if c.get('ai_enabled'):
+                ai_thread=threading.Thread(target=ai_worker,args=(home,c,stop),name='deepseek-reader')
+                ai_thread.start()
             last_report=0; last_export=0; last_quote_warning=0; last_analysis=0
             healthy=False; result={}
             while not stop.is_set():
@@ -259,6 +273,7 @@ def run(home,c,once=False,with_dashboard=True):
         finally:
             stop.set()
             if worker: worker.join(timeout=40)
+            if ai_thread: ai_thread.join(timeout=22)
             if dashboard: dashboard.shutdown(); dashboard.server_close()
             if c['mode']=='paper': report(db,home,c)
             export_observer(db,c,True); export_teacher_levels(db,c,True,time.time()); quotes.close(); db.close()
@@ -347,9 +362,16 @@ def main(argv=None):
     parser=argparse.ArgumentParser(description='飞书监控与 MT5 本地模拟；不存在实盘模式')
     parser.add_argument('--home',type=Path,default=DEFAULT_HOME,help='配置/运行数据目录，默认 LocalAppData')
     sub=parser.add_subparsers(dest='command',required=True)
-    for name in ('run','worker','service','once','doctor','status','report','pause','resume','stop','start','dashboard','install-task','uninstall-task'): sub.add_parser(name)
+    for name in ('run','worker','service','once','doctor','status','report','pause','resume','stop','start','dashboard','install-task','uninstall-task','ai-key'): sub.add_parser(name)
     imp=sub.add_parser('import-history'); imp.add_argument('--start',required=True); imp.add_argument('--end',required=True)
     args=parser.parse_args(argv); home=args.home.resolve(); c=config_load(home); setup(home,'service.log' if args.command=='service' else 'monitor.log')
+    if args.command=='ai-key':
+        import getpass
+        from deepseek_ai import protect_secret
+        key=getpass.getpass('DeepSeek API Key: ').strip()
+        if not key.startswith('sk-') or len(key)<20: raise ValueError('API Key格式不正确')
+        protect_secret(home/'credentials/deepseek.dpapi',key)
+        print('凭证已用当前Windows用户加密保存'); return
     if args.command in ('pause','resume','stop'):
         if args.command=='resume': (home/'control'/'pause').unlink(missing_ok=True)
         else: atomic_text(home/'control'/args.command,'1')

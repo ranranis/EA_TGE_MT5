@@ -27,7 +27,7 @@ const cx=vm.createContext({Math,
  uiIndicatorLabels:['MA5','EMA20','布林','RSI','MACD','ATR','MA10','MA50','MA100','MA200','M5·MA5','M15·MA5','确认拐点','昨高低','ADX','随机KD'],uiIndicatorHandles:Array(16).fill(-1),uiIndicatorNotice:'',INVALID_HANDLE:-1,
  uiCollapsed:false,uiPointLines:true,uiStatistics:false,uiIndicators:false,statsPeriod:0,statsOffsets:[0,0,0],statsFilter:0,statsDetail:0,statsReview:0,statsDirty:true,statsLastAttempt:0,statsTrades:[],uiHits:[],uiPeriods:[1,5,15,30,16385,16388,16408],
  uiInitialized:false,uiOldMouseMove:false,uiDragging:false,uiOldScroll:false,uiLeftWasDown:false,uiPressedAction:0,uiDragDX:0,uiDragDY:0,panelReady:true,
- VIEW:'TGE_',_Symbol:'XAUUSD.c',UI_HEADER:0,UI_ACCENT:1,UI_MUTED:2,UI_DIM:3,
+ 读取AI即时策略:false,每次开仓手数:.02,aiReady:false,AIPlanCaption:()=>'AI等待',VIEW:'TGE_',_Symbol:'XAUUSD.c',UI_HEADER:0,UI_ACCENT:1,UI_MUTED:2,UI_DIM:3,
  uiMobileMarkers:true,启用手机标记挂单:true,markerStatus:'等待同步',markerPrefix:'TGM.test.',markerDirty:false,GlobalVariablesFlush:()=>{},
  CHART_SCALE:'scale',CHART_AUTOSCROLL:'follow',CHART_SHOW_GRID:'grid',CHART_SHIFT:'shift',CHART_MODE:'mode',
  CHART_MOUSE_SCROLL:'scroll',CHART_EVENT_MOUSE_MOVE:'move',CHART_WIDTH_IN_PIXELS:'width',CHART_HEIGHT_IN_PIXELS:'height',
@@ -425,4 +425,9 @@ check('collapsed watch page removes hidden indicator hit targets and expands wit
  gesture(1);assert.equal(cx.uiCollapsed,false);assert.equal(cx.uiHits.length,24);assert(displayed().includes('MA5关'));
 });
 
+check('monitor page presents AI reference independently of the old map and daily-limit caption',()=>{
+ cx.读取AI即时策略=true;cx.aiReady=true;cx.AIPlanCaption=()=>'AI即时：BUY 4160 / SELL 4175';
+ cx.ViewAction(2);assert(displayed().includes('AI即时：BUY 4160 / SELL 4175'));
+ assert(!displayed().some(v=>v.includes('日亏损上限')));
+});
 console.log(checks+' production-source chart UI checks passed; native MT5 clicks not exercised.');

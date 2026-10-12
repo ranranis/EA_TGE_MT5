@@ -1,5 +1,5 @@
 #property strict
-#property version "1.24"
+#property version "1.25"
 #property description "T哥点位地图 / M5 MA5 / M1收线 / 0.02手分批。独立Magic，仅管理本EA持仓。"
 #include <Trade/Trade.mqh>
 #include <Canvas/Canvas.mqh>
@@ -11,9 +11,9 @@ input group "执行与仓位"
 input bool   启用真实交易=true;        // 默认执行交易；手动关闭时仅观察，不发送交易请求
 input double 每次开仓手数=0.02;
 input int    最大同时持仓=3;
-input double 每日权益回撤上限百分比=1.0; // 本实例启动/每日首次观察权益为基准，含账户其他交易
 input double 最大点差价格=0.50;         // 黄金报价价格差，不是_Point倍数
 input ulong  EA魔法号=560056;
+input bool   读取AI即时策略=true;     // 读取本地DeepSeek语义桥；未就绪时等待，不猜方向
 input group "T哥点位节奏与退出"
 input bool   允许震荡点位反应=true;
 input double 保险价格距离=10.0;
@@ -63,12 +63,10 @@ string identity="",sourceKind="",sourceSender="",feedStatus="等待首次点位"
 datetime sourceTime=0,feedTime=0,readyFrom=0,lastMinute=0;
 bool feedActive=false,busy=false,stateOK=true;
 int maHandle=INVALID_HANDLE,atrHandle=INVALID_HANDLE,lockHandle=INVALID_HANDLE,trend=0;
-double atr=0,dayBase=0;
+double atr=0;
 string prefix="";
 long accountLogin=0;
 string accountServer="";
-long dayKey=0;
-bool dayStopped=false;
 // 仅记录最近一次收线评估，不作为第二套交易状态。
 bool signalRetry=false;
 datetime checkingMinute=0,healthBeat=0,healthSync=0,healthCheckpoint=0;
@@ -97,7 +95,7 @@ struct Pending
 Pending pending;
 struct Candidate
 {
-   bool valid;
+   bool valid,ai;
    int direction;
    double level;
    datetime bar;
@@ -177,7 +175,6 @@ string ExecutionBlock()
    if(!MQLInfoInteger(MQL_TRADE_ALLOWED)) return "当前EA交易权限未开启";
    if(!AccountInfoInteger(ACCOUNT_TRADE_ALLOWED) || !AccountInfoInteger(ACCOUNT_TRADE_EXPERT)) return "账户不允许EA交易";
    if(pending.kind!=0) return pending.kind<0 ? "状态写入中断，待人工核对" : "上一请求待服务器确认";
-   if(dayStopped) return "当日权益回撤限制已触发";
    if(OwnCount()>=最大同时持仓) return "本EA持仓已达上限";
    return "";
 }
@@ -337,6 +334,8 @@ string SyncStatus()
    return "监控在线 · 飞书同步正常";
 }
 
+#include "Include/Trading/TgeAISignals.mqh"
+
 // 下列纯计算只读已收盘K线；ATR容差、SMA选择属于工程定义，不是逐字原话。
 bool Reaction(const MqlRates &bar,const MqlRates &previous,const double level,
               const int sign,const double tolerance,const double escape)
@@ -370,6 +369,16 @@ bool BreakRetest(const MqlRates &last,const MqlRates &breakbar,const MqlRates &b
 bool Target(const double entry,const int sign,double &tp)
 {
    double distance=尾仓目标价格距离;
+   if(读取AI即时策略 && aiReady && aiMode=="SETUP")
+   {
+      for(int i=0;i<ArraySize(aiPlans);i++)
+      {
+         double gap=sign*(aiPlans[i].level-entry);
+         if(gap>TickSize()) distance=MathMin(distance,gap-MathMax(0.20,TickSize()*2));
+      }
+      if(distance<=首批止盈价格距离+TickSize()) return false;
+      tp=Align(entry+sign*distance,-sign); return true;
+   }
    for(int i=0;i<ArraySize(levels);i++)
    {
       double gap=sign*(levels[i]-entry);
@@ -387,6 +396,8 @@ bool Signal(Candidate &out)
    if(checkingMinute>0 && TimeTradeServer()-checkingMinute>90) { reason="本根M1评估窗口已结束"; return false; }
    MqlTick quote;
    if(!feedActive) { reason="点位地图未启用，等待有效来源"; return false; }
+   if(读取AI即时策略 && (!aiReady || TimeGMT()-aiGenerated>10))
+   { reason="AI等待："+aiReason; return false; }
    if(!FreshQuote(quote)) { signalRetry=true; reason="报价过期/断线，等待新鲜报价"; return false; }
    if(quote.ask-quote.bid>最大点差价格) { reason="点差过大"; return false; }
    MqlRates m1[],m5[]; double ma[],vol[];
@@ -395,7 +406,8 @@ bool Signal(Candidate &out)
       CopyBuffer(maHandle,0,1,7,ma)!=7 || CopyBuffer(atrHandle,0,1,1,vol)!=1)
    { signalRetry=true; reason="等待M1/M5数据，窗口内重试"; return false; }
    if(checkingMinute>0 && m1[0].time!=checkingMinute) { signalRetry=true; reason="M1序列尚未对齐"; return false; }
-   if(m1[0].time<readyFrom || TimeCurrent()-m1[0].time>90)
+   if((m1[0].time<readyFrom && !(读取AI即时策略 && aiMode=="SETUP" && m1[0].time+60>readyFrom)) ||
+      TimeCurrent()-m1[0].time>90)
    { reason="等待启动/更新后的完整收线"; return false; }
    // K线time是开盘时刻；上一根M5在整个当前M5周期内都是有效的已收盘数据。
    // 索引0只取时间校验连续性，价格、均线和ATR判断仍使用索引1及以前。
@@ -414,6 +426,7 @@ bool Signal(Candidate &out)
    double tolerance=MathMax(0.20*atr,2*TickSize()),escape=MathMax(0.05*atr,TickSize());
    double nearest=DBL_MAX,probe=DBL_MAX;
    entryView.bar=m1[0].time; entryView.ma=ma[0]; entryView.m1close=m1[0].close; entryView.crossings=maCrossings;
+   if(读取AI即时策略 && aiMode=="SETUP") return AISignal(m1[0],quote,out);
    reason="等待点位附近的完整M1止跌/受阻";
    for(int i=0;i<ArraySize(levels);i++)
    {
@@ -467,20 +480,6 @@ bool Signal(Candidate &out)
    return out.valid;
 }
 
-void UpdateDay()
-{
-   MqlDateTime d; TimeToStruct(TimeCurrent(),d);
-   long key=d.year*1000+d.day_of_year;
-   if(key!=dayKey)
-   {
-      dayKey=key; dayBase=AccountInfoDouble(ACCOUNT_EQUITY); dayStopped=false;
-      Store("day",dayKey); Store("base",dayBase); Store("stopped",0); GlobalVariablesFlush();
-   }
-   if(dayBase>0 && AccountInfoDouble(ACCOUNT_EQUITY)<=dayBase*(1-每日权益回撤上限百分比/100.0))
-   {
-      if(!dayStopped) { dayStopped=true; Store("stopped",1); GlobalVariablesFlush(); }
-   }
-}
 bool Stops(const int sign,const double sl,const double tp,const MqlTick &q)
 {
    double distance=MathMax((double)SymbolInfoInteger(_Symbol,SYMBOL_TRADE_STOPS_LEVEL),
@@ -594,7 +593,8 @@ void Open(const Candidate &signal)
    string blocked=ExecutionBlock();
    if(!CanExecute() || blocked!="") { reason=blocked=="" ? "执行条件未就绪" : blocked; return; }
    if((datetime)Load("attemptBar")>=signal.bar) { reason="本根M1已发送过请求"; return; }
-   if(Load(VisitKey(signal.level))>0) { reason="本点位机会已消费"; return; }
+   string visit=signal.ai ? AIVisitKey(signal.level,signal.direction) : VisitKey(signal.level);
+   if(Load(visit)>0) { reason="本点位机会已消费"; return; }
    MqlTick q;
    if(!FreshQuote(q)) { signalRetry=true; reason="发送前报价失效，窗口内重试"; return; }
    if(q.ask-q.bid>最大点差价格) { reason="发送前点差超过上限"; return; }
@@ -606,7 +606,7 @@ void Open(const Candidate &signal)
    double margin=0;
    if(!OrderCalcMargin(type,_Symbol,每次开仓手数,entry,margin) || margin>AccountInfoDouble(ACCOUNT_MARGIN_FREE))
    { reason="可用保证金不足"; return; }
-   Store("attemptBar",(double)signal.bar); Store(VisitKey(signal.level),(double)signal.bar);
+   Store("attemptBar",(double)signal.bar); Store(visit,(double)signal.bar);
    ZeroMemory(pending); pending.kind=1; pending.at=TimeCurrent(); pending.bar=signal.bar;
    pending.volume=每次开仓手数; pending.sl=sl; pending.tp=tp; pending.level=signal.level; pending.direction=sign;
    SavePending(); if(!CanExecute()) { reason="请求意图已保存，但执行条件失效，待核对"; return; }
@@ -1074,7 +1074,7 @@ void Panel()
    int count=ArraySize(tickets),visible=MathMin(count,3),rowHeight=82;
    int positionHeight=MathMax(visible,1)*rowHeight;
    int levelRows=MathMax((ArraySize(levels)+5)/6,1);
-   int pointY=174+positionHeight+14,pointHeight=70+levelRows*30;
+   int pointY=174+positionHeight+14,pointHeight=70+levelRows*30+(读取AI即时策略 ? 26 : 0);
    int signalY=pointY+pointHeight+10;
    int height=uiCollapsed ? (uiStatistics ? 87 : uiIndicators ? 170 : 154) :
               uiStatistics ? 499 : uiIndicators ? 390 : signalY+160;
@@ -1085,7 +1085,8 @@ void Panel()
    panelCanvas.FillRectangle(0,0,UIPx(559),UIPx(39),UIInk(UI_HEADER));
    panelCanvas.FillRectangle(0,0,UIPx(3),UIPx(39),UIInk(UI_ACCENT));
    string pageTitle=uiStatistics ? "交易统计" : uiIndicators ? "看盘设置" : "T哥点位监控";
-   UIText(_Symbol+" · "+pageTitle,14,10,250,12,UI_TEXT);
+   UIText(_Symbol+" · "+pageTitle,14,10,220,12,UI_TEXT);
+   UIText("v1.25",240,13,40,8,UI_DIM);
    UIText(TimeToString(TimeGMT()+8*3600,TIME_SECONDS),286,12,100,10,UI_MUTED,true);
    UIButton(uiCollapsed ? "+" : "−",396,7,30,1);
    UIText(启用真实交易 ? "交易" : "观察",434,13,112,9.5,启用真实交易 ? UI_ACCENT : UI_WARN);
@@ -1112,10 +1113,10 @@ void Panel()
    UICard(12,88,536,72,UI_CARD);
    string titles[4]={"浮动盈亏","持仓","风险","保护"};
    string values[4]={DoubleToString(pnl,2),IntegerToString(count)+"单",
-                     dayStopped ? "已限仓" : "可评估",
+                     "可评估",
                      "SL "+IntegerToString(protectedCount)+"/"+IntegerToString(count)};
    string captions[4]={AccountInfoString(ACCOUNT_CURRENCY),DoubleToString(volume,2)+"手",
-                       StringFormat("日亏损上限 %.1f%%",每日权益回撤上限百分比),
+                       StringFormat("每次 %.2f手",每次开仓手数),
                        "TP "+IntegerToString(tpCount)+"/"+IntegerToString(count)};
    for(int i=0;i<4;i++)
    {
@@ -1123,7 +1124,7 @@ void Panel()
       if(i>0) panelCanvas.FillRectangle(UIPx(x-12),UIPx(100),UIPx(x-12),UIPx(148),UIInk(UI_BORDER));
       UIText(titles[i],x,98,108,9,UI_MUTED);
       color valueInk=i==0 ? (pnl>0 ? UI_GAIN : pnl<0 ? UI_LOSS : UI_MUTED) :
-                     i==1 ? UI_ACCENT : dayStopped && i==2 ? UI_WARN : UI_TEXT;
+                     i==1 ? UI_ACCENT : UI_TEXT;
       UIText(values[i],x,117,110,i==0 || i==1 ? 15 : 12,valueInk);
       UIText(captions[i],x,143,112,8.5,UI_MUTED);
    }
@@ -1172,6 +1173,7 @@ void Panel()
              feedActive ? C'105,221,210' : UI_DIM);
    }
    if(ArraySize(levels)==0) UIText("等待飞书同步完整点位",24,pointY+37,490,10,UI_MUTED);
+   if(读取AI即时策略) UIText(AIPlanCaption(),24,pointY+34+levelRows*30,494,9.5,aiReady ? UI_ACCENT : UI_WARN);
    string sourceAt=sourceTime>0 ? TimeToString(sourceTime+8*3600,TIME_DATE|TIME_MINUTES) : "尚未同步";
    UIText("发布 "+sourceAt+" · 北京时间",24,pointY+pointHeight-36,494,8.5,UI_DIM);
    string syncAt=healthSync>0 ? TimeToString(healthSync+8*3600,TIME_DATE|TIME_SECONDS) : "尚无";
@@ -1198,13 +1200,13 @@ void Panel()
    if(gate=="") gate=feedActive ? "执行通道就绪 · 按收线条件等待机会" : "等待有效点位地图";
    UICard(12,signalY+112,536,28,UI_HEADER);
    UIText("状态："+gate,24,signalY+118,508,9.5,
-          pending.kind!=0 || dayStopped ? UI_WARN : UI_MUTED);
+          pending.kind!=0 ? UI_WARN : UI_MUTED);
    panelCanvas.Update();
 }
 int OnInit()
 {
    if(每次开仓手数<=0 || 最大同时持仓<1 || 最大同时持仓>10 ||
-      每日权益回撤上限百分比<=0 || 每日权益回撤上限百分比>100 || 最大点差价格<=0 ||
+      最大点差价格<=0 ||
       保险价格距离<=0 || 首批止盈价格距离<=0 || 尾仓目标价格距离<=首批止盈价格距离 ||
       TickSize()<=0 || !ExactLot(每次开仓手数))
       return INIT_PARAMETERS_INCORRECT;
@@ -1226,15 +1228,17 @@ int OnInit()
    execution.SetTypeFillingBySymbol(_Symbol); execution.SetAsyncMode(false);
    maHandle=iMA(_Symbol,PERIOD_M5,5,0,MODE_SMA,PRICE_CLOSE); atrHandle=iATR(_Symbol,PERIOD_M5,14);
    if(maHandle==INVALID_HANDLE || atrHandle==INVALID_HANDLE) return INIT_FAILED;
-   RestorePending(); dayKey=(long)Load("day"); dayBase=Load("base"); dayStopped=Load("stopped")>0;
+   RestorePending();
    InitView(); InitTgeMobileMarkers();
-   readyFrom=TimeCurrent(); ReadFeed(); ReadHealth(); EventSetTimer(1); Panel();
+   readyFrom=TimeCurrent(); ReadFeed(); ReadHealth(); ReadAISetups(); EventSetTimer(1); Panel();
    return INIT_SUCCEEDED;
 }
 void OnTimer()
 {
    if(busy) return; busy=true;
-   ReadFeed(); ReadHealth(); UpdateDay(); Reconcile(); Manage();
+   ReadFeed(); ReadHealth(); ReadAISetups(); Reconcile(); Manage();
+   Candidate immediate; ZeroMemory(immediate);
+   if(AIMarketSignal(immediate)) Open(immediate);
    datetime minute=iTime(_Symbol,PERIOD_M1,1);
    if(minute>0 && minute!=lastMinute)
    {

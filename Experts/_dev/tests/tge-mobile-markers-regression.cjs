@@ -8,14 +8,14 @@ function body(name){
 }
 function convert(s){return s.replace(/\bstatic\s+/g,'').replace(/\(string\)(\w+)/g,'String($1)')
  .replace(/\((?:long|ulong|int|double|datetime|ENUM_ORDER_STATE)\)/g,'')
- .replace(/\bMqlTick (\w+);/g,'let $1={};').replace(/\bbool (\w+)\[\];/g,'let $1=[];')
+ .replace(/\bMqlTick (\w+);/g,'let $1={};').replace(/\b(?:bool|double) (\w+)\[\];/g,'let $1=[];')
  .replace(/\b(?:ulong|long|int|double|datetime|string|bool|uint|ENUM_ORDER_STATE)\s+/g,'let ');}
 let count=0;function check(name,f){f();count++;console.log('PASS '+name);}
 function env(memory=new Map()){
  let selected={},pos={},deals=[];
  const orders=[],history=[],positions=[],allDeals=[],calls=[];
  const cx=vm.createContext({
-  Math,MathAbs:Math.abs,MathMax:Math.max,MathRound:Math.round,NormalizeDouble:(v,n)=>+v.toFixed(n),
+  读取AI即时策略:false,aiReady:false,aiMode:'WAIT',aiPlans:[],ArrayCopy:(a,b)=>{a.length=0;a.push(...b);return b.length;},Math,MathAbs:Math.abs,MathMax:Math.max,MathRound:Math.round,NormalizeDouble:(v,n)=>+v.toFixed(n),
   StringFind:(s,q)=>s.indexOf(q),StringSubstr:(s,n)=>s.slice(n),StringLen:s=>s.length,StringToInteger:Number,
   IntegerToString:String,StringFormat:(s,...a)=>s.replace(/%I64d|%d|%s/g,()=>String(a.shift())),
   ArraySize:a=>a.length,ArrayResize:(a,n)=>{while(a.length<n)a.push(0);a.length=n;return n;},
@@ -203,5 +203,10 @@ check('actual BuyLimit and cancellation are confined to separate marker object a
  assert(body('SubmitTgeMobileMarker').includes('!TgeMarkerCanRequest()'));
  assert(body('CancelTgeMobileMarkers').includes('!TgeMarkerCanRequest()'));
  assert(!/\bexecution\s*\./.test(src));assert(!/PositionOpen|PositionClose|OrderSend/.test(src));
+});
+check('phone TP includes AI reference levels without duplicating morning map prices',()=>{
+ const x=env();x.cx.读取AI即时策略=true;x.cx.aiReady=true;x.cx.aiMode='SETUP';
+ x.cx.aiPlans=[{sign:1,level:3900},{sign:-1,level:4020}];x.sync();
+ assert.deepEqual(x.orders.map(o=>o.ORDER_TP).sort(),[3900,4000,4020,4100]);
 });
 console.log(count+' production-source marker checks passed; no broker requests or mobile display exercised.');

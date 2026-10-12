@@ -35,5 +35,6 @@
   "common_files": "",
   "ai_enabled": false,
   "allow_group_point_updates": true,
-  "point_source_senders": []
+  "point_source_senders": [],
+  "ai_model": "deepseek-flash"
 }

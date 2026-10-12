@@ -4,15 +4,22 @@ const fs=require('node:fs'),path=require('node:path'),vm=require('node:vm'),asse
 const src=fs.readFileSync(path.join(__dirname,'../../EA_T哥点位跟单.mq5'),'utf8');
 function body(name) {
   const def=src.search(new RegExp('^(?:bool|void|double|int|string|ulong) '+name+'\\(','m'));
-  assert(def>=0,name); const start=src.indexOf('{',def); let end=start+1,depth=1;
+  if(def<0){
+    const extra=fs.readFileSync(path.join(__dirname,'../../Include/Trading/TgeAISignals.mqh'),'utf8');
+    const pos=extra.search(new RegExp('^(?:bool|void|double|int|string|ulong) '+name+'\\(','m'));
+    assert(pos>=0,name);const start=extra.indexOf('{',pos);let end=start+1,depth=1;
+    for(;depth;end++){if(extra[end]==='{')depth++;if(extra[end]==='}')depth--;}
+    return extra.slice(start+1,end-1);
+  }
+  const start=src.indexOf('{',def); let end=start+1,depth=1;
   for(;depth;end++) {if(src[end]==='{')depth++;if(src[end]==='}')depth--;}
   return src.slice(start+1,end-1);
 }
 function translate(text) {
   return text.replace(/\bstatic\s+/g,'').replace(/\((?:ENUM_ORDER_STATE|ENUM_ORDER_TYPE|double|long|ulong|int|datetime)\)/g,'')
     .replace(/\b(?:double|string|MqlRates) (\w+)\[\],(\w+)\[\];/g,'let $1=[], $2=[];')
-    .replace(/\b(?:double|string) (\w+)\[\];/g,'let $1=[];')
-    .replace(/\b(?:MqlTick|Candidate) (\w+);/g,'let $1={};')
+    .replace(/\b(?:double|string|AIPlan) (\w+)\[\];/g,'let $1=[];')
+    .replace(/\b(?:MqlTick|Candidate|MqlRates) (\w+);/g,'let $1={};')
     .replace(/\b(?:double|long|ulong|int|datetime|bool|string|uint|ushort|ENUM_ORDER_STATE|ENUM_ORDER_TYPE)\s+/g,'let ')
     .replace(/PositionVolumes\(id,initial,closed\)/g,'((r)=>{initial=r.initial;closed=r.closed;return r.ok;})(PositionVolumes(id))');
 }
@@ -23,7 +30,7 @@ let checks=0;
 function test(name,fn) {fn();checks++;console.log('PASS '+name);}
 function env() {
   const e=vm.createContext({
-    MathMin:Math.min,MathMax:Math.max,MathAbs:Math.abs,MathFloor:Math.floor,MathCeil:Math.ceil,
+    读取AI即时策略:false,aiReady:false,aiMode:"WAIT",ReadAISetups:()=>{},AIMarketSignal:()=>false,MathMin:Math.min,MathMax:Math.max,MathAbs:Math.abs,MathFloor:Math.floor,MathCeil:Math.ceil,
     NormalizeDouble:(v,n)=>+v.toFixed(n),TickSize:()=>.01,
     SYMBOL_VOLUME_MIN:1,SYMBOL_VOLUME_STEP:2,SYMBOL_VOLUME_MAX:3,
     SymbolInfoDouble:(_,k)=>({1:.01,2:.01,3:100})[k],_Symbol:'XAUUSD',_Digits:2,
@@ -378,4 +385,90 @@ test('level persistence independent from snapshot age',()=>{
  assert(src.includes('tge_levels.csv'));assert(!src.includes('teacher_levels.csv'));
 });
 test('historical tester cannot use today Common file',()=>assert(src.includes('if(MQLInfoInteger(MQL_TESTER))')));
+test('one-percent daily equity lock removed even when legacy stopped GV exists',()=>{
+ assert(!src.includes('每日权益回撤上限百分比'));assert(!src.includes('dayStopped'));assert(!src.includes('UpdateDay()'));
+ assert(!body('ExecutionBlock').includes('回撤限制'));assert(!body('OnInit').includes('Load("stopped")'));
+});
+
+function aiEnv(options={}){
+ const x=env(),memory={};Object.assign(x,{读取AI即时策略:true,aiReady:true,aiMode:'SETUP',
+  aiPlans:options.plans||[{sign:1,level:100,market:false},{sign:-1,level:112,market:false}],
+  feedActive:true,aiIdentity:'msg-new',aiSource:'msg-new',aiSourceTime:990,aiGenerated:1000,TimeGMT:()=>1000,
+  atr:2,atrHandle:2,MathIsValidNumber:Number.isFinite,tp:0,DBL_MAX:Number.MAX_VALUE,levels:[90,100,104],最大点差价格:.5,Hash:s=>[...s].reduce((a,v)=>a+v.charCodeAt(0),0),
+  IntegerToString:String,DoubleToString:(v,n)=>v.toFixed(n),Align:v=>v,
+  Load:k=>memory[k]||0,Store:(k,v)=>memory[k]=v,ArraySetAsSeries:()=>{},
+  FreshQuote:q=>Object.assign(q,{bid:100.4,ask:100.45}),CopyBuffer:(_h,_b,shift,n,out)=>{out.push(2);return 1;}});
+ for(const [name,args] of [['Target','entry,sign'],['AIVisitKey','level,sign'],['AISignal','bar,q,out'],['AIMarketSignal','out']])install(x,name,args);
+ return {x,memory};
+}
+test('authoritative AI BUY uses one completed M1 reaction without opposite MA veto',()=>{
+ const {x}=aiEnv();x.trend=-1;const out={};
+ assert(x.AISignal({...b,time:990},{bid:100.4,ask:100.45},out));assert.equal(out.direction,1);assert.equal(out.ai,true);
+ assert(out.method.includes('msg-new'));
+});
+test('near/prefix wording allows a bounded price zone instead of missing an integer not exactly touched',()=>{
+ const {x}=aiEnv({plans:[{sign:1,level:100,market:false,near:true},{sign:-1,level:120,market:false}]});
+ const bar={time:990,open:106,low:104.6,high:109,close:108};
+ assert(x.AISignal(bar,{bid:108,ask:108.05},{}));
+ x.aiPlans[0].near=false;assert(!x.AISignal(bar,{bid:108,ask:108.05},{}));
+ x.aiPlans[0].near=true;assert(!x.AISignal(bar,{bid:110,ask:110.05},{}));
+});
+test('AI SELL reference is not mistaken for a bidirectional neutral level',()=>{
+ const {x}=aiEnv({plans:[{sign:-1,level:100,market:false},{sign:1,level:88,market:false}]});
+ const out={};assert(x.AISignal({...invert(b),time:990},{bid:99.55,ask:99.6},out));assert.equal(out.direction,-1);
+});
+test('AI reaction still rejects a red buy bar or missing reclaim',()=>{
+ const {x}=aiEnv();assert(!x.AISignal({...b,time:990,close:100.05},{bid:100.4,ask:100.45},{}));
+ assert(!x.AISignal({...b,time:990,open:100.5},{bid:100.4,ask:100.45},{}));
+});
+test('new AI range controls target instead of obsolete morning obstacle',()=>{
+ const {x}=aiEnv();assert.equal(x.Target(100,1),true);assert.equal(x.tp,110);
+});
+test('AI visit keys separate source and direction and prevent repeated same opportunity',()=>{
+ const {x,memory}=aiEnv();const first=x.AIVisitKey(100,1);memory[first]=990;
+ assert(!x.AISignal({...b,time:990},{bid:100.4,ask:100.45},{}));
+ assert.notEqual(x.AIVisitKey(100,-1),first);x.aiIdentity='another';
+ assert.notEqual(x.AIVisitKey(100,1),first);assert(x.AISignal({...b,time:990},{bid:100.4,ask:100.45},{}));
+});
+test('explicit AI market hint has live TTL and needs fresh quote and ATR',()=>{
+ const {x}=aiEnv({plans:[{sign:1,level:100,market:true},{sign:-1,level:112,market:false}]});
+ const out={};assert(x.AIMarketSignal(out));assert.equal(out.ai,true);assert(out.method.includes('市价'));
+ x.aiSourceTime=800;assert(!x.AIMarketSignal({}));x.aiSourceTime=990;x.FreshQuote=()=>false;assert(!x.AIMarketSignal({}));
+});
+test('AI market path cannot bypass withdrawn map or dead bridge',()=>{
+ const {x}=aiEnv({plans:[{sign:1,level:100,market:true}]});
+ x.feedActive=false;assert(!x.AIMarketSignal({}));x.feedActive=true;x.aiGenerated=980;assert(!x.AIMarketSignal({}));
+});
+test('market hints are not rearmed merely because price moved away',()=>{
+ const {x,memory}=aiEnv({plans:[{sign:1,level:100,market:true}]});
+ memory[x.AIVisitKey(100,1)]=990;
+ assert(!x.AISignal({...b,time:1000,close:105},{bid:100.4,ask:100.45},{}));assert.equal(memory[x.AIVisitKey(100,1)],990);
+});
+test('AI instant updates only use candle that finishes after activation',()=>{
+ assert(body('Signal').includes('m1[0].time+60>readyFrom'));
+ assert(body('OnTimer').includes('AIMarketSignal(immediate)'));
+ assert(body('ReadAISetups').includes('lastMinute=0'));
+});
+
+function aiFeed(rows){
+ const x=feed().x;let pos=0;
+ Object.assign(x,{aiReady:true,aiMode:'SETUP',aiIdentity:'old',aiReason:'',aiPlans:[{sign:1,level:90}],lastMinute:88,
+  FileReadString:()=>rows[pos++],FileIsEnding:()=>pos>=rows.length,
+  FileSize:()=>rows.join('\n').length,ArrayResize:(a,n)=>{while(a.length<n)a.push({});a.length=n;},
+  TimeGMT:()=>2000});
+ install(x,'ReadAISetups','');const ok=x.ReadAISetups();return {ok,x};
+}
+test('AI snapshot validates symbol, footer, heartbeat and provenance before activation',()=>{
+ const valid=['TGA,1,2000,1,XAUUSD,msg,revision,1900,2,SETUP,ok','SETUP,BUY,100,REACTION,POINT','SETUP,SELL,112,REACTION,POINT','END,2'];
+ const r=aiFeed(valid);assert(r.ok);assert(r.x.aiReady);assert.equal(r.x.aiPlans[1].sign,-1);assert.equal(r.x.readyFrom,1000);
+ for(const rows of [valid.slice(0,3),valid.map(v=>v.replace('XAUUSD','EURUSD')),
+  valid.map(v=>v.replace(',2000,',',1980,')),valid.map(v=>v.replace('SELL','EXECUTE')),
+  valid.map(v=>v.replace('END,2','END,1'))]){
+  const f=aiFeed(rows);assert(!f.ok);assert.equal(f.x.aiReady,false);
+ }
+});
+test('AI WAIT snapshot clears execution readiness while keeping reference data separate',()=>{
+ const r=aiFeed(['TGA,1,2000,0,XAUUSD,msg,revision,1900,0,WAIT,pause','END,0']);
+ assert(r.ok);assert.equal(r.x.aiReady,false);assert.equal(r.x.aiMode,'WAIT');assert.equal(r.x.aiPlans.length,0);
+});
 console.log(checks+' production-source offline checks passed');

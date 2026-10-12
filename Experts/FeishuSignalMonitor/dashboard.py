@@ -29,9 +29,20 @@ def snapshot(home,c):
                                  time=iso(r['created']),text='[已撤回]' if r['deleted'] else raw.get('content',''),
                                  type=raw.get('msg_type'),status=r['status'],reason=r['reason'],
                                  historical=bool(r['historical']),link=message_link(raw)))
+        if c.get('ai_enabled') and db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='ai_messages'").fetchone():
+            for message in messages:
+                parsed=db.execute('''SELECT a.payload FROM ai_messages a JOIN messages m
+                  ON a.chat_id=m.chat_id AND a.message_id=m.message_id AND a.revision=m.revision
+                  WHERE a.chat_id=? AND a.message_id=? AND a.status='DONE' AND m.deleted=0''',
+                  (c['chat_id'],message['message_id'])).fetchone()
+                if parsed:
+                    value=json.loads(parsed['payload'])
+                    message['status']=value['kind'];message['reason']=value['reason']
         count=db.execute('SELECT COUNT(*) FROM messages WHERE chat_id=?',(c['chat_id'],)).fetchone()[0]
         return dict(at=iso(now),chat_name=c['chat_name'],status=status,messages=messages,message_count=count,
                     levels=state(db,'teacher_levels',{}),analysis=state(db,'teacher_analysis',{}),
+                    ai=state(db,'deepseek_status',{}),ai_setup=state(db,'deepseek_setup',{}),
+                    ai_recent=state(db,'deepseek_recent',[]),ai_review=state(db,'deepseek_review',{}),
                     events=state(db,'analysis_events',[]),last_sync=state(db,'last_sync_at',0),
                     poll_seconds=c['poll_seconds'],teacher_sender_id=c['teacher_sender_id'],
                     alert= dict(db.execute('SELECT at,code,detail FROM alerts ORDER BY id DESC LIMIT 1').fetchone() or {}))

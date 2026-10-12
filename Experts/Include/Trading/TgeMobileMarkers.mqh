@@ -157,7 +157,15 @@ void SyncTgeMobileMarkers()
    markerLastMs=ms; markerDirty=false;
    if(!TgeMarkerCanRequest()) { markerStatus="等待交易权限/实例锁"; return; }
    bool createReady=ReconcileTgeMarkerCreation();
-   bool enabled=启用手机标记挂单 && uiMobileMarkers && feedActive && ArraySize(levels)>0;
+   double markerLevels[]; ArrayCopy(markerLevels,levels);
+   if(读取AI即时策略 && aiReady && aiMode=="SETUP")
+      for(int i=0;i<ArraySize(aiPlans);i++)
+      {
+         bool exists=false;
+         for(int j=0;j<ArraySize(markerLevels);j++) if(MathAbs(markerLevels[j]-aiPlans[i].level)<TickSize()*0.5) exists=true;
+         if(!exists) { int n=ArraySize(markerLevels); ArrayResize(markerLevels,n+1); markerLevels[n]=aiPlans[i].level; }
+      }
+   bool enabled=启用手机标记挂单 && uiMobileMarkers && feedActive && ArraySize(markerLevels)>0;
    bool otherTrade=TgeMarkerHasOtherTrade();
    MqlTick q; bool fresh=FreshQuote(q);
    double price=TickSize()>0 ? NormalizeDouble(MathRound(手机标记挂单固定价格/TickSize())*TickSize(),_Digits) : 0;
@@ -175,30 +183,30 @@ void SyncTgeMobileMarkers()
    }
    if(!fresh) { markerStatus="等待新鲜报价，不创建标记"; return; }
    if(!createReady || !ReconcileMobileMarkerDeletes()) return;
-   bool matched[]; ArrayResize(matched,ArraySize(levels)); ArrayInitialize(matched,false);
+   bool matched[]; ArrayResize(matched,ArraySize(markerLevels)); ArrayInitialize(matched,false);
    for(int i=OrdersTotal()-1;i>=0;i--)
    {
       ulong ticket=OrderGetTicket(i);
       if(ticket==0 || !IsMobileMarkerOrderSelected()) continue;
       int index=-1;
-      for(int j=0;j<ArraySize(levels);j++)
-         if(!matched[j] && TgeMarkerMatches(NormalizeDouble(MathRound(levels[j]/TickSize())*TickSize(),_Digits),price)) { index=j; break; }
+      for(int j=0;j<ArraySize(markerLevels);j++)
+         if(!matched[j] && TgeMarkerMatches(NormalizeDouble(MathRound(markerLevels[j]/TickSize())*TickSize(),_Digits),price)) { index=j; break; }
       if(index<0) RequestMobileMarkerDelete(ticket); else matched[index]=true;
    }
    if(!ReconcileMobileMarkerDeletes()) { markerStatus="等待旧标记撤销确认"; return; }
-   for(int i=0;i<ArraySize(levels);i++)
+   for(int i=0;i<ArraySize(markerLevels);i++)
    {
       if(matched[i]) continue;
-      double target=NormalizeDouble(MathRound(levels[i]/TickSize())*TickSize(),_Digits);
+      double target=NormalizeDouble(MathRound(markerLevels[i]/TickSize())*TickSize(),_Digits);
       if(target-price<MathMax(stops,TickSize()) || q.ask-price<MathMax(stops,TickSize()))
       { markerStatus="TP/挂单距离不符合券商规格"; return; }
       if(!SubmitTgeMobileMarker(price,target)) return;
    }
    int actual=0;
-   for(int i=0;i<ArraySize(levels);i++)
+   for(int i=0;i<ArraySize(markerLevels);i++)
       for(int j=OrdersTotal()-1;j>=0;j--)
-         if(OrderGetTicket(j)>0 && TgeMarkerMatches(NormalizeDouble(MathRound(levels[i]/TickSize())*TickSize(),_Digits),price)) { actual++; break; }
-   markerStatus=StringFormat("已同步%d/%d",actual,ArraySize(levels));
+         if(OrderGetTicket(j)>0 && TgeMarkerMatches(NormalizeDouble(MathRound(markerLevels[i]/TickSize())*TickSize(),_Digits),price)) { actual++; break; }
+   markerStatus=StringFormat("已同步%d/%d",actual,ArraySize(markerLevels));
 }
 void StopTgeMobileMarkers()
 {
