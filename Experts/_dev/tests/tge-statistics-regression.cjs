@@ -1,19 +1,20 @@
 const fs=require('node:fs'),vm=require('node:vm'),assert=require('node:assert/strict');
 const src=fs.readFileSync('Include/Journal/TgeStatistics.mqh','utf8');
 function body(name){
- const def=src.search(new RegExp('^(?:int|bool|void|datetime) '+name+'\\(','m'));assert(def>=0,name);
+ const def=src.search(new RegExp('^(?:int|bool|void|datetime|string|color) '+name+'\\(','m'));assert(def>=0,name);
  const start=src.indexOf('{',def);let end=start+1,n=1;
  for(;n;end++){if(src[end]==='{')n++;if(src[end]==='}')n--;}return src.slice(start+1,end-1);
 }
 function convert(s){
- return s.replace('datetime start,end; StatsRange(start,end);','let [start,end]=StatsRange();')
+ return s.replace('},filters[3]={','}; string filters[3]={').replace(/\bstring (\w+)\[\d+\]=\{([\s\S]*?)\};/g,'let $1=[$2];')
+ .replace('datetime start,end; StatsRange(start,end);','let [start,end]=StatsRange();')
  .replace(/MqlDateTime (\w+);/g,'let $1={};').replace(/TgeStatsTrade (\w+);/g,'let $1=trade();')
  .replace(/\bTgeStatsTrade\s+/g,'let ')
  .replace(/\b(?:ulong|double|int) (\w+)\[\];/g,'let $1=[];')
  .replace(/\((?:datetime|int|double|ulong|long)\)/g,'')
- .replace(/\b(?:datetime|ulong|long|double|int|bool)\s+/g,'let ')
- .replace('months/12','Math.trunc(months/12)')
- .replace(/\bMathMax\b/g,'Math.max').replace(/\bMathMin\b/g,'Math.min').replace(/\bMathAbs\b/g,'Math.abs');
+ .replace(/\b(?:datetime|ulong|long|double|int|bool|string|color)\s+/g,'let ')
+ .replace('(n+1)/2','Math.trunc((n+1)/2)').replace('months/12','Math.trunc(months/12)')
+ .replace(/\bMathMax\b/g,'Math.max').replace(/\bMathMin\b/g,'Math.min').replace(/\bMathAbs\b/g,'Math.abs').replace(/\bMathRound\b/g,'Math.round');
 }
 function trade(){return {id:0,lastDeal:0,openTime:0,closeTime:0,magic:0,direction:0,entryDeals:0,exitDeals:0,mixed:false,reversed:false,
  entryVolume:0,exitVolume:0,entryValue:0,exitValue:0,gross:0,commission:0,swap:0,fee:0,net:0};}
@@ -128,3 +129,76 @@ check('no real trading or transaction-state mutation in statistics module',()=>{
  assert(!/\b(?:OrderSend|PositionOpen|PositionClose|PositionModify|Store|SavePending|ClearPending|Open|Manage)\s*\(/.test(src));assert(!/\bexecution\s*\./.test(src));
 });
 console.log(checks+' production-source statistics offline checks passed');
+
+// 直接执行生产绘图函数，用示例成交检查坐标/空态，并可导出离线预览。
+let ops=[],hits=[];
+const main=fs.readFileSync('EA_T哥点位跟单.mq5','utf8');
+for(const m of main.matchAll(/(UI_[A-Z]+)=C'(\d+),(\d+),(\d+)'/g))cx[m[1]]=[+m[2],+m[3],+m[4]];
+function format(s,...a){let i=0;return s.replace(/%([-+]?)(?:\.(\d+))?([sdf])/g,(_,sign,p,t)=>{const v=a[i++];return t==='s'?String(v):t==='d'?String(Math.trunc(v)):Number(v).toFixed(Number(p||6));});}
+Object.assign(cx,{
+ _Digits:2,TIME_DATE:1,TIME_MINUTES:2,ACCOUNT_CURRENCY:0,
+ DoubleToString:(v,d)=>Number(v).toFixed(d),StringFormat:format,
+ StringFind:(s,t)=>s.indexOf(t),StringSubstr:(s,i,n)=>n===undefined?s.slice(i):s.slice(i,i+n),
+ TimeToString:(s,flags)=>new Date(s*1000).toISOString().slice(0,flags===1?10:16).replace('T',' '),
+ AccountInfoString:()=>'USC',UIPx:v=>Math.round(v),UIInk:v=>v,
+ UIRound:(x,y,w,h,c)=>ops.push({op:'rect',x,y,w,h,color:c,r:8}),
+ UICard:(x,y,w,h,c)=>ops.push({op:'rect',x,y,w,h,color:c,r:8}),
+ UIText:(text,x,y,w,size,color,right=false)=>ops.push({op:'text',text:String(text),x,y,w,size,color,right}),
+ UIButton:(text,x,y,w,action,active=false)=>{
+  hits.push({x,y,w,h:27,action});cx.UIRound(x,y,w,27,active?[30,65,62]:cx.UI_HEADER);cx.UIText(text,x+8,y+5,w-16,9,active?cx.UI_ACCENT:cx.UI_MUTED);
+ },
+ panelCanvas:{
+  LineAA:(x,y,x2,y2,color)=>ops.push({op:'line',x,y,x2,y2,color}),
+  Line:(x,y,x2,y2,color)=>ops.push({op:'line',x,y,x2,y2,color}),
+  FillRectangle:(x,y,x2,y2,color)=>ops.push({op:'rect',x,y,w:x2-x+1,h:y2-y+1,color,r:0}),
+  FillCircle:(x,y,r,color)=>ops.push({op:'circle',x,y,r,color}),Update:()=>{}
+ }
+});
+for(const [name,args] of [['StatsMoney','value'],['StatsInk','value'],['StatsLine','row,left,right'],['StatsDrawCurve',''],['StatsPanel','']])
+ vm.runInContext('function '+name+'('+args+'){'+convert(body(name))+'}',cx);
+cx.StatsRefresh=()=>{};
+function sample(values){
+ cx.statsTrades=values.map((net,i)=>({...trade(),id:820100+i,net,gross:net+.2,commission:-.2,direction:i%2,entryVolume:.02,exitVolume:.02,
+  entryValue:82,exitValue:82.1,exitDeals:2,openTime:start+i*600,closeTime:start+i*600+300}));
+ cx.statsSummary=summary();for(const t of cx.statsTrades)cx.StatsAccumulate(t,cx.statsSummary);
+ Object.assign(cx,{statsOK:true,statsSkipped:0,statsStatus:values.length?'按完整平仓统计':'此区间没有符合筛选的完整平仓记录',statsRangeStart:start,statsRangeEnd:start+86400,statsReview:0});
+}
+function render(detail){
+ cx.statsDetail=detail;ops=[];hits=[];
+ const height=detail===2?650:570;
+ cx.UIRound(0,0,560,height,cx.UI_ROOT);cx.UIRound(0,0,560,40,cx.UI_HEADER);
+ cx.UIText('XAUUSD.c · 交易统计',16,10,222,11,cx.UI_TEXT);cx.UIText('v1.28',242,13,40,8,cx.UI_DIM);
+ cx.UIText('09:42:16',286,12,100,10,cx.UI_MUTED,true);cx.UIText('交易模式',434,13,110,9,cx.UI_ACCENT,true);
+ ['监控','统计','看盘'].forEach((s,i)=>cx.UIButton(s,12+i*76,49,68,2+i,i===1));
+ cx.UIButton('手机TP开',240,49,100,28,true);cx.UIText('已同步5条',350,56,110,8.5,cx.UI_DIM);cx.UIButton('点位线开',462,49,82,27,true);
+ cx.StatsPanel();
+ for(const o of ops){
+  for(const k of ['x','y','x2','y2','w','h','r'])if(k in o)assert(Number.isFinite(o[k]),'finite '+k);
+  assert(o.x>=0&&o.y>=0&&o.x<560&&o.y<height,'origin within canvas');
+  if(o.op==='rect')assert(o.w>0&&o.h>0&&o.x+o.w<=560&&o.y+o.h<=height,'rectangle bounds');
+  if(o.op==='line')assert(o.x2>=0&&o.x2<560&&o.y2>=0&&o.y2<height,'line bounds');
+ }
+ for(let i=0;i<hits.length;i++)for(let j=i+1;j<hits.length;j++){const a=hits[i],b=hits[j];assert(a.x+a.w<=b.x||b.x+b.w<=a.x||a.y+a.h<=b.y||b.y+b.h<=a.y,'distinct button targets');}
+ return {width:560,height,ops,hits};
+}
+check('curve and profit bars render mixed, all-loss, zero, single and dense samples without changing totals',()=>{
+ for(const values of [[10,-4,7,-2,3],[-4,-8,-1],[0,0,0],[8],Array.from({length:500},(_,i)=>i%3-1)]){
+  sample(values);const before=JSON.stringify([cx.statsTrades,cx.statsSummary]);render(2);
+  assert.equal(JSON.stringify([cx.statsTrades,cx.statsSummary]),before);
+  assert(ops.some(o=>o.text==='累计净收益'));assert(ops.some(o=>o.text==='每笔盈亏'));
+  assert(ops.some(o=>o.text==='最新 '+cx.StatsMoney(values.reduce((a,b)=>a+b,0))));
+ }
+});
+check('all statistics pages and empty/error states publish bounded controls and honest captions',()=>{
+ sample([12,-3,5]);for(let d=0;d<4;d++)render(d);
+ sample([]);render(2);assert(!ops.some(o=>o.text==='累计净收益'));
+ cx.statsOK=false;cx.statsStatus='历史查询失败';render(0);assert(ops.some(o=>o.text==='历史查询失败'));assert(ops.filter(o=>o.text==='--').length===4);
+});
+if(process.env.TGE_STATS_PREVIEW){
+ fs.mkdirSync(process.env.TGE_STATS_PREVIEW,{recursive:true});
+ sample([8.6,-3.4,12.2,-5.8,4.6,9.1,-2.3,6.8,-4.2,11.7,-3.6,5.4]);
+ for(const [name,d] of [['overview',0],['performance',1],['trend',2],['review',3]])
+  fs.writeFileSync(process.env.TGE_STATS_PREVIEW+'/'+name+'.json',JSON.stringify(render(d),null,2));
+ sample([]);fs.writeFileSync(process.env.TGE_STATS_PREVIEW+'/empty.json',JSON.stringify(render(2),null,2));
+}
+console.log(checks+' statistics data/render checks passed; native MT5 clicks not exercised.');

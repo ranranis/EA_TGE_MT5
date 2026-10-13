@@ -1,5 +1,5 @@
 #property strict
-#property version "1.27"
+#property version "1.28"
 #property description "T哥点位地图 / M5 MA5 / M1收线 / 0.02手分批。独立Magic，仅管理本EA持仓。"
 #include <Trade/Trade.mqh>
 #include <Canvas/Canvas.mqh>
@@ -1074,7 +1074,7 @@ void Panel()
    int decisionY=heroY+heroHeight+12,positionY=decisionY+88;
    int mapY=positionY+24+MathMax(visible,1)*rowHeight+10;
    int mapHeight=62+pointRows*28;
-   int height=uiCollapsed ? 122 : uiStatistics ? 499 : uiIndicators ? 520 : mapY+mapHeight+44;
+   int height=uiCollapsed ? 122 : uiStatistics ? (statsDetail==2 ? 650 : 570) : uiIndicators ? 520 : mapY+mapHeight+44;
    if(!EnsurePanel(height)) return;
    ArrayResize(uiHits,0);
    panelCanvas.Erase(UIInk(UI_ROOT));
@@ -1082,7 +1082,7 @@ void Panel()
    panelCanvas.FillRectangle(0,0,UIPx(559),UIPx(39),UIInk(UI_HEADER));
    string pageTitle=uiStatistics ? "交易统计" : uiIndicators ? "看盘设置" : "T哥点位监控";
    UIText(_Symbol+" · "+pageTitle,16,10,222,11,UI_TEXT);
-   UIText("v1.27",242,13,40,8,UI_DIM);
+   UIText("v1.28",242,13,40,8,UI_DIM);
    UIText(TimeToString(TimeGMT()+8*3600,TIME_SECONDS),286,12,100,10,UI_MUTED,true);
    UIButton(uiCollapsed ? "+" : "−",396,7,30,1);
    UIText(启用真实交易 ? "交易模式" : "观察模式",434,13,110,9,启用真实交易 ? UI_ACCENT : UI_WARN,true);
