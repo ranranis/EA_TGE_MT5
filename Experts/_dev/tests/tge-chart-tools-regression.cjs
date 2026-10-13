@@ -7,7 +7,7 @@ function body(name) {
  return src.slice(start+1,end-1);
 }
 function convert(s) {
- return s.replace(/C'(\d+),(\d+),(\d+)'/g,'[$1,$2,$3]').replace(/\((?:int|double|long|ulong)\)/g,'')
+ return s.replace(/\(planCount\+1\)\/2/g,'Math.floor((planCount+1)/2)').replace(/\(ArraySize\(levels\)\+5\)\/6/g,'Math.floor((ArraySize(levels)+5)/6)').replace(/i\/([236])/g,'Math.floor(i/$1)').replace(/C'(\d+),(\d+),(\d+)'/g,'[$1,$2,$3]').replace(/\((?:int|double|long|ulong)\)/g,'')
  .replace(/\b(?:string|int) (\w+)\[\d+\]=\{([\s\S]*?)\};/g,'let $1=[$2];')
  .replace(/\b(?:int|string) (\w+)\[\d+\];/g,'let $1=[];')
  .replace(/\b(?:double|MqlRates) (\w+)\[\];/g,'let $1=[];')
@@ -27,7 +27,7 @@ const cx=vm.createContext({Math,
  uiIndicatorLabels:['MA5','EMA20','布林','RSI','MACD','ATR','MA10','MA50','MA100','MA200','M5·MA5','M15·MA5','确认拐点','昨高低','ADX','随机KD'],uiIndicatorHandles:Array(16).fill(-1),uiIndicatorNotice:'',INVALID_HANDLE:-1,
  uiCollapsed:false,uiPointLines:true,uiStatistics:false,uiIndicators:false,statsPeriod:0,statsOffsets:[0,0,0],statsFilter:0,statsDetail:0,statsReview:0,statsDirty:true,statsLastAttempt:0,statsTrades:[],uiHits:[],uiPeriods:[1,5,15,30,16385,16388,16408],
  uiInitialized:false,uiOldMouseMove:false,uiDragging:false,uiOldScroll:false,uiLeftWasDown:false,uiPressedAction:0,uiDragDX:0,uiDragDY:0,panelReady:true,
- 读取AI即时策略:false,每次开仓手数:.02,aiReady:false,AIPlanCaption:()=>'AI等待',VIEW:'TGE_',_Symbol:'XAUUSD.c',UI_HEADER:0,UI_ACCENT:1,UI_MUTED:2,UI_DIM:3,
+ 读取AI即时策略:false,每次开仓手数:.02,aiReady:false,aiMode:'WAIT',aiPlans:[],aiSourceTime:0,AIPlanCaption:()=>'AI等待',VIEW:'TGE_',_Symbol:'XAUUSD.c',UI_HEADER:0,UI_ACCENT:1,UI_MUTED:2,UI_DIM:3,
  uiMobileMarkers:true,启用手机标记挂单:true,markerStatus:'等待同步',markerPrefix:'TGM.test.',markerDirty:false,GlobalVariablesFlush:()=>{},
  CHART_SCALE:'scale',CHART_AUTOSCROLL:'follow',CHART_SHOW_GRID:'grid',CHART_SHIFT:'shift',CHART_MODE:'mode',
  CHART_MOUSE_SCROLL:'scroll',CHART_EVENT_MOUSE_MOVE:'move',CHART_WIDTH_IN_PIXELS:'width',CHART_HEIGHT_IN_PIXELS:'height',
@@ -45,7 +45,7 @@ const cx=vm.createContext({Math,
  ObjectGetInteger:(_,name,p)=>objects.get(p)||0,ObjectSetInteger:(_,name,p,v)=>{objects.set(p,v);return true;},
  GlobalVariableSet:(k,v)=>{globals.set(k,v);return 1;},GlobalVariableCheck:k=>globals.has(k),GlobalVariableGet:k=>globals.get(k)||0,
  IntegerToString:String,StringToInteger:Number,GetLastError:()=>0,Print:()=>{},
- UICard:()=>{},UIText:()=>{},Panel:()=>paint++,DrawLevels:()=>drawLevels++,
+ UIRound:()=>{},UICard:()=>{},UIText:()=>{},Panel:()=>paint++,DrawLevels:()=>drawLevels++,
  ArraySize:a=>a.length,ArrayResize:(a,n)=>{while(a.length<n)a.push({});a.length=n;}
 });
 for(const [name,args] of [['UIIndicatorPeriod','index'],['UIIsMovingAverage','index'],['UIIsOscillator','index'],['UIIndicatorLabel','index'],['UIMovingAverageGroup','trendGroup'],['UIIndicatorName','index'],['UIIndicatorWindow','index'],['UIIndicatorSet','index,enabled'],['CloseViewIndicators',''],['UIPx','value'],['SaveView',''],['InitView',''],['MovePanel',''],
@@ -58,9 +58,9 @@ check('removed timeframe and generic chart actions do not change chart state',()
  assert.deepEqual([...props],old);assert.equal(periods.length,0);assert.equal(navigation.length,0);
  assert(!/ChartSetSymbolPeriod|CHART_SCALE|CHART_AUTOSCROLL|CHART_SHOW_GRID|CHART_SHIFT|CHART_MODE/.test(body('ChartTools')+body('ViewAction')));
 });
-check('three toolbar rows contain six averages and relevant context indicators without timeframe tools',()=>{
+check('indicator sections contain averages, structure and momentum without timeframe tools',()=>{
  cx.uiHits=[];cx.ChartTools(88);
- assert.deepEqual(Array.from(cx.uiHits,h=>h.action),[50,56,51,57,58,59,52,53,54,55,60,61,70,71,72,73,74,75]);
+ assert.deepEqual(Array.from(cx.uiHits,h=>h.action),[50,56,51,57,58,59,60,61,70,71,72,73,52,53,54,55,74,75]);
 });
 check('point line visibility redraws objects and persists independently',()=>{
  cx.ViewAction(27);assert.equal(cx.uiPointLines,false);assert.equal(drawLevels,1);assert.equal(globals.get('TGUI.42.lines'),0);
@@ -78,7 +78,7 @@ check('hit mapping follows panel position and DPI in both layouts',()=>{
   assert.equal(cx.uiHits.length,19);
   for(const h of cx.uiHits){
    assert.equal(cx.HitAction(cx.uiX+(h.x+h.w/2)*scale,cx.uiY+(h.y+h.h/2)*scale),h.action);
-   assert(h.x+h.w<=548);assert(h.y+h.h<=y+95);
+   assert(h.x+h.w<=548);assert(h.y+h.h<=y+229);
   }
   assert.equal(cx.HitAction(cx.uiX-1,cx.uiY-1),0);
  }
@@ -430,4 +430,62 @@ check('monitor page presents AI reference independently of the old map and daily
  cx.ViewAction(2);assert(displayed().includes('AI即时：BUY 4160 / SELL 4175'));
  assert(!displayed().some(v=>v.includes('日亏损上限')));
 });
+check('instant references precede positions and map, with clear empty/active states',()=>{
+ cx.aiMode='SETUP';cx.aiSourceTime=1000;cx.aiPlans=[{sign:1,level:4160,market:false},{sign:-1,level:4175,market:false}];
+ cx.Panel();const frame=displayed();
+ assert(frame.includes('4160.00'));assert(frame.includes('4175.00'));
+ assert(frame.indexOf('T哥即时参考')<frame.indexOf('持仓明细'));
+ assert(frame.indexOf('持仓明细')<frame.indexOf('完整点位地图'));
+ assert(!frame.includes('可评估'));assert(!frame.includes('风险'));
+});
 console.log(checks+' production-source chart UI checks passed; native MT5 clicks not exercised.');
+
+// 可选：导出生产Panel的绘图调用，供Pillow离线排版预览；示例数据不连接终端。
+if(process.env.TGE_UI_PREVIEW){
+ const out=process.env.TGE_UI_PREVIEW;fs.mkdirSync(out,{recursive:true});
+ for(const m of src.matchAll(/(UI_[A-Z]+)=C'(\d+),(\d+),(\d+)'/g))cx[m[1]]=[+m[2],+m[3],+m[4]];
+ let ops=[],width=560,height=640;
+ const rgba=v=>Array.isArray(v)?v:[125,140,155];
+ Object.assign(cx,{
+  UIRound:(x,y,w,h,c)=>ops.push({op:'rect',x,y,w,h,color:rgba(c),r:8}),
+  UICard:(x,y,w,h,c)=>ops.push({op:'rect',x,y,w,h,color:rgba(c),border:cx.UI_BORDER,r:8}),
+  UIText:(text,x,y,w,size,color,right=false)=>ops.push({op:'text',text:String(text),x,y,w,size,color:rgba(color),right}),
+  EnsurePanel:h=>{height=h;cx.panelHeight=h;return true;},
+  panelCanvas:{Erase:()=>{ops=[];},FillRectangle:(x,y,x2,y2,c)=>ops.push({op:'rect',x,y,w:x2-x+1,h:y2-y+1,color:rgba(c),r:0}),Update:()=>{}},
+  panelScale:1,uiCollapsed:false,uiStatistics:false,uiIndicators:false,uiPointLines:true,uiMobileMarkers:true,
+  读取AI即时策略:true,aiReady:true,aiMode:'SETUP',aiSourceTime:1000,启用真实交易:true,
+  aiPlans:[{sign:1,level:4160,market:false},{sign:-1,level:4175,market:false}],
+  levels:[4175,4185,4200,4220,4245],sourceKind:'teacher',sourceTime:900,feedActive:true,
+  TimeToString:(_,flags)=>flags===4?'22:31':flags===1?'09:42:16':'10.13 09:00',
+  SyncStatus:()=>'飞书同步正常 · 北京时间 09:42:15',ExecutionBlock:()=>'',
+  FreshQuote:q=>Object.assign(q,{bid:4164,ask:4164.2}),markerStatus:'已同步5条',
+  AIPlanCaption:()=> 'AI已校验原文方向 · 参考不等于已成交',
+  AccountInfoString:()=>'USC',trend:1,
+  entryView:{ready:true,reaction:false,direction:1,level:4160,distance:4,bar:1000},
+  reason:'等待点位附近的M1收线反应',
+  uiIndicatorNotice:'已收盘值显示 · 指标不改变交易策略',
+  PositionProgress:()=>'首批 +5.00 减半 · 当前尚未达到首批目标',
+  POSITION_VOLUME:1,POSITION_PROFIT:2,POSITION_SWAP:3,POSITION_SL:4,POSITION_TP:5,
+  POSITION_TYPE:6,POSITION_TYPE_BUY:0,POSITION_PRICE_OPEN:7,POSITION_IDENTIFIER:8,
+  OwnSelected:()=>true,PositionSelectByTicket:()=>true
+ });
+ let selected=0,positions=[];
+ cx.PositionSelectByTicket=t=>{selected=t-810001;return selected>=0&&selected<positions.length;};
+ cx.PositionsTotal=()=>positions.length;
+ cx.PositionGetTicket=i=>{selected=i;return 810001+i;};
+ cx.PositionGetDouble=k=>({1:.02,2:positions[selected]||0,3:0,4:4150,5:4170,7:4160})[k]||0;
+ cx.PositionGetInteger=k=>k===6?0:810001+selected;
+ function render(name){cx.Panel();
+  for(const h of cx.uiHits)assert(h.x>=0&&h.y>=0&&h.x+h.w<=width&&h.y+h.h<=height,name+' hit bounds');
+  for(let i=0;i<cx.uiHits.length;i++)for(let j=i+1;j<cx.uiHits.length;j++){
+   const a=cx.uiHits[i],b=cx.uiHits[j];
+   assert(a.x+a.w<=b.x||b.x+b.w<=a.x||a.y+a.h<=b.y||b.y+b.h<=a.y,name+' hit overlap');
+  }
+  fs.writeFileSync(out+'/'+name+'.json',JSON.stringify({width,height,ops,hits:cx.uiHits},null,2));}
+ render('monitor');
+ positions=[2.48,-1.26,6.42];render('positions');
+ positions=[];cx.aiPlans.push({sign:1,level:4140,market:false},{sign:-1,level:4190,market:true});render('four-plans');
+ cx.aiReady=false;cx.aiMode='WAIT';cx.aiPlans=[];cx.reason='AI消息待核对，等待有效方向';cx.AIPlanCaption=()=> '来源已编辑 · 等待重新解释';render('waiting');
+ cx.uiCollapsed=true;render('compact');cx.uiCollapsed=false;
+ cx.uiIndicators=true;render('indicators');
+}

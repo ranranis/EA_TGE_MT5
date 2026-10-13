@@ -1,5 +1,5 @@
 #property strict
-#property version "1.25"
+#property version "1.27"
 #property description "T哥点位地图 / M5 MA5 / M1收线 / 0.02手分批。独立Magic，仅管理本EA持仓。"
 #include <Trade/Trade.mqh>
 #include <Canvas/Canvas.mqh>
@@ -738,10 +738,10 @@ string uiIndicatorLabels[16]={"MA5","EMA20","布林","RSI","MACD","ATR","MA10","
 int uiIndicatorHandles[16]={INVALID_HANDLE,INVALID_HANDLE,INVALID_HANDLE,INVALID_HANDLE,INVALID_HANDLE,INVALID_HANDLE,INVALID_HANDLE,INVALID_HANDLE,INVALID_HANDLE,INVALID_HANDLE,INVALID_HANDLE,INVALID_HANDLE,INVALID_HANDLE,INVALID_HANDLE,INVALID_HANDLE,INVALID_HANDLE};
 string uiIndicatorNotice="指标随当前图表周期；RSI/MACD/ATR/ADX/KD切换副图；固定MA5只显示已收盘值";
 
-const color UI_ROOT=C'12,20,31',UI_HEADER=C'16,27,42',UI_CARD=C'25,41,60';
-const color UI_ROW=C'25,40,58',UI_BORDER=C'52,73,96',UI_TEXT=C'225,232,241';
-const color UI_MUTED=C'150,165,184',UI_DIM=C'94,108,128',UI_ACCENT=C'45,190,177';
-const color UI_GAIN=C'255,122,89',UI_LOSS=C'77,163,255',UI_WARN=C'232,169,70';
+const color UI_ROOT=C'14,19,27',UI_HEADER=C'18,25,35',UI_CARD=C'23,31,43';
+const color UI_ROW=C'20,28,39',UI_BORDER=C'37,48,63',UI_TEXT=C'232,238,245';
+const color UI_MUTED=C'151,166,184',UI_DIM=C'112,130,151',UI_ACCENT=C'89,214,184';
+const color UI_GAIN=C'255,151,117',UI_LOSS=C'107,174,239',UI_WARN=C'235,193,120';
 const color UI_SELL=C'167,139,250';
 #include "Include/Journal/TgeStatistics.mqh"
 
@@ -749,7 +749,7 @@ int UIPx(const double value) { return (int)MathRound(value*panelScale); }
 uint UIInk(const color value) { return ColorToARGB(value,255); }
 void UIRound(const int x,const int y,const int w,const int h,const color fill)
 {
-   int left=UIPx(x),top=UIPx(y),width=UIPx(w),height=UIPx(h),r=UIPx(5);
+   int left=UIPx(x),top=UIPx(y),width=UIPx(w),height=UIPx(h),r=UIPx(8);
    panelCanvas.FillRectangle(left+r,top,left+width-r-1,top+height-1,UIInk(fill));
    panelCanvas.FillRectangle(left,top+r,left+width-1,top+height-r-1,UIInk(fill));
    panelCanvas.FillCircle(left+r,top+r,r,UIInk(fill));
@@ -933,28 +933,21 @@ void PageTabs(const int y)
 }
 void IndicatorPage()
 {
-   UICard(12,88,536,48,UI_CARD);
-   UIText("看盘设置",24,98,140,11,UI_TEXT);
-   UIText("指标只影响当前图表显示，不改变T哥入场规则",24,118,330,9,UI_MUTED);
-   UIText(uiIndicatorNotice,350,105,184,8.5,UI_DIM,true);
-
-   UICard(12,146,536,132,UI_ROW);
-   UIText("均线与策略组合",24,156,240,9.5,UI_TEXT);
-   UIText("短线组 / 趋势组可一键切换",350,156,184,8.5,UI_DIM,true);
-   ChartTools(174);
-
-   UICard(12,288,536,88,UI_ROW);
-   UIText("使用提示",24,300,120,9.5,UI_TEXT);
-   UIText("MA5、EMA和结构线放主图；RSI、MACD、ATR、ADX、KD进入副图。",24,322,500,9,UI_MUTED);
-   UIText("副图同一时间只显示一种量纲，关闭失败时会保留原指标。",24,344,500,9,UI_MUTED);
-   UIText("当前图表周期："+IntegerToString((int)ChartPeriod(0))+" · T哥策略仍固定使用M5/M1",24,358,500,8.5,UI_DIM);
-   // 绘制完成后发布位图；ChartRedraw本身不会上传Canvas缓冲区。
+   UIText("看盘设置",16,94,240,17,UI_TEXT);
+   UIText("按用途切换指标组合",16,122,520,9,UI_MUTED);
+   UIText("均线",16,160,160,10,UI_MUTED);
+   UIText("点位与结构",16,268,200,10,UI_MUTED);
+   UIText("波动与动量",16,332,200,10,UI_MUTED);
+   ChartTools(190);
+   UIRound(12,438,536,66,UI_HEADER);
+   UIText(uiIndicatorNotice,26,449,508,9,UI_MUTED);
+   UIText("主图叠加均线与结构 · 副图一次显示一种动量指标",26,478,508,9,UI_DIM);
    panelCanvas.Update();
 }
 void UIButton(const string text,const int x,const int y,const int w,const int action,const bool active=false)
 {
-   UICard(x,y,w,27,active ? C'27,72,78' : UI_HEADER);
-   UIText(text,x+5,y+5,w-10,9,active ? UI_ACCENT : UI_MUTED);
+   UIRound(x,y,w,27,active ? C'30,65,62' : UI_HEADER);
+   UIText(text,x+(w<40 ? 5 : 8),y+5,w-(w<40 ? 10 : 16),9,active ? UI_ACCENT : UI_MUTED);
    int n=ArraySize(uiHits); ArrayResize(uiHits,n+1);
    uiHits[n].x=x; uiHits[n].y=y; uiHits[n].w=w; uiHits[n].h=27; uiHits[n].action=action;
 }
@@ -964,21 +957,23 @@ void ChartTools(const int y)
    for(int i=0;i<6;i++)
    {
       int index=averages[i]; bool visible=UIIndicatorWindow(index)>=0;
-      UIButton(UIIndicatorLabel(index)+(visible ? "开" : "关"),12+i*90,y,82,50+index,visible);
-   }
-   for(int i=0;i<4;i++)
-   {
-      int index=2+i; bool visible=UIIndicatorWindow(index)>=0;
-      UIButton(UIIndicatorLabel(index)+(visible ? "开" : "关"),12+i*90,y+34,82,50+index,visible);
+      UIButton(UIIndicatorLabel(index)+(visible ? "开" : "关"),16+(i%3)*180,y+(i/3)*36,168,50+index,visible);
    }
    bool shortSet=UIIndicatorWindow(0)>=0 && UIIndicatorWindow(6)>=0 && UIIndicatorWindow(1)>=0;
    bool trendSet=UIIndicatorWindow(1)>=0 && UIIndicatorWindow(7)>=0 && UIIndicatorWindow(9)>=0;
-   UIButton("短线组",372,y+34,82,60,shortSet);
-   UIButton("趋势组",462,y+34,82,61,trendSet);
-   for(int i=0;i<6;i++)
+   UIButton("短线组",332,y-34,100,60,shortSet);
+   UIButton("趋势组",444,y-34,100,61,trendSet);
+   for(int i=0;i<4;i++)
    {
       int index=10+i; bool visible=UIIndicatorWindow(index)>=0;
-      UIButton(UIIndicatorLabel(index)+(visible ? "开" : "关"),12+i*90,y+68,82,70+i,visible);
+      UIButton(UIIndicatorLabel(index)+(visible ? "开" : "关"),16+i*134,y+102,126,70+i,visible);
+   }
+   int momentum[6]={2,3,4,5,14,15};
+   for(int i=0;i<6;i++)
+   {
+      int index=momentum[i]; bool visible=UIIndicatorWindow(index)>=0;
+      UIButton(UIIndicatorLabel(index)+(visible ? "开" : "关"),16+(i%3)*180,y+166+(i/3)*36,168,
+               index>=14 ? index+60 : index+50,visible);
    }
 }
 int HitAction(const int mouseX,const int mouseY)
@@ -1071,75 +1066,100 @@ void Panel()
       if(PositionGetDouble(POSITION_SL)>0) protectedCount++;
       if(PositionGetDouble(POSITION_TP)>0) tpCount++;
    }
-   int count=ArraySize(tickets),visible=MathMin(count,3),rowHeight=82;
-   int positionHeight=MathMax(visible,1)*rowHeight;
-   int levelRows=MathMax((ArraySize(levels)+5)/6,1);
-   int pointY=174+positionHeight+14,pointHeight=70+levelRows*30+(读取AI即时策略 ? 26 : 0);
-   int signalY=pointY+pointHeight+10;
-   int height=uiCollapsed ? (uiStatistics ? 87 : uiIndicators ? 170 : 154) :
-              uiStatistics ? 499 : uiIndicators ? 390 : signalY+160;
+   int count=ArraySize(tickets),visible=MathMin(count,3),rowHeight=count>0 ? 82 : 66;
+   int planCount=读取AI即时策略 && aiReady && aiMode=="SETUP" ? ArraySize(aiPlans) : 0;
+   int planRows=MathMax((planCount+1)/2,1);
+   int pointRows=MathMax((ArraySize(levels)+5)/6,1);
+   int heroY=180,heroHeight=56+planRows*68;
+   int decisionY=heroY+heroHeight+12,positionY=decisionY+88;
+   int mapY=positionY+24+MathMax(visible,1)*rowHeight+10;
+   int mapHeight=62+pointRows*28;
+   int height=uiCollapsed ? 122 : uiStatistics ? 499 : uiIndicators ? 520 : mapY+mapHeight+44;
    if(!EnsurePanel(height)) return;
    ArrayResize(uiHits,0);
    panelCanvas.Erase(UIInk(UI_ROOT));
    UIRound(0,0,560,height,UI_ROOT);
    panelCanvas.FillRectangle(0,0,UIPx(559),UIPx(39),UIInk(UI_HEADER));
-   panelCanvas.FillRectangle(0,0,UIPx(3),UIPx(39),UIInk(UI_ACCENT));
    string pageTitle=uiStatistics ? "交易统计" : uiIndicators ? "看盘设置" : "T哥点位监控";
-   UIText(_Symbol+" · "+pageTitle,14,10,220,12,UI_TEXT);
-   UIText("v1.25",240,13,40,8,UI_DIM);
+   UIText(_Symbol+" · "+pageTitle,16,10,222,11,UI_TEXT);
+   UIText("v1.27",242,13,40,8,UI_DIM);
    UIText(TimeToString(TimeGMT()+8*3600,TIME_SECONDS),286,12,100,10,UI_MUTED,true);
    UIButton(uiCollapsed ? "+" : "−",396,7,30,1);
-   UIText(启用真实交易 ? "交易" : "观察",434,13,112,9.5,启用真实交易 ? UI_ACCENT : UI_WARN);
+   UIText(启用真实交易 ? "交易模式" : "观察模式",434,13,110,9,启用真实交易 ? UI_ACCENT : UI_WARN,true);
    PageTabs(49);
    ObjectSetString(0,VIEW+"CANVAS",OBJPROP_TOOLTIP,
-                   "拖动标题移动面板；−收起 / +展开；指标只影响显示，手机TP为服务器提示挂单 · "+feedStatus+
+                   "拖动标题移动面板；−收起 / +展开 · "+feedStatus+
                    " · 来源 "+sourceSender+" · 消息 "+identity+
-                   " · 监控心跳(北京) "+(healthBeat>0 ? TimeToString(healthBeat+8*3600,TIME_DATE|TIME_SECONDS) : "未知")+
                    " · "+uiIndicatorNotice+" · 手机TP标记："+markerStatus);
-
    if(uiCollapsed)
    {
       string compact=uiStatistics ? "统计页 · 点击 + 展开" :
                      uiIndicators ? "看盘页 · 指标显示设置" :
                      "监控 · "+IntegerToString(count)+"单 · "+reason;
-      UIText(compact,14,92,430,9.5,UI_MUTED);
-      if(!uiStatistics) UIText(uiPointLines ? "点位线开" : "点位线关",462,92,82,9,UI_ACCENT,true);
+      UIText(compact,16,94,526,9,UI_MUTED);
       panelCanvas.Update(); return;
    }
    if(uiStatistics) { StatsPanel(); return; }
    if(uiIndicators) { IndicatorPage(); return; }
 
-   // 首屏只保留成熟交易面板最常用的四项：浮动盈亏、持仓、风险、保护。
-   UICard(12,88,536,72,UI_CARD);
-   string titles[4]={"浮动盈亏","持仓","风险","保护"};
-   string values[4]={DoubleToString(pnl,2),IntegerToString(count)+"单",
-                     "可评估",
-                     "SL "+IntegerToString(protectedCount)+"/"+IntegerToString(count)};
-   string captions[4]={AccountInfoString(ACCOUNT_CURRENCY),DoubleToString(volume,2)+"手",
-                       StringFormat("每次 %.2f手",每次开仓手数),
-                       "TP "+IntegerToString(tpCount)+"/"+IntegerToString(count)};
-   for(int i=0;i<4;i++)
-   {
-      int x=24+i*134;
-      if(i>0) panelCanvas.FillRectangle(UIPx(x-12),UIPx(100),UIPx(x-12),UIPx(148),UIInk(UI_BORDER));
-      UIText(titles[i],x,98,108,9,UI_MUTED);
-      color valueInk=i==0 ? (pnl>0 ? UI_GAIN : pnl<0 ? UI_LOSS : UI_MUTED) :
-                     i==1 ? UI_ACCENT : UI_TEXT;
-      UIText(values[i],x,117,110,i==0 || i==1 ? 15 : 12,valueInk);
-      UIText(captions[i],x,143,112,8.5,UI_MUTED);
-   }
+   // 一级：账户内本EA的实际持仓；不用“可评估”充当风控状态。
+   UIRound(12,88,536,80,UI_CARD);
+   UIText("浮动盈亏 / "+AccountInfoString(ACCOUNT_CURRENCY),28,99,222,9,UI_MUTED);
+   UIText((pnl>0 ? "+" : "")+DoubleToString(pnl,2),28,122,224,24,
+          pnl>0 ? UI_GAIN : pnl<0 ? UI_LOSS : UI_TEXT);
+   panelCanvas.FillRectangle(UIPx(266),UIPx(106),UIPx(266),UIPx(150),UIInk(UI_BORDER));
+   UIText("持仓",284,100,112,9,UI_MUTED);
+   UIText(IntegerToString(count)+" 单",284,123,112,17,UI_TEXT);
+   UIText(DoubleToString(volume,2)+" 手",284,148,112,8,UI_DIM);
+   UIText("仓位保护",418,100,114,9,UI_MUTED);
+   UIText("SL "+IntegerToString(protectedCount)+"/"+IntegerToString(count),418,125,114,12,UI_TEXT);
+   UIText("TP "+IntegerToString(tpCount)+"/"+IntegerToString(count),418,148,114,8,UI_DIM);
 
-   UIText("持仓明细",14,174,220,10,UI_TEXT);
-   UIText(count>0 ? "仅本EA · "+DoubleToString(volume,2)+"手" : "等待点位机会",350,174,194,9,UI_DIM,true);
+   // 二级：即时方向独立于整日地图，优先显示方向、价格和来源时间。
+   UICard(12,heroY,536,heroHeight,UI_ROW);
+   UIText("T哥即时参考",28,heroY+13,200,11,UI_TEXT);
+   string aiAt=读取AI即时策略 && aiSourceTime>0 ? TimeToString(aiSourceTime+8*3600,TIME_MINUTES)+" 北京时间" : "等待来源";
+   UIText(aiAt,322,heroY+15,208,9,UI_DIM,true);
+   if(planCount>0)
+      for(int i=0;i<planCount;i++)
+      {
+         int x=24+(i%2)*260,y=heroY+40+(i/2)*68;
+         bool buy=aiPlans[i].sign>0;
+         color ink=buy ? UI_ACCENT : UI_SELL;
+         UIRound(x,y,252,58,buy ? C'20,47,44' : C'36,32,53');
+         UIText(buy ? "BUY / 多" : "SELL / 空",x+12,y+8,104,9,ink);
+         UIText(DoubleToString(aiPlans[i].level,_Digits),x+12,y+27,148,18,UI_TEXT);
+         UIText(aiPlans[i].market ? "市价指令" : "到位观察",x+160,y+34,80,8,ink,true);
+      }
+   else
+   {
+      UIText(读取AI即时策略 ? (aiReady ? "沿用完整点位地图" : "等待AI有效参考") : "按完整点位地图判断",
+             28,heroY+47,500,15,读取AI即时策略 && !aiReady ? UI_WARN : UI_TEXT);
+   }
+   UIText(读取AI即时策略 ? AIPlanCaption() : "M5方向 · M1收线确认",28,heroY+heroHeight-19,502,8,UI_MUTED);
+
+   string trendText=!entryView.ready ? "等待数据" : trend>0 ? "M5偏多" : trend<0 ? "M5偏空" : "M5震荡";
+   UIText("当前判断",16,decisionY+3,106,9,UI_DIM);
+   UIText(trendText,132,decisionY+3,132,9,UI_MUTED);
+   UIText(entryView.ready ? (entryView.reaction ? "M1反应已确认" : "等待M1反应") : "等待收线",
+          336,decisionY+3,204,9,entryView.ready && entryView.reaction ? UI_ACCENT : UI_MUTED,true);
+   UIText(reason,16,decisionY+25,526,12,UI_TEXT);
+   string detail=entryView.ready ? StringFormat("%s参考 %.2f  ·  距点位 %.2f",
+                 entryView.direction>0 ? "多" : "空",entryView.level,entryView.distance) : "有明确方向与价格后，按策略条件评估";
+   UIText(detail,16,decisionY+52,372,9,UI_MUTED);
+   UIText(StringFormat("每次 %.2f手",每次开仓手数),390,decisionY+52,152,9,UI_DIM,true);
+
+   UIText("持仓明细",16,positionY,220,10,UI_TEXT);
+   UIText(count>3 ? "仅显示最近3笔 / 共"+IntegerToString(count)+"笔" : "仅本EA持仓",324,positionY,216,8.5,UI_DIM,true);
    for(int row=0;row<MathMax(visible,1);row++)
    {
-      int y=194+row*rowHeight;
-      UICard(12,y,536,rowHeight-8,UI_ROW);
+      int y=positionY+24+row*rowHeight;
+      UICard(12,y,536,rowHeight-6,UI_ROW);
       if(count==0)
       {
-         panelCanvas.FillRectangle(UIPx(13),UIPx(y+12),UIPx(15),UIPx(y+51),UIInk(UI_ACCENT));
+         panelCanvas.FillRectangle(UIPx(13),UIPx(y+12),UIPx(15),UIPx(y+45),UIInk(UI_ACCENT));
          UIText("当前没有本EA持仓",28,y+12,480,11,UI_TEXT);
-         UIText("点位确认后，成交价、SL、TP与进度会显示在这里",28,y+37,480,9.5,UI_MUTED);
+         UIText("等待符合条件的机会 · 成交后显示分批与保护进度",28,y+35,480,9.5,UI_MUTED);
          break;
       }
       if(!PositionSelectByTicket(tickets[row])) continue;
@@ -1160,47 +1180,22 @@ void Panel()
       UIText(progress,24,y+58,508,8.5,UI_MUTED);
    }
 
-   UICard(12,pointY,536,pointHeight,UI_ROW);
-   UIText("老师点位",24,pointY+10,150,10.5,UI_TEXT);
+   // 地图作为次要参考，使用轻量分隔与数字，避免与即时方向争夺视觉注意力。
+   UIRound(12,mapY,536,mapHeight,UI_HEADER);
+   UIText("完整点位地图",28,mapY+11,180,10,UI_MUTED);
    string source=sourceKind=="teacher" ? "T哥原文" : sourceKind=="" ? "等待来源" : "群友转述";
-   UIText(source+(feedActive ? " · 当前参考" : " · 暂停"),330,pointY+10,204,9.5,
-          feedActive ? UI_ACCENT : UI_WARN,true);
-   for(int i=0;i<ArraySize(levels);i++)
-   {
-      int x=24+(i%6)*85,y=pointY+34+(i/6)*30;
-      UICard(x,y,77,24,feedActive ? C'19,59,67' : UI_HEADER);
-      UIText(DoubleToString(levels[i],_Digits),x+5,y+4,67,9.5,
-             feedActive ? C'105,221,210' : UI_DIM);
-   }
-   if(ArraySize(levels)==0) UIText("等待飞书同步完整点位",24,pointY+37,490,10,UI_MUTED);
-   if(读取AI即时策略) UIText(AIPlanCaption(),24,pointY+34+levelRows*30,494,9.5,aiReady ? UI_ACCENT : UI_WARN);
    string sourceAt=sourceTime>0 ? TimeToString(sourceTime+8*3600,TIME_DATE|TIME_MINUTES) : "尚未同步";
-   UIText("发布 "+sourceAt+" · 北京时间",24,pointY+pointHeight-36,494,8.5,UI_DIM);
-   string syncAt=healthSync>0 ? TimeToString(healthSync+8*3600,TIME_DATE|TIME_SECONDS) : "尚无";
-   UIText(SyncStatus()+" · 最近成功 "+syncAt,24,pointY+pointHeight-18,494,8.5,UI_MUTED);
-
-   UICard(12,signalY,536,104,UI_CARD);
-   string trendText=!entryView.ready ? "等待数据" : trend>0 ? "M5偏多" : trend<0 ? "M5偏空" : "M5方向未明";
-   UIText("入场判断 · "+trendText,24,signalY+9,210,10,
-          !entryView.ready ? UI_MUTED : trend>0 ? UI_ACCENT : trend<0 ? UI_SELL : UI_MUTED);
-   UIText(entryView.ready ? StringFormat("M5换边%d次 · M1 %s",entryView.crossings,TimeToString(entryView.bar,TIME_MINUTES)) : "等待完整收线数据",
-           238,signalY+10,296,9,UI_MUTED,true);
-   string near=entryView.ready ? StringFormat("%s参考 %.2f · 距点位 %.2f",
-                 entryView.direction>0 ? "多" : "空",entryView.level,entryView.distance) : "点位距离：尚未评估";
-   string space=entryView.ready ? (entryView.space>0 ? StringFormat("距下一点位 %.2f",entryView.space) : "前方无下一点位") : "";
-   UIText(near,24,signalY+33,310,9,UI_TEXT);
-   UIText(space,344,signalY+33,190,9,UI_MUTED,true);
-   UIText(entryView.ready ? "M1反应："+(entryView.reaction ? "已收回点位" : "未确认")+" · "+entryView.method :
-          "M1反应：等待数据",24,signalY+56,508,9,UI_MUTED);
-   UIText(reason,24,signalY+79,508,9.5,UI_TEXT);
+   UIText(source+" · "+sourceAt,220,mapY+12,312,8,UI_DIM,true);
+   for(int i=0;i<ArraySize(levels);i++)
+      UIText(DoubleToString(levels[i],_Digits),28+(i%6)*85,mapY+34+(i/6)*28,78,11,feedActive ? UI_TEXT : UI_DIM);
+   if(ArraySize(levels)==0) UIText("等待飞书同步完整点位",28,mapY+35,498,10,UI_DIM);
+   UIText(SyncStatus(),28,mapY+mapHeight-18,494,8,feedActive ? UI_MUTED : UI_WARN);
 
    string gate=ExecutionBlock(); MqlTick displayQuote;
    if(gate=="" && feedActive && !FreshQuote(displayQuote)) gate="报价过期/断线，暂停新请求";
    else if(gate=="" && feedActive && displayQuote.ask-displayQuote.bid>最大点差价格) gate="当前点差超过上限";
-   if(gate=="") gate=feedActive ? "执行通道就绪 · 按收线条件等待机会" : "等待有效点位地图";
-   UICard(12,signalY+112,536,28,UI_HEADER);
-   UIText("状态："+gate,24,signalY+118,508,9.5,
-          pending.kind!=0 ? UI_WARN : UI_MUTED);
+   if(gate=="") gate=feedActive ? "按策略条件等待机会" : "等待有效点位地图";
+   UIText("执行 · "+gate,16,height-29,526,9,pending.kind!=0 ? UI_WARN : UI_MUTED);
    panelCanvas.Update();
 }
 int OnInit()
