@@ -78,7 +78,7 @@ test('fixed .02 lot accepted without resizing',()=>assert(e.ExactLot(.02)));
 test('off-step lot rejected rather than rounded',()=>assert(!e.ExactLot(.025)));
 function target(levels,entry=100,sign=1) {
  const x=env();x.levels=levels;x.tp=0;x.Align=(v,d)=>(d>0?Math.ceil(v/.01-1e-8):Math.floor(v/.01+1e-8))*.01;
- install(x,'Target','entry,sign');return {ok:x.Target(entry,sign),tp:x.tp};
+ install(x,'Target','entry,sign,_tp=0,mapOnly=false');return {ok:x.Target(entry,sign),tp:x.tp};
 }
 test('tail target capped at 10 even when next level remote',()=>assert.equal(target([90,100,150]).tp,110));
 test('near obstacle trims target',()=>assert.equal(target([90,100,108]).tp,107.8));
@@ -148,7 +148,7 @@ function signal(options={}) {
   Align:v=>v,tp:0
  });
  for(const [name,args] of [['Reaction','bar,previous,level,sign,tolerance,escape'],['Trend','last,previous,ma0,ma1'],
-  ['BreakRetest','last,breakbar,before,level,sign,tolerance,escape'],['Target','entry,sign'],['VisitKey','level'],['Signal','out']])install(x,name,args);
+  ['BreakRetest','last,breakbar,before,level,sign,tolerance,escape'],['Target','entry,sign,_tp=0,mapOnly=false'],['VisitKey','level'],['Signal','out']])install(x,name,args);
  const out={};return {ok:x.Signal(out),out,x,store};
 }
 test('complete production candidate selects MA5 pullback',()=>{const r=signal();assert(r.ok);assert.equal(r.out.method,'M5 MA5顺势回踩');});
@@ -398,7 +398,7 @@ function aiEnv(options={}){
   IntegerToString:String,DoubleToString:(v,n)=>v.toFixed(n),Align:v=>v,
   Load:k=>memory[k]||0,Store:(k,v)=>memory[k]=v,ArraySetAsSeries:()=>{},
   FreshQuote:q=>Object.assign(q,{bid:100.4,ask:100.45}),CopyBuffer:(_h,_b,shift,n,out)=>{out.push(2);return 1;}});
- for(const [name,args] of [['Target','entry,sign'],['AIVisitKey','level,sign'],['AISignal','bar,q,out'],['AIMarketSignal','out']])install(x,name,args);
+ for(const [name,args] of [['Target','entry,sign,_tp=0,mapOnly=false'],['AIVisitKey','level,sign'],['AISignal','bar,q,out'],['AIMarketSignal','out']])install(x,name,args);
  return {x,memory};
 }
 test('authoritative AI BUY uses one completed M1 reaction without opposite MA veto',()=>{
@@ -470,5 +470,78 @@ test('AI snapshot validates symbol, footer, heartbeat and provenance before acti
 test('AI WAIT snapshot clears execution readiness while keeping reference data separate',()=>{
  const r=aiFeed(['TGA,1,2000,0,XAUUSD,msg,revision,1900,0,WAIT,pause','END,0']);
  assert(r.ok);assert.equal(r.x.aiReady,false);assert.equal(r.x.aiMode,'WAIT');assert.equal(r.x.aiPlans.length,0);
+});
+
+// 单向明确计划未触发时，沿用生产Signal/Reaction/BreakRetest评估地图延续。
+function continuation(sign=1,memory={}){
+ const {x}=signal({memory});const rates=x.CopyRates,buffers=x.CopyBuffer;
+ Object.assign(x,{读取AI即时策略:true,aiReady:true,aiMode:'SETUP',
+  aiPlans:[{sign,level:sign>0?90:110,market:false,near:false}],
+  aiIdentity:'direction-plan',aiSource:'teacher-message',aiSourceTime:1700,aiGenerated:1810,
+  TimeGMT:()=>1810,Hash:s=>[...s].reduce((a,v)=>a+v.charCodeAt(0),0),IntegerToString:String});
+ x.CopyRates=(s,tf,shift,count,out)=>{
+  const n=rates(s,tf,shift,count,out);
+  if(tf===5)out[2].close=99.8;
+  if(sign<0)for(const v of out)Object.assign(v,{...invert(v),time:v.time});
+  return n;
+ };
+ x.CopyBuffer=(h,b,shift,count,out)=>{const n=buffers(h,b,shift,count,out);if(sign<0&&h===1)for(let i=0;i<out.length;i++)out[i]=200-out[i];return n;};
+ if(sign<0)x.FreshQuote=q=>Object.assign(q,{bid:99.55,ask:99.6});
+ install(x,'AIVisitKey','level,sign');install(x,'AISignal','bar,q,out');
+ return x;
+}
+test('distant explicit pullback no longer suppresses same-direction map breakout/retest',()=>{
+ const x=continuation(),out={};assert(x.Signal(out));assert.equal(out.level,100);assert.equal(out.direction,1);
+ assert.equal(out.ai,false);assert(out.method.includes('地图突破回测'));assert(out.method.includes('teacher-message'));
+ assert.equal(x.entryView.level,100);
+});
+test('downward continuation is symmetric and does not become a buy',()=>{
+ const x=continuation(-1),out={};assert(x.Signal(out));assert.equal(out.direction,-1);assert.equal(out.level,100);assert.equal(out.ai,false);
+});
+test('explicit AI point keeps priority and original target mode',()=>{
+ const x=continuation();x.aiPlans[0].level=100;const out={};
+ assert(x.Signal(out));assert.equal(out.ai,true);assert.equal(out.level,100);
+});
+test('continuation requires an actual M5 break/retest rather than MA drift alone',()=>{
+ const x=continuation(),copy=x.CopyRates;
+ x.CopyRates=(s,tf,shift,count,out)=>{const n=copy(s,tf,shift,count,out);if(tf===5)out[2].close=100.2;return n;};
+ assert(!x.Signal({}));assert(x.reason.includes('需M5完成突破回测'));
+});
+test('continuation still requires completed M1 reaction',()=>{
+ const x=continuation(),copy=x.CopyRates;
+ x.CopyRates=(s,tf,shift,count,out)=>{const n=copy(s,tf,shift,count,out);if(tf===1)out[0].low=99.8;return n;};
+ assert(!x.Signal({}));assert(x.reason.includes('M1尚未'));
+});
+test('neutral or opposite M5 cannot extend a directional AI plan',()=>{
+ const x=continuation(),copy=x.CopyBuffer;
+ x.CopyBuffer=(h,b,s,c,out)=>{const n=copy(h,b,s,c,out);if(h===1)out[0]=out[1];return n;};
+ assert(!x.Signal({}));assert(x.reason.includes('M5趋势'));
+});
+test('conflicting directions and market-only plans cannot unlock map continuation',()=>{
+ const x=continuation();x.aiPlans.push({sign:-1,level:110,market:false});assert(!x.Signal({}));assert(x.reason.includes('多空参考并存'));
+ x.aiPlans.pop();x.aiPlans[0].market=true;assert(!x.Signal({}));assert(x.reason.includes('市价指令不扩展'));
+});
+test('paused, canceled or stale AI snapshots still prevent continuation',()=>{
+ const x=continuation();x.aiReady=false;x.aiReason='取消';assert(!x.Signal({}));
+ x.aiReady=true;x.aiGenerated=1790;assert(!x.Signal({}));
+ x.aiGenerated=1810;x.feedActive=false;assert(!x.Signal({}));
+});
+test('same and behind-reference map points cannot bypass direct-plan consumption',()=>{
+ const x=continuation();x.aiPlans[0].level=100;x.Store(x.AIVisitKey(100,1),1740);x.levels=[90,100];
+ assert(!x.Signal({}));assert(x.reason.includes('已消费'));
+ x.aiPlans[0].level=110;assert(!x.Signal({}));
+});
+test('continuation honors persisted map visit after restart and next obstacle space',()=>{
+ const x=continuation(1,{'visit100.00':1740});assert(!x.Signal({}));assert(x.reason.includes('已消费'));
+ const y=continuation();y.levels=[90,100,104];assert(!y.Signal({}));assert(y.reason.includes('不足首批'));
+});
+test('continuation cannot use a candle that began before activation',()=>{
+ const x=continuation();x.readyFrom=1741;assert(!x.Signal({}));assert(x.reason.includes('更新后的完整M1'));
+});
+test('continuation uses map target both in selection and send-time revalidation',()=>{
+ const x=continuation(),out={};assert(x.Signal(out));assert(Math.abs(x.tp-109.8)<1e-8);
+ const target=x.Target,seen=[];
+ x.Target=(...a)=>{seen.push(a[3]);return target(...a);};x.ExactLot=()=>true;x.Stops=()=>false;x.每次开仓手数=.02;
+ install(x,'Open','signal');x.Open(out);assert.deepEqual(seen,[true]);assert(Math.abs(x.tp-109.8)<1e-8);
 });
 console.log(checks+' production-source offline checks passed');

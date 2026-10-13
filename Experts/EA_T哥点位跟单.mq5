@@ -1,5 +1,5 @@
 #property strict
-#property version "1.29"
+#property version "1.30"
 #property description "T哥点位地图 / M5 MA5 / M1收线 / 0.02手分批。独立Magic，仅管理本EA持仓。"
 #include <Trade/Trade.mqh>
 #include <Canvas/Canvas.mqh>
@@ -366,10 +366,10 @@ bool BreakRetest(const MqlRates &last,const MqlRates &breakbar,const MqlRates &b
    return before.close>=level && breakbar.close<level-escape &&
           last.high<=level+tolerance && last.high>=level-tolerance && last.close<level-escape;
 }
-bool Target(const double entry,const int sign,double &tp)
+bool Target(const double entry,const int sign,double &tp,const bool mapOnly=false)
 {
    double distance=尾仓目标价格距离;
-   if(读取AI即时策略 && aiReady && aiMode=="SETUP")
+   if(!mapOnly && 读取AI即时策略 && aiReady && aiMode=="SETUP")
    {
       for(int i=0;i<ArraySize(aiPlans);i++)
       {
@@ -391,7 +391,7 @@ bool Target(const double entry,const int sign,double &tp)
 string VisitKey(const double level) { return "visit"+DoubleToString(level,_Digits); }
 bool Signal(Candidate &out)
 {
-   out.valid=false; signalRetry=false; ZeroMemory(entryView); entryView.bar=checkingMinute;
+   out.valid=false; out.ai=false; signalRetry=false; ZeroMemory(entryView); entryView.bar=checkingMinute;
    // 同一收线的数据等待只发生在原有90秒窗口内，不补做已经过时的信号。
    if(checkingMinute>0 && TimeTradeServer()-checkingMinute>90) { reason="本根M1评估窗口已结束"; return false; }
    MqlTick quote;
@@ -426,11 +426,38 @@ bool Signal(Candidate &out)
    double tolerance=MathMax(0.20*atr,2*TickSize()),escape=MathMax(0.05*atr,TickSize());
    double nearest=DBL_MAX,probe=DBL_MAX;
    entryView.bar=m1[0].time; entryView.ma=ma[0]; entryView.m1close=m1[0].close; entryView.crossings=maCrossings;
-   if(读取AI即时策略 && aiMode=="SETUP") return AISignal(m1[0],quote,out);
-   reason="等待点位附近的完整M1止跌/受阻";
+   bool continuation=读取AI即时策略 && aiMode=="SETUP";
+   int continuationSign=0;
+   double continuationAnchor=0;
+   string directReason="";
+   if(continuation)
+   {
+      // 明确点位优先；延续分支是EA技术判断，不把远处回踩计划改成市价喊单。
+      if(AISignal(m1[0],quote,out)) return true;
+      directReason=reason;
+      for(int i=0;i<ArraySize(aiPlans);i++)
+      {
+         if(aiPlans[i].market)
+         { reason="延续：市价指令不扩展为地图机会；回踩："+directReason; return false; }
+         int sign=aiPlans[i].sign;
+         if(continuationSign!=0 && continuationSign!=sign)
+         { reason="延续：多空参考并存，等待明确方向；回踩："+directReason; return false; }
+         if(continuationSign==0 || sign*(aiPlans[i].level-continuationAnchor)>0)
+            continuationAnchor=aiPlans[i].level;
+         continuationSign=sign;
+      }
+      if(continuationSign==0 || trend!=continuationSign)
+      { reason="延续：等待M5趋势与老师方向一致；回踩："+directReason; return false; }
+      // 延续只允许启用/更新后完整形成的M1，不沿用即时计划的半根收线例外。
+      if(m1[0].time<readyFrom)
+      { reason="延续：等待更新后的完整M1；回踩："+directReason; return false; }
+   }
+   reason=continuation ? "等待方向前方地图点位的M5突破回测" : "等待点位附近的完整M1止跌/受阻";
    for(int i=0;i<ArraySize(levels);i++)
    {
       double level=levels[i];
+      // 当前明确回踩价仍由AI分支处理；只拓展其方向前方的其他地图点位。
+      if(continuation && continuationSign*(level-continuationAnchor)<=TickSize()) continue;
       datetime consumed=(datetime)Load(VisitKey(level));
       if(consumed>0 && m1[0].time>consumed && MathAbs(m1[0].close-level)>MathMax(atr,2.0))
          Store(VisitKey(level),0); // 离开后才可重新回踩；消息重发不会重置
@@ -439,6 +466,7 @@ bool Signal(Candidate &out)
       for(int j=0;j<6;j++) if((m5[j].close-level)*(m5[j+1].close-level)<0) flips++;
       for(int sign=-1;sign<=1;sign+=2)
       {
+         if(continuation && sign!=continuationSign) continue;
          double entry=sign>0 ? quote.ask : quote.bid,gap=sign*(entry-level);
          if(gap<0) continue;
          bool m1Reaction=Reaction(m1[0],m1[1],level,sign,tolerance,escape);
@@ -449,13 +477,14 @@ bool Signal(Candidate &out)
          bool reaction=允许震荡点位反应 && trend==0 && sign*(m5[0].close-level)>escape &&
                        m5[0].high-m5[0].low<=2*atr;
          double tp;
-         bool targetOK=Target(entry,sign,tp);
-         string method=retest ? "M5突破回测" : pullback ? "M5 MA5顺势回踩" : reaction ? "震荡点位反应" : "等待入场结构";
+         bool targetOK=Target(entry,sign,tp,continuation);
+         string method=continuation ? "老师方向·地图突破回测" : retest ? "M5突破回测" : pullback ? "M5 MA5顺势回踩" : reaction ? "震荡点位反应" : "等待入场结构";
          string blocked=consumedVisit ? "本点位机会已消费，等待离开后再回踩" :
                         gap>MathMin(0.75*atr,首批止盈价格距离*0.8) ? "距点位过远，避免追价" :
                         !m1Reaction ? "M1尚未止跌/受阻并收回点位" :
                         trend!=0 && sign!=trend ? "M1反应与M5趋势相反" :
                         flips>=3 && !retest ? "M5反复穿越点位，等待明确突破回测" :
+                        continuation && !retest ? "延续需M5完成突破回测" :
                         !retest && !pullback && !reaction ? "M5入场结构尚未成立" :
                         !targetOK ? "下一点位之前不足首批收米空间" : "";
          // 同一遍计算生成解释；优先展示实际候选，否则展示最近点位的阻塞项。
@@ -473,9 +502,10 @@ bool Signal(Candidate &out)
          if(blocked!="") continue;
          if(gap>=nearest) continue;
          nearest=gap; out.valid=true; out.direction=sign; out.level=level; out.bar=m1[0].time;
-         out.method=method;
+         out.method=method+(continuation ? "["+aiSource+"]" : "");
       }
    }
+   if(continuation && !out.valid) reason="延续："+reason+"；回踩："+directReason;
    if(out.valid) reason=out.method+(out.direction>0 ? " 多" : " 空")+" @"+DoubleToString(out.level,_Digits);
    return out.valid;
 }
@@ -601,7 +631,7 @@ void Open(const Candidate &signal)
    if(!ExactLot(每次开仓手数)) { reason="开仓手数不符合券商规格"; return; }
    int sign=signal.direction;
    double entry=sign>0 ? q.ask : q.bid,sl=Align(entry-sign*保险价格距离,sign),tp;
-   if(!Target(entry,sign,tp) || !Stops(sign,sl,tp,q)) { reason="价格保护不符合券商规格"; return; }
+   if(!Target(entry,sign,tp,!signal.ai) || !Stops(sign,sl,tp,q)) { reason="价格保护不符合券商规格"; return; }
    ENUM_ORDER_TYPE type=sign>0 ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
    double margin=0;
    if(!OrderCalcMargin(type,_Symbol,每次开仓手数,entry,margin) || margin>AccountInfoDouble(ACCOUNT_MARGIN_FREE))
@@ -1095,7 +1125,7 @@ void Panel()
    panelCanvas.FillRectangle(0,0,UIPx(559),UIPx(39),UIInk(UI_HEADER));
    string pageTitle=uiStatistics ? "交易统计" : uiIndicators ? "看盘设置" : "T哥点位监控";
    UIText(_Symbol+" · "+pageTitle,16,10,222,11,UI_TEXT);
-   UIText("v1.29",242,13,40,8,UI_DIM);
+   UIText("v1.30",242,13,40,8,UI_DIM);
    UIText(TimeToString(TimeGMT()+8*3600,TIME_SECONDS),286,12,100,10,UI_MUTED,true);
    UIButton(uiCollapsed ? "+" : "−",396,7,30,1);
    UIText(启用真实交易 ? "交易模式" : "观察模式",434,13,110,9,启用真实交易 ? UI_ACCENT : UI_WARN,true);
