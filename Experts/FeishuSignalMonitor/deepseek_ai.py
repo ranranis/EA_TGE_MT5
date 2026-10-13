@@ -109,17 +109,38 @@ class DeepSeek:
 
     def interpret(self, targets, context, anchor, levels, previous_scene=None):
         scene_requested=any(t.get('source_role')=='teacher' and not t.get('historical') for t in targets)
+        # 长飞书ID容易被模型抄错一位。仅在本次API请求内使用短编号，
+        # 回包后精确映射回真实ID，再走原有来源/版本/原文校验，禁止模糊猜ID。
+        mids=list(dict.fromkeys(m['message_id'] for m in context+targets if m.get('message_id')))
+        aliases={mid:f'r{i:03d}' for i,mid in enumerate(mids,1)}
+        originals={short:mid for mid,short in aliases.items()}
+        ref_fields={'message_id','as_of','price_ref','direction_ref','context_ref','origin_id'}
+        def translate(value, mapping, incoming=False, key=None):
+            if isinstance(value,dict):
+                return {k:translate(v,mapping,incoming,k) for k,v in value.items()}
+            if isinstance(value,list):
+                return [translate(v,mapping,incoming) for v in value]
+            if key in ref_fields and isinstance(value,str) and value:
+                if incoming and value not in mapping:
+                    raise AIError('AI引用未知消息编号，等待重新解释')
+                return mapping.get(value,value)
+            return value
+        request_data=translate({'targets':targets,'context':context,'market_anchor':anchor,
+                               'earlier_full_levels':levels,'previous_scene':previous_scene or {}},aliases)
         payload = {'model': self.config['ai_model'], 'thinking': {'type':'disabled'},
-            'messages': [{'role':'system','content':SYSTEM+(SCENE_PROMPT if scene_requested else '\n本批没有老师新消息，只返回interpretations，不得输出或更新scene。')},
-                         {'role':'user','content':json.dumps({'targets':targets,'context':context,
-                          'market_anchor':anchor,'earlier_full_levels':levels,'previous_scene':previous_scene or {}},ensure_ascii=False)}],
+            'messages': [{'role':'system','content':SYSTEM+(SCENE_PROMPT if scene_requested else '\n本批没有老师新消息，只返回interpretations，不得输出或更新scene。')+
+                          '\n所有消息引用字段必须原样使用本次输入的r001等短编号，不要编造、改写或沿用上次编号。interpretations.id仍使用对应target.id。'},
+                         {'role':'user','content':json.dumps(request_data,ensure_ascii=False)}],
             'response_format': {'type':'json_object'}, 'max_tokens': 4800}
         data = self.request('/chat/completions', payload)
         try:
             choice = data['choices'][0]
             if choice['finish_reason']!='stop':
                 raise AIError('DeepSeek输出未完整结束，暂不使用')
-            return json.loads(choice['message']['content'])
+            result=json.loads(choice['message']['content'])
+            # 成员没有更新老师场景的权限；其多余scene也不参与引用映射。
+            if not scene_requested and isinstance(result,dict):result.pop('scene',None)
+            return translate(result,originals,incoming=True)
         except (KeyError, IndexError, TypeError, ValueError):
             raise AIError('DeepSeek未返回完整JSON，暂不使用') from None
 

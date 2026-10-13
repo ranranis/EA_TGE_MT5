@@ -1,8 +1,9 @@
 """场景语义桥回归；全部使用隔离合成消息，不写真实EA信号。"""
 import copy
+import json
 import unittest
 from unittest.mock import Mock
-from deepseek_ai import AIError, process_ai_batch, ai_snapshot
+from deepseek_ai import AIError, DeepSeek, process_ai_batch, ai_snapshot
 from teacher_scene import validate_scene, publish_scene
 from store import state, set_state, ingest
 from test_deepseek_ai import WorkerTests as DatabaseFixture, result
@@ -33,6 +34,70 @@ def example():
                inner_range=dict(low=proof('small','4175'),high=proof('small','4200')),
                outer_range=dict(low=proof('large','4150'),high=proof('large','4220')),summary='区间内等待4175多、4193空的收线反应')
     return targets,context,scene
+
+
+class ReferenceTransportTests(unittest.TestCase):
+    def client(self, respond):
+        client=DeepSeek('.',{'ai_model':'deepseek-flash'})
+        def request(endpoint,payload):
+            body=json.loads(payload['messages'][1]['content'])
+            return {'choices':[{'finish_reason':'stop','message':{'content':json.dumps(respond(body),ensure_ascii=False)}}]}
+        client.request=Mock(side_effect=request)
+        return client
+
+    def test_all_scene_references_round_trip_and_inputs_stay_unchanged(self):
+        targets,context,scene=example()
+        previous=validate_scene(scene,targets,context,4181)
+        before=copy.deepcopy((targets,context,previous))
+        def respond(body):
+            self.assertEqual([m['message_id'] for m in body['context']+body['targets']],['r001','r002','r003','r004','r005'])
+            self.assertEqual(body['targets'][0]['id'],'2')
+            old=body['previous_scene']
+            self.assertEqual(old['as_of'],'r005')
+            self.assertEqual(old['plans'][0]['price_ref'],'r002')
+            self.assertEqual(old['plans'][0]['origin_id'],'r002')
+            self.assertEqual(old['regime_ref']['message_id'],'r001')
+            self.assertEqual(old['inner_range']['low']['message_id'],'r004')
+            # 回包只保留外部场景字段，内部来源元数据不能越过既有校验。
+            value={key:old[key] for key in scene}
+            value['plans']=[{key:p[key] for key in scene['plans'][0]} for p in old['plans']]
+            return dict(interpretations=[],scene=value)
+        output=self.client(respond).interpret(targets,context,4181,[],previous)
+        self.assertEqual(output['scene'],scene)
+        self.assertEqual((targets,context,previous),before)
+        self.assertEqual(len(validate_scene(output['scene'],targets,context,4181)['plans']),2)
+
+    def test_unknown_reference_is_rejected_without_fuzzy_matching(self):
+        targets,context,scene=example()
+        for wrong in ('r999','buy','om_x100b63ebe38f70a4c32078cea8cb53f'):
+            with self.subTest(wrong=wrong),self.assertRaisesRegex(AIError,'未知消息编号'):
+                self.client(lambda body:dict(interpretations=[],scene=dict(as_of=wrong))).interpret(targets,context,4181,[])
+
+    def test_follow_context_ref_round_trip_and_unrequested_scene_is_ignored(self):
+        context=[message('original-direction','4175做多',1)]
+        targets=[message('member-receipt','我是75',2,role='follow_member')]
+        def respond(body):
+            return dict(interpretations=[dict(id='2',plans=[dict(context_ref='r001')])],scene=dict(as_of='invented'))
+        output=self.client(respond).interpret(targets,context,4181,[])
+        self.assertEqual(output,dict(interpretations=[dict(id='2',plans=[dict(context_ref='original-direction')])]))
+
+    def test_known_member_alias_does_not_gain_teacher_authority(self):
+        targets,context,scene=example()
+        context.append(message('outsider','小区间4175-4200',0,role='member'))
+        def respond(body):
+            aliases={old['message_id']:new['message_id'] for old,new in zip(context+targets,body['context']+body['targets'])}
+            value=copy.deepcopy(scene)
+            value['as_of']=aliases['large']
+            for p in value['plans']:
+                p['price_ref']=aliases[p['price_ref']];p['direction_ref']=aliases[p['direction_ref']]
+            value['regime_ref']['message_id']=aliases['rhythm']
+            for band in ('inner_range','outer_range'):
+                for proof in value[band].values():proof['message_id']=aliases[proof['message_id']]
+            value['inner_range']['low']['message_id']=aliases['outsider']
+            return dict(interpretations=[],scene=value)
+        output=self.client(respond).interpret(targets,context,4181,[])
+        with self.assertRaisesRegex(AIError,'有效老师原文'):
+            validate_scene(output['scene'],targets,context,4181)
 
 
 class SceneTests(unittest.TestCase):
