@@ -447,7 +447,7 @@ if(process.env.TGE_UI_PREVIEW){
  let ops=[],width=560,height=640;
  const rgba=v=>Array.isArray(v)?v:[125,140,155];
  Object.assign(cx,{
-  UIRound:(x,y,w,h,c)=>ops.push({op:'rect',x,y,w,h,color:rgba(c),r:8}),
+  UIRound:(x,y,w,h,c,r=8)=>ops.push({op:'rect',x,y,w,h,color:rgba(c),r}),
   UICard:(x,y,w,h,c)=>ops.push({op:'rect',x,y,w,h,color:rgba(c),border:cx.UI_BORDER,r:8}),
   UIText:(text,x,y,w,size,color,right=false)=>ops.push({op:'text',text:String(text),x,y,w,size,color:rgba(color),right}),
   EnsurePanel:h=>{height=h;cx.panelHeight=h;return true;},

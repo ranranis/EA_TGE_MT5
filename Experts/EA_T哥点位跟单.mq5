@@ -1,5 +1,5 @@
 #property strict
-#property version "1.28"
+#property version "1.29"
 #property description "T哥点位地图 / M5 MA5 / M1收线 / 0.02手分批。独立Magic，仅管理本EA持仓。"
 #include <Trade/Trade.mqh>
 #include <Canvas/Canvas.mqh>
@@ -747,9 +747,10 @@ const color UI_SELL=C'167,139,250';
 
 int UIPx(const double value) { return (int)MathRound(value*panelScale); }
 uint UIInk(const color value) { return ColorToARGB(value,255); }
-void UIRound(const int x,const int y,const int w,const int h,const color fill)
+void UIRound(const int x,const int y,const int w,const int h,const color fill,const int radius=8)
 {
-   int left=UIPx(x),top=UIPx(y),width=UIPx(w),height=UIPx(h),r=UIPx(8);
+   int left=UIPx(x),top=UIPx(y),width=UIPx(w),height=UIPx(h);
+   int r=MathMax(0,MathMin(UIPx(radius),MathMin((width-1)/2,(height-1)/2)));
    panelCanvas.FillRectangle(left+r,top,left+width-r-1,top+height-1,UIInk(fill));
    panelCanvas.FillRectangle(left,top+r,left+width-1,top+height-r-1,UIInk(fill));
    panelCanvas.FillCircle(left+r,top+r,r,UIInk(fill));
@@ -946,8 +947,20 @@ void IndicatorPage()
 }
 void UIButton(const string text,const int x,const int y,const int w,const int action,const bool active=false)
 {
-   UIRound(x,y,w,27,active ? C'30,65,62' : UI_HEADER);
-   UIText(text,x+(w<40 ? 5 : 8),y+5,w-(w<40 ? 10 : 16),9,active ? UI_ACCENT : UI_MUTED);
+   // 导航用底部指示线；开关用状态灯；普通操作保留中性描边。
+   bool navigation=(action>=2 && action<=4) || (action>=30 && action<=32) ||
+                   (action>=36 && action<=42);
+   bool toggle=action==27 || action==28 || (action>=50 && action<=59) ||
+               (action>=70 && action<=75);
+   color edge=active ? C'57,121,111' : C'49,63,80';
+   color fill=active ? C'24,48,47' : C'22,30,41';
+   UIRound(x,y,w,27,edge,4);
+   UIRound(x+1,y+1,w-2,25,fill,3);
+   if(navigation && active) UIRound(x+8,y+24,w-16,2,UI_ACCENT,0);
+   int inset=w<40 ? 10 : 8;
+   UIText(text,x+inset,y+5,w-inset-(toggle ? 22 : inset),9,active ? UI_ACCENT : UI_MUTED);
+   if(toggle)
+      UIRound(x+w-14,y+10,6,6,active ? UI_ACCENT : UI_DIM,3);
    int n=ArraySize(uiHits); ArrayResize(uiHits,n+1);
    uiHits[n].x=x; uiHits[n].y=y; uiHits[n].w=w; uiHits[n].h=27; uiHits[n].action=action;
 }
@@ -1082,7 +1095,7 @@ void Panel()
    panelCanvas.FillRectangle(0,0,UIPx(559),UIPx(39),UIInk(UI_HEADER));
    string pageTitle=uiStatistics ? "交易统计" : uiIndicators ? "看盘设置" : "T哥点位监控";
    UIText(_Symbol+" · "+pageTitle,16,10,222,11,UI_TEXT);
-   UIText("v1.28",242,13,40,8,UI_DIM);
+   UIText("v1.29",242,13,40,8,UI_DIM);
    UIText(TimeToString(TimeGMT()+8*3600,TIME_SECONDS),286,12,100,10,UI_MUTED,true);
    UIButton(uiCollapsed ? "+" : "−",396,7,30,1);
    UIText(启用真实交易 ? "交易模式" : "观察模式",434,13,110,9,启用真实交易 ? UI_ACCENT : UI_WARN,true);
