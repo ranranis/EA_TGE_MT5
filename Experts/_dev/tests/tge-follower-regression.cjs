@@ -148,7 +148,7 @@ function signal(options={}) {
   Align:v=>v,tp:0
  });
  for(const [name,args] of [['Reaction','bar,previous,level,sign,tolerance,escape'],['Trend','last,previous,ma0,ma1'],
-  ['BreakRetest','last,breakbar,before,level,sign,tolerance,escape'],['Target','entry,sign,_tp=0,mapOnly=false'],['VisitKey','level'],['Signal','out']])install(x,name,args);
+  ['BreakRetest','last,breakbar,before,level,sign,tolerance,escape'],['Target','entry,sign,_tp=0,mapOnly=false'],['VisitKey','level'],['MapReaction','bar,previous,m5,quote,out'],['Signal','out']])install(x,name,args);
  const out={};return {ok:x.Signal(out),out,x,store};
 }
 test('complete production candidate selects MA5 pullback',()=>{const r=signal();assert(r.ok);assert.equal(r.out.method,'M5 MA5顺势回踩');});
@@ -475,7 +475,7 @@ test('AI WAIT snapshot clears execution readiness while keeping reference data s
 // 单向明确计划未触发时，沿用生产Signal/Reaction/BreakRetest评估地图延续。
 function continuation(sign=1,memory={}){
  const {x}=signal({memory});const rates=x.CopyRates,buffers=x.CopyBuffer;
- Object.assign(x,{读取AI即时策略:true,aiReady:true,aiMode:'SETUP',
+ Object.assign(x,{读取AI即时策略:true,aiReady:true,aiMode:'SETUP',允许震荡点位反应:false,
   aiPlans:[{sign,level:sign>0?90:110,market:false,near:false}],
   aiIdentity:'direction-plan',aiSource:'teacher-message',aiSourceTime:1700,aiGenerated:1810,
   TimeGMT:()=>1810,Hash:s=>[...s].reduce((a,v)=>a+v.charCodeAt(0),0),IntegerToString:String});
@@ -515,10 +515,10 @@ test('continuation still requires completed M1 reaction',()=>{
 test('neutral or opposite M5 cannot extend a directional AI plan',()=>{
  const x=continuation(),copy=x.CopyBuffer;
  x.CopyBuffer=(h,b,s,c,out)=>{const n=copy(h,b,s,c,out);if(h===1)out[0]=out[1];return n;};
- assert(!x.Signal({}));assert(x.reason.includes('M5趋势'));
+ assert(!x.Signal({}));assert(x.reason.includes('M5'));
 });
 test('conflicting directions and market-only plans cannot unlock map continuation',()=>{
- const x=continuation();x.aiPlans.push({sign:-1,level:110,market:false});assert(!x.Signal({}));assert(x.reason.includes('多空参考并存'));
+ const x=continuation();x.aiPlans.push({sign:-1,level:110,market:false});assert(!x.Signal({}));assert(x.reason.includes('明确方向'));
  x.aiPlans.pop();x.aiPlans[0].market=true;assert(!x.Signal({}));assert(x.reason.includes('市价指令不扩展'));
 });
 test('paused, canceled or stale AI snapshots still prevent continuation',()=>{
@@ -543,5 +543,72 @@ test('continuation uses map target both in selection and send-time revalidation'
  const target=x.Target,seen=[];
  x.Target=(...a)=>{seen.push(a[3]);return target(...a);};x.ExactLot=()=>true;x.Stops=()=>false;x.每次开仓手数=.02;
  install(x,'Open','signal');x.Open(out);assert.deepEqual(seen,[true]);assert(Math.abs(x.tp-109.8)<1e-8);
+});
+
+// 4200场景是合成行情；不声称复现了历史全部Tick或券商成交。
+function pressureCase(mirror=false,memory={}){
+ const x=continuation(1,memory),oldRates=x.CopyRates;
+ Object.assign(x,{允许震荡点位反应:true,levels:[4150,4160,4175,4190,4200,4220],
+  aiPlans:[{sign:1,level:4175,market:false,near:false}]});
+ x.CopyRates=(s,tf,shift,count,out)=>{
+  const n=oldRates(s,tf,shift,count,out);
+  if(tf===1){
+   Object.assign(out[0],{open:4199.9,close:4199.2,high:4200.1,low:4198.9});
+   Object.assign(out[1],{open:4200.1,close:4199.6,high:4200.3,low:4199.3});
+  }else{
+   for(const v of out)Object.assign(v,{open:4198.4,close:4198.6,high:4199,low:4198});
+   Object.assign(out[0],{open:4199.8,high:4200.3,low:4197.8,close:4199.4});
+  }
+  if(mirror)for(const v of out)Object.assign(v,{open:8400-v.open,close:8400-v.close,high:8400-v.low,low:8400-v.high});
+  return n;
+ };
+ x.CopyBuffer=(h,b,shift,count,out)=>{out.push(...(h===1?[4198,4197.8,4197.7,4197.6,4197.5,4197.4,4197.3].map(v=>mirror?8400-v:v):[2]));return out.length;};
+ x.FreshQuote=q=>Object.assign(q,mirror?{bid:4200.8,ask:4200.85}:{bid:4199.15,ask:4199.2});
+ if(mirror){x.levels=x.levels.map(v=>8400-v).sort((a,b)=>a-b);x.aiPlans=[{sign:-1,level:4225,market:false,near:false}];}
+ return x;
+}
+test('4200 rejection can produce SELL while the independent teacher pullback remains BUY4175',()=>{
+ const x=pressureCase(),out={};assert(x.Signal(out));assert.equal(x.trend,1);
+ assert.equal(out.direction,-1);assert.equal(out.level,4200);assert.equal(out.ai,false);
+ assert(out.method.includes('地图压力受阻'));assert.equal(x.aiPlans[0].level,4175);
+ assert(Math.abs(x.tp-4190.2)<1e-8);assert.equal(x.entryView.level,4200);
+});
+test('support rebound independently buys while teacher sell reference remains above',()=>{
+ const x=pressureCase(true),out={};assert(x.Signal(out));assert.equal(x.trend,-1);
+ assert.equal(out.direction,1);assert.equal(out.level,4200);assert(out.method.includes('地图支撑止跌'));
+ assert(Math.abs(x.tp-4209.8)<1e-8);
+});
+test('mere pressure touch without a closed M5 rejection does not short',()=>{
+ const x=pressureCase(),copy=x.CopyRates;
+ x.CopyRates=(s,tf,a,b,out)=>{const n=copy(s,tf,a,b,out);if(tf===5)out[0].close=4200.2;return n;};
+ assert(!x.Signal({}));assert(x.reason.includes('等待M5'));
+});
+test('M1 touching a level alone cannot use a not-yet-closed M5 wick',()=>{
+ const x=pressureCase(),copy=x.CopyRates;
+ x.CopyRates=(s,tf,a,b,out)=>{const n=copy(s,tf,a,b,out);if(tf===5)Object.assign(out[0],{open:4198,high:4198.5,low:4197.8,close:4198.3});return n;};
+ assert(!x.Signal({}));
+});
+test('pressure reaction needs bearish M1 confirmation and remains within price distance',()=>{
+ const x=pressureCase(),copy=x.CopyRates;
+ x.CopyRates=(s,tf,a,b,out)=>{const n=copy(s,tf,a,b,out);if(tf===1)out[0].open=4199;return n;};
+ assert(!x.Signal({}));assert(x.reason.includes('等待M1'));
+ const y=pressureCase();y.FreshQuote=q=>Object.assign(q,{bid:4196,ask:4196.05});assert(!y.Signal({}));
+});
+test('explicit BUY at the same level is never silently inverted into map SELL',()=>{
+ const x=pressureCase();x.aiPlans[0].level=4200;assert(!x.Signal({}));
+});
+test('map reaction preserves consumed visit across restart and does not duplicate the opportunity',()=>{
+ const x=pressureCase(false,{'visit4200.00':1740});assert(!x.Signal({}));assert(x.reason.includes('已消费'));
+});
+test('reaction switch, fresh source, startup fence and cancellation still gate map reactions',()=>{
+ const x=pressureCase();x.允许震荡点位反应=false;assert(!x.Signal({}));
+ x.允许震荡点位反应=true;x.readyFrom=1741;assert(!x.Signal({}));
+ x.readyFrom=1000;x.aiReady=false;x.aiReason='已取消';assert(!x.Signal({}));
+ x.aiReady=true;x.feedActive=false;assert(!x.Signal({}));
+ x.feedActive=true;x.FreshQuote=()=>false;assert(!x.Signal({}));
+});
+test('next map obstacle with insufficient partial-profit space blocks pressure entry',()=>{
+ const x=pressureCase();x.levels.push(4195);x.levels.sort((a,b)=>a-b);
+ assert(!x.Signal({}));assert(x.reason.includes('不足首批止盈空间'));
 });
 console.log(checks+' production-source offline checks passed');
