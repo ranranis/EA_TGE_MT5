@@ -327,10 +327,10 @@ class WorkerTests(unittest.TestCase):
         lines=(self.home/'common/FeishuMT5SignalMonitor/tge_member_follow.csv').read_text(encoding='utf-8').splitlines()
         self.assertEqual(lines[-2],'FOLLOW,BUY,4168.0000000000');self.assertEqual(lines[-1],'END,1')
         self.assertEqual(self.db.execute('SELECT count(*) FROM orders').fetchone()[0],0)
-    def test_follow_deadline_is_exactly_five_minutes_even_with_fresh_heartbeats(self):
+    def test_follow_remains_active_beyond_five_minutes_with_fresh_heartbeats(self):
         self.configure_follow();self.seed(sender='ou_follower',text='68多上了',age=1)
         process_ai_batch(self.db,self.c,self.follow_client(),self.now)
-        for age,active in [(298.9,True),(299,False),(300,False)]:
+        for age,active in [(298.9,True),(299,True),(300,True),(86400,True)]:
             later=self.now+age
             with self.db:
                 set_state(self.db,'last_sync_at',later);set_state(self.db,'checkpoint',later)

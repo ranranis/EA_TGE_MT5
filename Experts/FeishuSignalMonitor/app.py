@@ -199,19 +199,20 @@ def export_teacher_levels(db,c,paused,now):
 
     follow=member_follow_snapshot(db,c,now,paused)
     fb=io.StringIO(newline=''); fw=csv.writer(fb,lineterminator='\r\n')
-    plans=follow.get('plans',[])
+    legacy_active=follow['active'] and now<follow.get('created',0)+300
+    plans=follow.get('plans',[]) if legacy_active else []
     note=str(follow['reason']).replace(',','，').replace('\r',' ').replace('\n',' ')[:160]
-    fw.writerow(['TGF','1',int(now),int(follow['active']),c['symbols'][c['teacher_symbol']],
+    fw.writerow(['TGF','1',int(now),int(legacy_active),c['symbols'][c['teacher_symbol']],
                  follow.get('message_id',''),follow.get('revision',''),int(follow.get('created',0)),
                  int(follow.get('created',0))+300,follow.get('sender',''),len(plans),note])
     for plan in plans: fw.writerow(['FOLLOW',plan['side'],format(plan['price'],'.10f')])
     fw.writerow(['END',len(plans)])
     atomic_text(folder/'tge_member_follow.csv',fb.getvalue())
 
-    # 新EA读多账号快照；旧单成员文件仍独立保留，升级不改旧EA协议。
+    # TGF3用expiry=ttl=0表示按价格有效；旧EA拒绝新格式，避免误用新规则。
     members=member_follow_snapshots(db,c,now,paused)
     multi=io.StringIO(newline=''); mw=csv.writer(multi,lineterminator='\r\n')
-    mw.writerow(['TGF','2',int(now),c['symbols'][c['teacher_symbol']],len(members)])
+    mw.writerow(['TGF','3',int(now),c['symbols'][c['teacher_symbol']],len(members)])
     for member in members:
         plan=member['plans'][0] if member.get('active') else {}
         safe=lambda v:str(v).replace(',','，').replace('\r',' ').replace('\n',' ')[:160]

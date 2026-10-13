@@ -130,16 +130,23 @@ class LayeredTests(unittest.TestCase):
 
     def test_member_questions_intentions_and_third_party_rejected(self):
         from deepseek_ai import validate_output
-        for text in ['4100多上了？','打算4100多上了','他说4100多上了','昨天4100多上了','4100多上了已平仓','4100做多']:
+        for text in ['4100多上了？','打算4100多上了','他说4100多上了','昨天4100多上了','4100多上了已平仓']:
             target=dict(id='0',text=text,source_role='follow_member',market_anchor=4100)
             value=dict(result(token='4100',price=4100,evidence=text),kind='MEMBER_TRADE')
             with self.subTest(text=text),self.assertRaises(AIError):validate_output({'interpretations':[value]},[target],4100)
+
+    def test_member_explicit_direction_plan_is_reference_not_claimed_fill(self):
+        from deepseek_ai import validate_output
+        target=dict(id='0',text='4100做多',source_role='follow_member',market_anchor=4100)
+        value=dict(result(token='4100',price=4100,evidence='4100做多'),kind='MEMBER_TRADE')
+        parsed=validate_output({'interpretations':[value]},[target],4100)
+        self.assertEqual(parsed['0']['plans'][0]['side'],'BUY')
 
     def test_legacy_qifei_migrates_to_verified_second_member_without_name_authority(self):
         self.c['follow_sender_id']='ou_cb14bfbe46d981efccc5473ff3a68aee'
         members=follow_members(self.c)
         self.assertEqual([m['sender_id'] for m in members],['ou_cb14bfbe46d981efccc5473ff3a68aee','ou_e1b1c715b5388994db84f5058d353696'])
-        self.assertTrue(all(m['ttl_seconds']==300 and m['max_adverse_price']==2 for m in members))
+        self.assertTrue(all(m['ttl_seconds']==0 and m['max_adverse_price']==2 for m in members))
 
     def test_explicit_disabled_member_does_not_receive_authority(self):
         self.members();self.c['follow_members'][1]['enabled']=False

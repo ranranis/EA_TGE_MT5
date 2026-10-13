@@ -28,7 +28,7 @@ function install(x,name,args='',ref=false){
  let s=translate(body(name));
  if(ref)s=s.replace(/return false;/g,'return {ok:false,speed,oneway,pullback};').replace(/return true;/g,'return {ok:true,speed,oneway,pullback};');
  if(name==='Manage')s=s.replace('PositionVolumes(id,initial,closed)','((r)=>{initial=r.initial;closed=r.closed;return r.ok;})(PositionVolumes(id))');
- if(name==='MapReaction')s=s.replace('!Target(entry,sign,tp,true)','!Target(entry,sign,true).ok');
+ if(name==='MapReaction')s=s.replaceAll('Target(entry,sign,tp,true)','Target(entry,sign,true).ok').replace('out=trial;','Object.assign(out,trial);');
  if(name==='Target')s='let tp=0;'+s.replace(/return false;/g,'return {ok:false,tp};').replace(/return true;/g,'return {ok:true,tp};');
  vm.runInContext('function '+name+'('+args+'){'+s+'}',x);
 }
@@ -37,7 +37,7 @@ function env(options={}){
  const memory=options.memory||{},calls=[],now=options.now||1000;
  const x=vm.createContext({
   TEACHER_BAND:2,REARM_DISTANCE:4,REARM_SECONDS:5,冲击短窗毫秒:3000,逆向冲击速度:.6,冲击单向比例:.85,恢复回拉价格:.35,
-  允许同机会重入:true,允许地图趋势过滤:true,启用真实交易:true,读取AI即时策略:true,启用起飞跟随:true,启用其他学生跟随:true,起飞最大追价价格差:2,
+  允许同机会重入:true,允许地图趋势过滤:true,启用真实交易:true,读取AI即时策略:true,启用起飞跟随:true,启用其他学生跟随:true,学员最大追价价格差:1,学员最大回落价格差:5,启用点位试仓:false,
   首批止盈价格距离:5,保险价格距离:10,尾仓目标价格距离:10,每次开仓手数:.02,最大点差价格:.5,
   aiReady:true,aiMode:'SETUP',aiIdentity:'teacher',aiSource:'teacher',aiGenerated:now,aiSourceTime:now-10,
   aiPlans:options.plans||[{sign:1,level:4175,market:false,origin:'buy-source|rev|SETUP',created:now-10,status:'',left:0}],
@@ -125,16 +125,23 @@ test('inside 4.00, disabled reentry and pending prevent rearm',()=>{
  const q={ask:mode==='close'?4178.9:4179,bid:4178.8};x.UpdateTeacherVisits(q);x.TimeGMT=()=>1006;x.UpdateTeacherVisits(q);assert(memory[key]>0);}
 });
 test('MARKET cannot rearm by leaving after consumption',()=>{const {x,memory}=env();x.aiPlans[0].market=true;const key=x.AIVisitKey(4175,1);memory[key]=990;x.UpdateTeacherVisits({ask:4180,bid:4179.9});x.TimeGMT=()=>1006;x.UpdateTeacherVisits({ask:4180,bid:4179.9});assert(memory[key]>0);});
-for(const sign of [1,-1])test('student adverse >=2 permanently missed, favorable allowed sign='+sign,()=>{
- const {x,memory}=env({plans:[]});x.followMembers=[member('first',4175,sign)];x.followIndex=0;
- assert(x.FollowPriceAllowed(sign>0?{ask:4173,bid:4172.9}:{bid:4177,ask:4177.1}));
- assert(!x.FollowPriceAllowed(sign>0?{ask:4177,bid:4176.9}:{bid:4173,ask:4173.1}));
- assert(!x.FollowPriceAllowed({ask:4175,bid:4175}));assert.equal(memory[x.FollowMissKey()],1);
+for(const sign of [1,-1])test('member inclusive price band and re-entry sign='+sign,()=>{
+ const {x,memory}=env({plans:[]});x.followMembers=[member('first',4100,sign)];x.followIndex=0;
+ for(const delta of [-5,-5.001,1,1.001,0]){
+  const price=4100+sign*delta;
+  assert.equal(x.FollowPriceAllowed({ask:price,bid:price}),delta>=-5&&delta<=1);
+ }
+ assert(!memory[x.FollowMissKey()]);
 });
 test('one missed member never blocks the other member',()=>{const {x}=env({plans:[]});x.followMembers=[member('first',4170),member('second',4175)];const c={};assert(x.MemberFollowSignal(c));assert(c.method.startsWith('second'));});
-test('five-minute expiry is exclusive and uses original message time',()=>{const {x}=env({plans:[]});x.followMembers=[member('first')];x.TimeGMT=()=>1289;x.followGenerated=1289;x.healthBeat=x.healthSync=x.healthCheckpoint=1289;assert(x.MemberFollowSignal({}));x.TimeGMT=()=>1290;assert(!x.MemberFollowSignal({}));});
-test('student attempts and misses persist across edit and restart',()=>{const {x,memory}=env({plans:[]});x.followMembers=[member('first')];x.followIndex=0;memory[x.FollowVisitKey()]=1;memory[x.FollowMissKey()]=1;const r=env({plans:[],memory});r.x.followMembers=[{...member('first'),revision:'edited'}];assert(!r.x.MemberFollowSignal({}));});
-test('student source and TTL rechecked before request',()=>{const {x,calls}=env({plans:[]});x.followMembers=[member('first')];const c={};assert(x.MemberFollowSignal(c));x.followMembers[0].source='changed';x.Open(c);assert.equal(calls.length,0);});
+test('message age does not expire reference but stale transport still blocks',()=>{
+ const {x}=env({plans:[]});x.followMembers=[member('first')];
+ x.TimeGMT=()=>90000;x.followGenerated=90000;x.healthBeat=x.healthSync=x.healthCheckpoint=90000;
+ assert(x.MemberFollowSignal({}));
+ x.followGenerated=89989;assert(!x.MemberFollowSignal({}));
+});
+test('student attempts persist across edit and restart',()=>{const {x,memory}=env({plans:[]});x.followMembers=[member('first')];x.followIndex=0;memory[x.FollowVisitKey()]=1;memory[x.FollowMissKey()]=1;const r=env({plans:[],memory});r.x.followMembers=[{...member('first'),revision:'edited'}];assert(!r.x.MemberFollowSignal({}));});
+test('student source rechecked before request',()=>{const {x,calls}=env({plans:[]});x.followMembers=[member('first')];const c={};assert(x.MemberFollowSignal(c));x.followMembers[0].source='changed';x.Open(c);assert.equal(calls.length,0);});
 test('student explicit broker rejection is still one attempted follow',()=>{const {x,calls}=env({plans:[]});x.followMembers=[member('first')];const c={};assert(x.MemberFollowSignal(c));install(x,'RecordResult');x.ExplicitReject=()=>true;x.Open(c);assert.equal(x.pending.kind,0);assert.equal(calls.length,1);assert(!x.MemberFollowSignal({}));});
 test('teacher zone owns priority during impulse defer against student or normal map',()=>{const {x}=env();x.followMembers=[member('opposite',4175,-1)];ticks(x,[4176,4175.7,4175.4,4175.1]);assert(!x.AIMarketSignal({}));assert(x.TeacherOwnsZone({bid:4175,ask:4175.1}));assert(!x.MemberFollowSignal({}));assert(x.followMembers[0].reason.includes('老师'));});
 test('same direction and price merges sources without a second trade',()=>{
@@ -146,17 +153,17 @@ test('same source merge ends after actual leave then reentry, old student stays 
  const {x,memory}=env();x.followMembers=[member('first')];x.MergeOpportunity(1,4175);assert(x.SameOpportunity(1,4175));
  x.UpdateSharedVisit({ask:4179,bid:4178.9});x.TimeGMT=()=>1005;x.UpdateSharedVisit({ask:4179,bid:4178.9});assert(!x.SameOpportunity(1,4175));assert(memory[x.FollowVisitKey(0)]>0);
 });
-test('legacy and multi-account snapshots parsed with footer, freshness and TTL checks',()=>{
+test('TGF3 snapshot validates footer and heartbeat; old protocol is rejected',()=>{
  const {x}=env({plans:[]});let rows=[],pos=0;
  Object.assign(x,{FILE_READ:1,FILE_TXT:2,FILE_ANSI:4,FILE_COMMON:8,FILE_SHARE_READ:16,CP_UTF8:65001,INVALID_HANDLE:-1,
   FileOpen:name=>name.includes('follows')?1:-1,FileSize:()=>1000,FileIsEnding:()=>pos>=rows.length,FileReadString:()=>rows[pos++],FileClose:()=>{},
   StringSplit:(s,sep,out)=>{out.length=0;out.push(...s.split(sep));return out.length;},StringToInteger:Number,StringToDouble:Number,
   Number:(s,decimal=false)=>new RegExp(decimal?'^[0-9]+(?:\\.[0-9]+)?$':'^[0-9]+$').test(s)});
  install(x,'ReadMemberFollow');install(x,'ReadLegacyFollow');
- rows=['TGF,2,1000,XAUUSD,2','MEMBER,first,起飞,1,receipt1,rev,990,1290,300,2,BUY,4175,ready','MEMBER,second,登登,1,receipt2,rev,995,1295,300,2,SELL,4193,ready','END,2'];
+ rows=['TGF,3,1000,XAUUSD,2','MEMBER,first,起飞,1,receipt1,rev,990,0,0,2,BUY,4175,ready','MEMBER,second,登登,1,receipt2,rev,995,0,0,2,SELL,4193,ready','END,2'];
  assert(x.ReadMemberFollow());assert.equal(x.followMembers.length,2);assert.equal(x.followMembers[1].sign,-1);
- pos=0;rows[2]=rows[2].replace('1295','1300');assert(!x.ReadMemberFollow());assert(!x.followReady);
- x.FileOpen=name=>name.includes('follows')?-1:1;pos=0;rows=['TGF,1,1000,1,XAUUSD,receipt,rev,990,1290,first,1,ready','FOLLOW,BUY,4175','END,1'];assert(x.ReadMemberFollow());assert.equal(x.followMembers.length,1);
+ pos=0;rows[2]=rows[2].replace(',0,0,2,',',1300,0,2,');assert(!x.ReadMemberFollow());assert(!x.followReady);
+ x.FileOpen=name=>name.includes('follows')?-1:1;pos=0;rows=['TGF,1,1000,1,XAUUSD,receipt,rev,990,1290,first,1,ready','FOLLOW,BUY,4175','END,1'];assert(!x.ReadMemberFollow());assert(!x.followReady);
 });
 test('tick path never reads files, calls AI or scans history before entry',()=>{const s=body('OnTick');assert(!/ReadFeed|ReadAISetups|History|CopyRates|CopyBuffer|FileOpen/.test(s));assert(s.includes('AIMarketSignal'));});
 test('startup cannot replay a preexisting MARKET hint but keeps conditions',()=>{
@@ -221,10 +228,47 @@ test('explicit teacher SL/TP are used, crossed first-exit prevents entry',()=>{
 test('map reactions follow M5 direction unless the dedicated switch is off',()=>{
  const {x}=env({plans:[]});Object.assign(x,{允许震荡点位反应:true,levels:[4175],atr:4,trend:-1,
   readyFrom:0,VisitKey:l=>'map'+l,Reaction:()=>true,entryView:{}});
- install(x,'MapReaction','bar,previous,m5,quote,out');
+ install(x,'MapReaction','bar,previous,m5,quote,out,probeOnly=false');
  const bar={time:1000,close:4175.5},m5={low:4175,high:4177,close:4176};
  assert(!x.MapReaction(bar,bar,m5,{ask:4175.5,bid:4175.4},{}));
  x.允许地图趋势过滤=false;assert(x.MapReaction(bar,bar,m5,{ask:4175.5,bid:4175.4},{}));
+});
+test('4150 M1 recovery can probe .01 while M5 is unconfirmed, without topping up',()=>{
+ const {x,calls,memory}=env({plans:[]});
+ Object.assign(x,{启用点位试仓:true,允许震荡点位反应:true,levels:[4150,4160],atr:2.92,trend:-1,
+  readyFrom:0,VisitKey:l=>'map'+l,Reaction:()=>true,entryView:{}});
+ install(x,'MapReaction','bar,previous,m5,quote,out,probeOnly=false');
+ const bar={time:1000,open:4150.4,close:4151,low:4150.2,high:4151.2};
+ const previous={time:940,open:4149.5,close:4150.4,low:4149.4,high:4150.5};
+ const m5={low:4147.2,high:4151,close:4148.5};
+ const q={ask:4151.14,bid:4151.04,time_msc:1000000};
+ const c={};assert(x.MapReaction(bar,previous,m5,q,c));assert(c.probe);assert.equal(c.direction,1);
+ x.FreshQuote=out=>Object.assign(out,q);x.Open(c);
+ assert.equal(calls.length,1);assert.equal(calls[0][2],.01);assert.equal(x.pending.volume,.01);
+ assert.equal(calls[0][4],4141.14);assert(calls[0][5]>q.ask);
+ x.Open(c);assert.equal(calls.length,1);assert(memory['map4150']>0);
+});
+test('probe rejects straight adverse candle, remote price, consumed and unavailable .01',()=>{
+ const {x,calls}=env({plans:[]});
+ Object.assign(x,{启用点位试仓:true,允许震荡点位反应:true,levels:[4150,4160],atr:2.92,trend:-1,
+  readyFrom:0,VisitKey:l=>'map'+l,Reaction:()=>false,entryView:{}});
+ install(x,'MapReaction','bar,previous,m5,quote,out,probeOnly=false');
+ const m5={low:4147,high:4153,close:4149},q={ask:4151.2,bid:4151.1};
+ const bar={time:1000,open:4152,close:4151,low:4150,high:4152};
+ assert(!x.MapReaction(bar,bar,m5,q,{}));
+ bar.open=4150.5;assert(!x.MapReaction(bar,bar,m5,{ask:4154,bid:4153.9},{}));
+ x.FreshQuote=out=>Object.assign(out,q);x.ExactLot=v=>v!==.01;
+ x.Open({probe:true,bar:1000,direction:1,level:4150});assert.equal(calls.length,0);
+});
+test('sell probe is symmetric and verified full entry remains .02',()=>{
+ const {x}=env({plans:[]});
+ Object.assign(x,{启用点位试仓:true,允许震荡点位反应:true,levels:[4140,4150],atr:3,trend:1,
+  readyFrom:0,VisitKey:l=>'map'+l,Reaction:()=>true,entryView:{}});
+ install(x,'MapReaction','bar,previous,m5,quote,out,probeOnly=false');
+ const bar={time:1000,open:4150,close:4149,low:4148.8,high:4150.5};
+ const c={};assert(x.MapReaction(bar,bar,{high:4153,low:4148,close:4152},{bid:4149,ask:4149.1},c));
+ assert(c.probe&&c.direction===-1);
+ x.trend=-1;const full={};assert(x.MapReaction(bar,bar,{high:4150.5,low:4148,close:4149},{bid:4149,ask:4149.1},full));assert.equal(full.probe,false);
 });
 test('persist explicit exits by confirmed position and never clear pending on failed persistence',()=>{
  const {x,memory}=env();install(x,'ExitKey','id');install(x,'SaveEntryExits');

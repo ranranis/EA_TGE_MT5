@@ -237,7 +237,7 @@ bool AISignal(const MqlRates &bar,const MqlTick &q,Candidate &out)
          entryView.distance=gap; entryView.bar=TimeCurrent(); entryView.reaction=allowed; entryView.method="T哥实时近价";
       }
       if(!allowed) continue;
-      out.valid=true; out.ai=true; out.follow=false; out.direction=aiPlans[i].sign; out.level=aiPlans[i].level;
+      out.valid=true; out.ai=true; out.follow=false; out.probe=false; out.direction=aiPlans[i].sign; out.level=aiPlans[i].level;
       out.bar=TimeCurrent(); out.originHash=Hash(aiPlans[i].origin); out.aiKey=AIVisitKey(out.level,out.direction);
       out.exitSL=aiPlans[i].sl; out.exitFirst=aiPlans[i].first;
       out.exitTP=aiPlans[i].tp; out.exitBE=aiPlans[i].breakeven;
@@ -313,7 +313,7 @@ bool ReadLegacyFollow()
    followMembers[0].sender=head[9]; followMembers[0].name="起飞"; followMembers[0].source=head[5]; followMembers[0].revision=head[6];
    followMembers[0].created=at; followMembers[0].expiry=expiry; followMembers[0].ttl=300;
    followMembers[0].price=StringToDouble(fields[2]); followMembers[0].sign=fields[1]=="BUY" ? 1 : -1;
-   followMembers[0].adverse=起飞最大追价价格差; followMembers[0].reason=head[11];
+   followMembers[0].adverse=学员最大追价价格差; followMembers[0].reason=head[11];
    followMembers[0].ready=MathIsValidNumber(followMembers[0].price) && followMembers[0].price>0 && TimeGMT()<expiry;
    followReady=followMembers[0].ready; return true;
 }
@@ -321,7 +321,7 @@ bool ReadMemberFollow()
 {
    followReady=false; followIndex=-1;
    int h=FileOpen("FeishuMT5SignalMonitor\\tge_member_follows.csv",FILE_READ|FILE_TXT|FILE_ANSI|FILE_COMMON|FILE_SHARE_READ,0,CP_UTF8);
-   if(h==INVALID_HANDLE) return ReadLegacyFollow();
+   if(h==INVALID_HANDLE) { followReason="等待新版学员快照"; return false; }
    string lines[]; bool ok=FileSize(h)<=16384;
    while(ok && !FileIsEnding(h))
    {
@@ -329,7 +329,7 @@ bool ReadMemberFollow()
       ArrayResize(lines,n+1); lines[n]=FileReadString(h);
    }
    FileClose(h); string head[],foot[];
-   if(!ok || ArraySize(lines)<2 || StringSplit(lines[0],',',head)!=5 || head[0]!="TGF" || head[1]!="2" ||
+   if(!ok || ArraySize(lines)<2 || StringSplit(lines[0],',',head)!=5 || head[0]!="TGF" || head[1]!="3" ||
       head[3]!=_Symbol || !Number(head[2]) || !Number(head[4])) { followReason="学生快照格式无效"; return false; }
    int count=(int)StringToInteger(head[4]); datetime generated=(datetime)StringToInteger(head[2]);
    if(count>8 || ArraySize(lines)!=count+2 || StringSplit(lines[count+1],',',foot)!=2 || foot[0]!="END" || foot[1]!=head[4] ||
@@ -343,13 +343,13 @@ bool ReadMemberFollow()
       incoming[i].sender=f[1]; incoming[i].name=f[2]; incoming[i].source=f[4]; incoming[i].revision=f[5];
       incoming[i].created=(datetime)StringToInteger(f[6]); incoming[i].expiry=(datetime)StringToInteger(f[7]);
       incoming[i].ttl=(int)StringToInteger(f[8]); incoming[i].adverse=StringToDouble(f[9]);
-      if(incoming[i].sender=="ou_cb14bfbe46d981efccc5473ff3a68aee") incoming[i].adverse=起飞最大追价价格差;
+      incoming[i].adverse=学员最大追价价格差;
       incoming[i].price=StringToDouble(f[11]); incoming[i].sign=f[10]=="BUY" ? 1 : -1;
-      incoming[i].reason=f[12]; incoming[i].ready=f[3]=="1" && TimeGMT()<incoming[i].expiry;
+      incoming[i].reason=f[12]; incoming[i].ready=f[3]=="1";
       for(int j=0;j<i;j++) if(incoming[j].sender==incoming[i].sender) return false;
-      if(incoming[i].ttl<1 || incoming[i].ttl>3600 || incoming[i].adverse<=0 || !MathIsValidNumber(incoming[i].adverse) ||
+      if(incoming[i].ttl!=0 || incoming[i].expiry!=0 || incoming[i].adverse<=0 || !MathIsValidNumber(incoming[i].adverse) ||
          incoming[i].created>TimeGMT()+5 || (f[3]=="1" && (incoming[i].created<=0 || incoming[i].source=="" || incoming[i].revision=="" ||
-         incoming[i].expiry-incoming[i].created!=incoming[i].ttl || (f[10]!="BUY" && f[10]!="SELL") || incoming[i].price<=0 || !MathIsValidNumber(incoming[i].price)))) return false;
+         (f[10]!="BUY" && f[10]!="SELL") || incoming[i].price<=0 || !MathIsValidNumber(incoming[i].price)))) return false;
    }
    ArrayResize(followMembers,count);
    for(int i=0;i<count;i++) { followMembers[i]=incoming[i]; if(incoming[i].ready) followReady=true; }
@@ -363,13 +363,11 @@ bool FollowPriceAllowed(const MqlTick &q,const int index=-1)
 {
    int i=index<0 ? followIndex : index;
    if(i<0 || i>=ArraySize(followMembers)) return false;
-   string key=FollowMissKey(i);
-   if(Load(key)>0) { followMembers[i].reason="不利价差曾达上限，永久错过本条"; return false; }
    double entry=followMembers[i].sign>0 ? q.ask : q.bid;
-   if(followMembers[i].sign*(entry-followMembers[i].price)>=followMembers[i].adverse-1e-8)
-   {
-      Store(key,1); GlobalVariablesFlush(); followMembers[i].reason="不利价差达上限，永久错过本条"; return false;
-   }
+   double delta=followMembers[i].sign*(entry-followMembers[i].price);
+   if(delta>学员最大追价价格差+1e-8 || delta<-学员最大回落价格差-1e-8)
+   { followMembers[i].reason="价格在允许区间外，等待回区或新点位"; return false; }
+   followMembers[i].reason="价格区间内有效；沿用至本人更新/取消";
    return true;
 }
 struct SharedVisit { double level; int sign; datetime left; };
@@ -430,7 +428,7 @@ void MergeOpportunity(const int sign,const double level)
    // 未知结果也锁住同机会；只有券商明确拒绝才让老师重试。
    Store(SharedVisitKey(level,sign),(double)TimeGMT()); RememberSharedVisit(level,sign);
    for(int i=0;i<ArraySize(followMembers);i++)
-      if(followMembers[i].ready && TimeGMT()<followMembers[i].expiry && followMembers[i].sign==sign && MathAbs(followMembers[i].price-level)<=TickSize()*0.5)
+      if(followMembers[i].ready && followMembers[i].sign==sign && MathAbs(followMembers[i].price-level)<=TickSize()*0.5)
          Store(FollowVisitKey(i),2); // 2=同机会来源合并；1=本人通道已尝试
    for(int i=0;i<ArraySize(aiPlans);i++)
       if(LiveTeacherPlan(i) && aiPlans[i].sign==sign && MathAbs(aiPlans[i].level-level)<=TickSize()*0.5)
@@ -447,7 +445,7 @@ bool MemberFollowSignal(Candidate &out)
    if(!FreshQuote(q)) { followReason="行情失效，等待新报价"; return false; }
    for(int i=0;i<ArraySize(followMembers);i++)
    {
-      if(!FollowEnabled(i) || !followMembers[i].ready || TimeGMT()>=followMembers[i].expiry) continue;
+      if(!FollowEnabled(i) || !followMembers[i].ready) continue;
       if(Load(FollowVisitKey(i))>0) { followMembers[i].reason="本条已尝试或同机会已合并"; continue; }
       if(!FollowPriceAllowed(q,i)) continue;
       if(TeacherOwnsZone(q)) { followMembers[i].reason="老师明确计划区域优先，学生等待"; continue; }
@@ -455,7 +453,7 @@ bool MemberFollowSignal(Candidate &out)
       { Store(FollowVisitKey(i),2); GlobalVariablesFlush(); followMembers[i].reason="同向同机会已合并来源"; continue; }
       if(q.ask-q.bid>最大点差价格) { followMembers[i].reason="点差过大，暂不跟随"; continue; }
       followIndex=i;
-      out.valid=true; out.ai=false; out.follow=true; out.direction=followMembers[i].sign; out.level=followMembers[i].price;
+      out.valid=true; out.ai=false; out.follow=true; out.probe=false; out.direction=followMembers[i].sign; out.level=followMembers[i].price;
       out.bar=TimeCurrent(); out.followExpiry=followMembers[i].expiry; out.followKey=FollowVisitKey(i);
       out.method=followMembers[i].name+"本人入场跟随["+followMembers[i].source+"]"; reason=out.method; return true;
    }
@@ -466,11 +464,9 @@ string FollowMemberCaption(const int i)
    if(!FollowEnabled(i)) return followMembers[i].name+" · 已关闭";
    if(TimeGMT()-followGenerated>10) return followMembers[i].name+" · 快照心跳失效";
    if(Load(FollowVisitKey(i))>0) return followMembers[i].name+(Load(FollowVisitKey(i))==2 ? " · 同机会已合并" : " · 此条已尝试");
-   if(Load(FollowMissKey(i))>0) return followMembers[i].name+" · 价格永久错过";
-   if(followMembers[i].created>0 && TimeGMT()>=followMembers[i].expiry) return followMembers[i].name+" · 超过有效期";
    if(followMembers[i].ready && followReady)
       return followMembers[i].name+" "+(followMembers[i].sign>0 ? "BUY " : "SELL ")+DoubleToString(followMembers[i].price,_Digits)+
-             " · 剩余"+IntegerToString((int)(followMembers[i].expiry-TimeGMT()))+"秒 · "+followMembers[i].reason;
+             " · 追"+DoubleToString(学员最大追价价格差,1)+"/回"+DoubleToString(学员最大回落价格差,1)+" · "+followMembers[i].reason;
    return followMembers[i].name+" · "+followMembers[i].reason;
 }
 string FollowCaption()
