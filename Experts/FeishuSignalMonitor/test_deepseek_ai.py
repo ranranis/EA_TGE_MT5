@@ -175,7 +175,7 @@ class WorkerTests(unittest.TestCase):
         process_ai_batch(self.db,self.c,client,self.now+2);self.assertEqual(client.interpret.call_count,1)
         export_teacher_levels(self.db,self.c,False,self.now)
         lines=(self.home/'common/FeishuMT5SignalMonitor/tge_ai_setups.csv').read_text(encoding='utf-8').splitlines()
-        self.assertIn('SETUP,BUY,4168.0000000000,REACTION,POINT',lines);self.assertEqual(lines[-1],'END,1')
+        self.assertIn('SETUP,BUY,4168.0000000000,REACTION,POINT,om_test,'+state(self.db,'deepseek_setup')['revision']+','+str(int(state(self.db,'deepseek_setup')['created'])),lines);self.assertEqual(lines[-1],'END,1')
     def test_api_failure_retries_without_advancing_or_order(self):
         self.seed();client=Mock(interpret=Mock(side_effect=AIError('timeout')))
         process_ai_batch(self.db,self.c,client,self.now)

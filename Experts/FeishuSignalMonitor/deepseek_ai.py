@@ -12,6 +12,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from store import connect, state, set_state, iso, stamp
+from teacher_scene import SCENE_PROMPT, validate_scene, publish_scene
 
 API = 'https://api.deepseek.com'
 FOLLOW_TTL = 300
@@ -106,12 +107,12 @@ class DeepSeek:
         except (OSError, ValueError, TimeoutError) as ex:
             raise AIError('DeepSeek连接/响应或本机凭证异常：'+type(ex).__name__) from None
 
-    def interpret(self, targets, context, anchor, levels):
+    def interpret(self, targets, context, anchor, levels, previous_scene=None):
         payload = {'model': self.config['ai_model'], 'thinking': {'type':'disabled'},
-            'messages': [{'role':'system','content':SYSTEM},
+            'messages': [{'role':'system','content':SYSTEM+SCENE_PROMPT},
                          {'role':'user','content':json.dumps({'targets':targets,'context':context,
-                          'market_anchor':anchor,'earlier_full_levels':levels},ensure_ascii=False)}],
-            'response_format': {'type':'json_object'}, 'max_tokens': 2200}
+                          'market_anchor':anchor,'earlier_full_levels':levels,'previous_scene':previous_scene or {}},ensure_ascii=False)}],
+            'response_format': {'type':'json_object'}, 'max_tokens': 4800}
         data = self.request('/chat/completions', payload)
         try:
             choice = data['choices'][0]
@@ -287,6 +288,32 @@ def validate_output(result, targets, anchor, context=None):
     return output
 
 
+def validate_interpretations(raw, targets, context, anchor, scene_mode):
+    """老师逐条分类是审计结果；场景另行严格核验。成员跟随保持独立校验。"""
+    if not scene_mode:
+        return validate_output({'interpretations':raw},targets,anchor,context)
+    if not isinstance(raw,list) or len(raw)!=len(targets):
+        raise AIError('AI逐条解释缺失')
+    supplied={}
+    for row in raw:
+        if not isinstance(row,dict) or not isinstance(row.get('id'),str) or row['id'] in supplied:
+            raise AIError('AI逐条消息关联错误')
+        supplied[row['id']]=row
+    if set(supplied)!={t['id'] for t in targets}:
+        raise AIError('AI逐条消息ID不匹配')
+    output={};history=list(context)
+    for target in targets:
+        try:
+            value=validate_output({'interpretations':[supplied[target['id']]]},[target],anchor,history)[target['id']]
+        except AIError as ex:
+            if target.get('source_role')!='teacher': raise
+            value=dict(id=target['id'],kind='UNKNOWN',plans=[],cancel_side='NONE',
+                       reason='逐条分类未通过校验，完整场景另行核验：'+str(ex))
+        output[target['id']]=value
+        history.append(dict(target,interpretation=value))
+    return output
+
+
 def initialize_ai(db):
     db.execute("""CREATE TABLE IF NOT EXISTS ai_messages(
         chat_id TEXT NOT NULL,message_id TEXT NOT NULL,revision TEXT NOT NULL,created REAL NOT NULL,
@@ -307,7 +334,7 @@ def pending_rows(db, c, now):
         ORDER BY m.created,m.rowid LIMIT 8""",(c['chat_id'],start,now+5,now)).fetchall()
 
 
-def publish_interpretation(db, c, row, value, now):
+def publish_interpretation(db, c, row, value, now, scene_managed=False):
     """历史导入仅记审计。SETUP保留为参考，EA另等启用后的新收线，不补历史单。"""
     if c.get('follow_sender_id') and row['sender']==c['follow_sender_id']:
         recent=state(db,'member_follow_setups',[])
@@ -329,7 +356,7 @@ def publish_interpretation(db, c, row, value, now):
     old_order=db.execute('SELECT rowid FROM messages WHERE chat_id=? AND message_id=?',
                          (c['chat_id'],previous.get('message_id',''))).fetchone()
     later = not previous or (row['created'],row['sequence']) >= (previous.get('created',0),old_order[0] if old_order else 0)
-    if eligible and later and value['kind'] in ('SETUP','MAP','CANCEL'):
+    if not scene_managed and eligible and later and value['kind'] in ('SETUP','MAP','CANCEL'):
         if value['kind']=='CANCEL':
             if previous.get('sender')!=row['sender'] and row['sender']!=c['teacher_sender_id']:
                 return
@@ -347,7 +374,7 @@ def publish_interpretation(db, c, row, value, now):
         set_state(db,'deepseek_setup',dict(message_id=row['message_id'],revision=row['revision'],
             created=row['created'],sender=row['sender'],mode=mode,plans=plans,source_refs=refs,reason=value['reason']))
     text=json.loads(row['raw']).get('content','')
-    if eligible and (value['kind'] in ('CLOSE','MODIFY') or value['kind']=='UNKNOWN' and
+    if not scene_managed and eligible and (value['kind'] in ('CLOSE','MODIFY') or value['kind']=='UNKNOWN' and
                      isinstance(text,str) and re.search(r'↑|↓|⬆|⬇|买|卖|多|空|点位|取消|作废|\d.*(?:注意|关注|准备|观察|进场|入场)',text)):
         set_state(db,'deepseek_review',dict(message_id=row['message_id'],created=row['created'],reason=value['reason']))
     events=state(db,'deepseek_recent',[])
@@ -391,8 +418,29 @@ def process_ai_batch(db, c, client, now):
         if value and not refs_current(db,c['chat_id'],value.get('source_refs',[])):
             value=None
         context.append(dict(message_id=r['message_id'],revision=r['revision'],sender_id=r['sender'],sequence=r['sequence'],
-            time=iso(r['created']),text=text[:6000],historical=bool(r['historical']),
+            time=iso(r['created']),text=text[:6000],historical=bool(r['historical']),deleted=bool(r['deleted']),
             source_role='follow_member' if r['sender']==c.get('follow_sender_id') else 'teacher',interpretation=value))
+    previous_scene=state(db,'teacher_scene',{})
+    # 场景来源有时已离开最近56条，按已知消息ID补回原文，不扩大群历史读取。
+    wanted=previous_scene.get('source_refs',[])+state(db,'deepseek_setup',{}).get('source_refs',[])
+    for ref in wanted:
+        if any(m['message_id']==ref['message_id'] for m in context) or ref['message_id'] in target_ids: continue
+        r=db.execute("SELECT m.*,m.rowid AS sequence,a.payload,a.status AS ai_status FROM messages m LEFT JOIN ai_messages a ON a.chat_id=m.chat_id AND a.message_id=m.message_id AND a.revision=m.revision WHERE m.chat_id=? AND m.message_id=?",
+                     (c['chat_id'],ref['message_id'])).fetchone()
+        if not r or r['sender'] not in authors: continue
+        raw=json.loads(r['raw']);text=raw.get('content','')
+        if not isinstance(text,str): continue
+        context.append(dict(message_id=r['message_id'],revision=r['revision'],sender_id=r['sender'],sequence=r['sequence'],
+            time=iso(r['created']),text=text[:6000],historical=bool(r['historical']),deleted=bool(r['deleted']),
+            source_role='teacher' if r['sender']!=c.get('follow_sender_id') else 'follow_member',
+            interpretation=json.loads(r['payload']) if r['ai_status']=='DONE' and not r['deleted'] else None))
+    # 旧消息用已缓存锚点/已验证价格，避免用当前报价给几小时前尾数换百位。
+    old_plans=previous_scene.get('plans',[]) or state(db,'deepseek_setup',{}).get('plans',[])
+    for m in context:
+        cached=anchors.get(m['message_id'])
+        known=next((p['price'] for p in old_plans if p.get('price_ref',state(db,'deepseek_setup',{}).get('message_id'))==m['message_id']),None)
+        native=[b for b in market.get('bars',[]) if b.get('at',0)+300<=stamp(m['time']) and stamp(m['time'])-b['at']<=600]
+        m['market_anchor']=cached or (native[-1]['close'] if native else known or 0)
     api_rows=[]
     direct={}
     for row in rows:
@@ -425,10 +473,19 @@ def process_ai_batch(db, c, client, now):
         set_state(db,'deepseek_status',dict(enabled=True,online=False,at=now,model=c['ai_model'],
             error='AI正在解释新消息',backlog=len(rows)))
     try:
-        output=validate_output(client.interpret(targets,context,live_anchor,
-            state(db,'teacher_levels',{}).get('levels',[])),targets,live_anchor,context) if targets else {}
+        raw_result=client.interpret(targets,context,live_anchor,
+            state(db,'teacher_levels',{}).get('levels',[]),previous_scene) if targets else {'interpretations':[]}
+        if not isinstance(raw_result,dict) or set(raw_result) not in ({'interpretations'},{'interpretations','scene'}):
+            raise AIError('AI根字段错误')
+        if targets and isinstance(client,DeepSeek) and 'scene' not in raw_result:
+            raise AIError('DeepSeek未返回完整交易场景')
+        output=validate_interpretations(raw_result['interpretations'],targets,context,live_anchor,'scene' in raw_result) if targets else {}
+        # 整批场景也必须通过本地核验；不因逐条WATCH而静默丢掉完整语义。
+        scene=validate_scene(raw_result['scene'],[dict(t,interpretation=output[t['id']]) for t in targets],context,live_anchor,previous_scene) if 'scene' in raw_result else None
         with db:
             db.execute('BEGIN IMMEDIATE')
+            if scene and not refs_current(db,c['chat_id'],scene.get('source_refs',[])):
+                raise AIError('AI场景来源在解释期间变更，等待重新阅读')
             for row in rows:
                 current=db.execute('SELECT revision,deleted FROM messages WHERE chat_id=? AND message_id=?',
                     (c['chat_id'],row['message_id'])).fetchone()
@@ -446,7 +503,12 @@ def process_ai_batch(db, c, client, now):
                     ON CONFLICT(chat_id,message_id,revision) DO UPDATE SET status=excluded.status,
                     payload=excluded.payload,processed=excluded.processed,error='',retry_at=0""",
                     (c['chat_id'],row['message_id'],row['revision'],row['created'],'DONE',payload,now))
-                publish_interpretation(db,c,row,value,now)
+                publish_interpretation(db,c,row,value,now,scene_managed=scene is not None)
+            if scene:
+                retained={m['message_id']:m['market_anchor'] for m in context+targets if m.get('market_anchor')}
+                keep={ref['message_id'] for ref in scene.get('source_refs',[])}
+                set_state(db,'deepseek_anchors',{key:value for key,value in retained.items() if key in keep})
+            publish_scene(db,c,scene)
             set_state(db,'deepseek_status',dict(enabled=True,online=True,at=now,last_success=now,
                 model=c['ai_model'],backlog=1 if pending_rows(db,c,now) or db.execute(
                     "SELECT 1 FROM ai_messages a JOIN messages m ON m.chat_id=a.chat_id AND m.message_id=a.message_id AND m.revision=a.revision WHERE a.status='RETRY' AND m.deleted=0 LIMIT 1").fetchone() else 0,

@@ -1,7 +1,7 @@
 #ifndef TGE_AI_SIGNALS_MQH
 #define TGE_AI_SIGNALS_MQH
 // 这里只读经Python校验的参考快照；模型无权决定账号、手数或调用交易接口。
-struct AIPlan { int sign; double level; bool market,near; };
+struct AIPlan { int sign; double level; bool market,near; string origin; datetime created; };
 AIPlan aiPlans[];
 string aiMode="WAIT",aiReason="等待AI策略桥接",aiSource="",aiIdentity="";
 datetime aiGenerated=0,aiSourceTime=0;
@@ -22,7 +22,7 @@ bool ReadAISetups()
    FileClose(h);
    string head[],foot[];
    if(!ok || ArraySize(lines)<2 || StringSplit(lines[0],',',head)!=11 ||
-      head[0]!="TGA" || head[1]!="1" || head[4]!=_Symbol ||
+      head[0]!="TGA" || (head[1]!="1" && head[1]!="2") || head[4]!=_Symbol ||
       !Number(head[2]) || !Number(head[7]) || !Number(head[8]) || (head[3]!="0" && head[3]!="1"))
    { aiReason="AI快照格式错误"; return false; }
    int count=(int)StringToInteger(head[8]);
@@ -35,12 +35,21 @@ bool ReadAISetups()
    for(int i=0;i<count;i++)
    {
       string fields[];
-      if(StringSplit(lines[i+1],',',fields)!=5 || fields[0]!="SETUP" ||
+      if(StringSplit(lines[i+1],',',fields)!=(head[1]=="2" ? 8 : 5) || fields[0]!="SETUP" ||
          (fields[1]!="BUY" && fields[1]!="SELL") || !Number(fields[2],true) ||
          (fields[3]!="REACTION" && fields[3]!="MARKET") || (fields[4]!="POINT" && fields[4]!="NEAR"))
       { aiReason="AI方向/价格字段无效"; return false; }
       incoming[i].sign=fields[1]=="BUY" ? 1 : -1;
       incoming[i].level=StringToDouble(fields[2]); incoming[i].market=fields[3]=="MARKET"; incoming[i].near=fields[4]=="NEAR";
+      incoming[i].origin=head[5]+"|"+head[6]+"|"+head[9]; incoming[i].created=at;
+      if(head[1]=="2")
+      {
+         if(fields[5]=="" || fields[6]=="" || !Number(fields[7]) ||
+            StringToInteger(fields[7])<=0 || StringToInteger(fields[7])>TimeGMT()+5)
+         { aiReason="AI计划来源无效"; return false; }
+         incoming[i].origin=fields[5]+"|"+fields[6]+"|SETUP";
+         incoming[i].created=(datetime)StringToInteger(fields[7]);
+      }
       if(incoming[i].level<=0 || !MathIsValidNumber(incoming[i].level)) return false;
    }
    bool active=head[3]=="1";
@@ -54,12 +63,17 @@ bool ReadAISetups()
    }
    aiIdentity=next; aiSource=head[5]; aiMode=head[9]; aiSourceTime=at; aiGenerated=generated;
    aiReason=head[10]; aiReady=active;
-   ArrayResize(aiPlans,count); ArrayCopy(aiPlans,incoming);
+   ArrayResize(aiPlans,count);
+   for(int i=0;i<count;i++) aiPlans[i]=incoming[i]; // 含来源字符串的结构不能使用ArrayCopy。
    return true;
 }
 string AIVisitKey(const double level,const int sign)
 {
-   return "av"+IntegerToString((long)Hash(aiIdentity))+"_"+DoubleToString(level,_Digits)+"_"+IntegerToString(sign);
+   string origin=aiIdentity;
+   for(int i=0;i<ArraySize(aiPlans);i++)
+      if(aiPlans[i].sign==sign && MathAbs(aiPlans[i].level-level)<=TickSize() && aiPlans[i].origin!="")
+         { origin=aiPlans[i].origin; break; }
+   return "av"+IntegerToString((long)Hash(origin))+"_"+DoubleToString(level,_Digits)+"_"+IntegerToString(sign);
 }
 string AIPlanCaption()
 {
@@ -89,7 +103,7 @@ bool AISignal(const MqlRates &bar,const MqlTick &q,Candidate &out)
                             bar.high>=level-touch && bar.low<=level+tolerance &&
                             bar.close<level-escape && bar.close<bar.open;
       double tp;
-      string blocked=aiPlans[i].market && TimeGMT()-aiSourceTime>180 ? "市价喊单已过时，不补历史单" :
+      string blocked=aiPlans[i].market && TimeGMT()-(aiPlans[i].created>0 ? aiPlans[i].created : aiSourceTime)>180 ? "市价喊单已过时，不补历史单" :
                      Load(key)>0 ? "本次AI点位机会已消费，等待重新离开" :
                      gap<0 || gap>=allowed ? "等待靠近AI即时点位，不追价" :
                      !aiPlans[i].market && !reaction ? "等待M1在AI点位止跌/受阻" :

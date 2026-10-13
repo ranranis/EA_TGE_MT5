@@ -16,7 +16,7 @@ function body(name) {
   return src.slice(start+1,end-1);
 }
 function translate(text) {
-  return text.replace(/\bstatic\s+/g,'').replace(/\((?:ENUM_ORDER_STATE|ENUM_ORDER_TYPE|double|long|ulong|int|datetime)\)/g,'')
+  return text.replace(/aiPlans\[i\]\.origin/g,"(aiPlans[i].origin||'')").replace(/\bstatic\s+/g,'').replace(/\((?:ENUM_ORDER_STATE|ENUM_ORDER_TYPE|double|long|ulong|int|datetime)\)/g,'')
     .replace(/\b(?:double|string|MqlRates) (\w+)\[\],(\w+)\[\];/g,'let $1=[], $2=[];')
     .replace(/\b(?:double|string|AIPlan) (\w+)\[\];/g,'let $1=[];')
     .replace(/\b(?:MqlTick|Candidate|MqlRates) (\w+);/g,'let $1={};')
@@ -392,7 +392,7 @@ test('one-percent daily equity lock removed even when legacy stopped GV exists',
 
 function aiEnv(options={}){
  const x=env(),memory={};Object.assign(x,{读取AI即时策略:true,aiReady:true,aiMode:'SETUP',
-  aiPlans:options.plans||[{sign:1,level:100,market:false},{sign:-1,level:112,market:false}],
+  aiPlans:(options.plans||[{sign:1,level:100,market:false},{sign:-1,level:112,market:false}]).map(p=>({origin:'',created:0,...p})),
   feedActive:true,aiIdentity:'msg-new',aiSource:'msg-new',aiSourceTime:990,aiGenerated:1000,TimeGMT:()=>1000,
   atr:2,atrHandle:2,MathIsValidNumber:Number.isFinite,tp:0,DBL_MAX:Number.MAX_VALUE,levels:[90,100,104],最大点差价格:.5,Hash:s=>[...s].reduce((a,v)=>a+v.charCodeAt(0),0),
   IntegerToString:String,DoubleToString:(v,n)=>v.toFixed(n),Align:v=>v,
@@ -559,6 +559,22 @@ test('member request boundary accepts a favourable price using fixed configured 
  x.FreshQuote=q=>Object.assign(q,{bid:95.8,ask:95.9});x.Open(out);assert.equal(calls.length,0);
 });
 
+
+test('v2 scene plans retain consumption identity when only scene explanation changes',()=>{
+ const valid=['TGA,2,2000,1,XAUUSD,scene-message,scene-rev,1900,2,SETUP,range',
+ 'SETUP,BUY,100,REACTION,POINT,buy-source,buy-rev,1800',
+ 'SETUP,SELL,112,REACTION,POINT,sell-source,sell-rev,1900','END,2'];
+ const r=aiFeed(valid);assert(r.ok);assert(r.x.aiReady);
+ r.x.Hash=s=>[...s].reduce((a,v)=>a+v.charCodeAt(0),0);r.x.TickSize=()=>.01;r.x.IntegerToString=String;r.x.DoubleToString=(v,n)=>v.toFixed(n);
+ install(r.x,'AIVisitKey','level,sign');
+ const key=r.x.AIVisitKey(100,1);r.x.aiIdentity='scene-message-new|different-summary';
+ assert.equal(r.x.AIVisitKey(100,1),key);
+ assert.equal(r.x.aiPlans[0].created,1800);assert.notEqual(r.x.AIVisitKey(112,-1),key);
+});
+test('scene refresh cannot revive an old market signal by moving the overall source timestamp',()=>{
+ const {x}=aiEnv({plans:[{sign:1,level:100,market:true,origin:'older',created:700}]});
+ x.aiSourceTime=999;assert(!x.AIMarketSignal({}));
+});
 // 单向明确计划未触发时，沿用生产Signal/Reaction/BreakRetest评估地图延续。
 function continuation(sign=1,memory={}){
  const {x}=signal({memory});const rates=x.CopyRates,buffers=x.CopyBuffer;
@@ -574,7 +590,7 @@ function continuation(sign=1,memory={}){
  };
  x.CopyBuffer=(h,b,shift,count,out)=>{const n=buffers(h,b,shift,count,out);if(sign<0&&h===1)for(let i=0;i<out.length;i++)out[i]=200-out[i];return n;};
  if(sign<0)x.FreshQuote=q=>Object.assign(q,{bid:99.55,ask:99.6});
- install(x,'AIVisitKey','level,sign');install(x,'AISignal','bar,q,out');
+ for(const p of x.aiPlans){p.origin=p.origin||'';p.created=p.created||0;}install(x,'AIVisitKey','level,sign');install(x,'AISignal','bar,q,out');
  return x;
 }
 test('distant explicit pullback no longer suppresses same-direction map breakout/retest',()=>{
