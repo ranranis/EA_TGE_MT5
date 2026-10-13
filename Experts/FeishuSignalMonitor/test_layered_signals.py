@@ -207,5 +207,69 @@ class LayeredTests(unittest.TestCase):
         self.assertEqual(process_ai_batch(self.db,self.c,client,self.now),1)
         self.assertTrue(member_follow_snapshots(self.db,self.c,self.now,False)[0]['active'])
 
+    def test_map_only_restore_polling_and_restart_stay_local_and_ready(self):
+        from store import connect
+        self.seed(text='4105--4120--4142')
+        refresh_levels(self.db,self.c,self.now)
+        client=Mock(interpret=Mock(side_effect=AssertionError('纯地图不应调用AI场景恢复')))
+        for offset,processed in [(0,1),(2,0),(30,0)]:
+            self.assertEqual(process_ai_batch(self.db,self.c,client,self.now+offset,restore_scene=True),processed)
+            snapshot=ai_snapshot(self.db,self.c,self.now+offset,False)
+            self.assertTrue(snapshot['active']);self.assertEqual(snapshot['mode'],'MAP')
+            self.assertEqual(self.db.execute('SELECT status FROM ai_messages').fetchone()[0],'DONE')
+        self.assertFalse(state(self.db,'teacher_scene_initialized',False))
+        self.db.close();self.db=connect(self.home/'data/test.sqlite')
+        self.assertEqual(process_ai_batch(self.db,self.c,client,self.now+32,restore_scene=True),0)
+        self.assertTrue(ai_snapshot(self.db,self.c,self.now+32,False)['active'])
+        client.interpret.assert_not_called()
+
+    def test_restore_past_new_map_rebuilds_old_valid_direction_instead_of_marking_done(self):
+        self.seed(mid='old',age=20)
+        process_ai_batch(self.db,self.c,self.client(),self.now)
+        old=state(self.db,'deepseek_setup')
+        self.seed(mid='map',text='4105--4120--4142',age=0)
+        refresh_levels(self.db,self.c,self.now)
+        def restore(targets,*_):
+            self.assertEqual([t['message_id'] for t in targets],['old'])
+            plan=dict(side='BUY',token='68',price=4168,mode='REACTION',price_ref='old',price_evidence='68↑',
+                      direction_ref='old',direction_evidence='68↑')
+            return dict(interpretations=[result()],scene=dict(as_of='old',action='UPDATE',regime='UNKNOWN',
+                regime_ref=None,plans=[plan],inner_range=None,outer_range=None,summary='恢复仍有效的旧多单条件'))
+        client=Mock(interpret=Mock(side_effect=restore))
+        for offset in (0,2,30):process_ai_batch(self.db,self.c,client,self.now+offset,restore_scene=True)
+        client.interpret.assert_called_once()
+        snapshot=ai_snapshot(self.db,self.c,self.now+30,False)
+        self.assertTrue(snapshot['active']);self.assertEqual(snapshot['mode'],'SETUP')
+        self.assertEqual([(p['side'],p['price']) for p in snapshot['plans']],[('BUY',old['plans'][0]['price'])])
+        self.assertTrue(state(self.db,'teacher_scene_initialized'))
+        self.assertEqual(state(self.db,'teacher_levels')['message_id'],'map')
+        self.assertTrue(all(r[0]=='DONE' for r in self.db.execute('SELECT status FROM ai_messages')))
+        scene=state(self.db,'teacher_scene')
+        self.seed(mid='next-map',text='4110--4130--4150',age=-31)
+        refresh_levels(self.db,self.c,self.now+31)
+        self.assertEqual(process_ai_batch(self.db,self.c,client,self.now+31,restore_scene=True),1)
+        self.assertEqual(state(self.db,'teacher_scene'),scene)
+        self.assertEqual(ai_snapshot(self.db,self.c,self.now+31,False)['plans'],snapshot['plans'])
+        client.interpret.assert_called_once()
+
+    def test_restore_past_map_keeps_prior_cancel_and_does_not_revive_old_direction(self):
+        self.seed(mid='old',age=20);process_ai_batch(self.db,self.c,self.client(),self.now)
+        self.seed(mid='cancel',text='取消全部参考',age=10)
+        cancel=result(kind='CANCEL');cancel['cancel_side']='ALL'
+        process_ai_batch(self.db,self.c,Mock(interpret=Mock(return_value={'interpretations':[cancel]})),self.now)
+        self.seed(mid='map',text='4105--4120--4142',age=0);refresh_levels(self.db,self.c,self.now)
+        def restore(targets,*_):
+            self.assertEqual([t['message_id'] for t in targets],['cancel'])
+            return dict(interpretations=[cancel],scene=dict(as_of='cancel',action='UPDATE',regime='UNKNOWN',
+                regime_ref=None,plans=[],inner_range=None,outer_range=None,summary='取消后的空场景'))
+        client=Mock(interpret=Mock(side_effect=restore))
+        for offset in (0,2,30):process_ai_batch(self.db,self.c,client,self.now+offset,restore_scene=True)
+        client.interpret.assert_called_once()
+        self.assertFalse(ai_snapshot(self.db,self.c,self.now+30,False)['active'])
+        self.assertEqual(state(self.db,'deepseek_setup')['mode'],'WAIT')
+        self.assertEqual(state(self.db,'teacher_scene')['plans'],[])
+        self.assertTrue(state(self.db,'teacher_levels')['active'])
+        self.assertTrue(all(r[0]=='DONE' for r in self.db.execute('SELECT status FROM ai_messages')))
+
 
 if __name__=='__main__':unittest.main()

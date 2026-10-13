@@ -120,7 +120,9 @@ def validate_scene(value, targets, context, anchor, previous=None):
         if any(p['price']==plan['price'] and p['side']!=plan['side'] for p in clean):
             raise AIError('同价双向条件矛盾，等待老师确认')
         source=items[plan['price_ref']]
-        start=max((stamp(source['time']),source.get('sequence',0)),(stamp(direction['time']),direction.get('sequence',0)))
+        # 价格只证明数值，不给方向续期：从方向证据开始核对其取消生命周期。
+        # 取消后有新的明确方向时，以新方向来源重新建立；较早价格证据仍单独校验。
+        start=(stamp(direction['time']),direction.get('sequence',0))
         for item in items.values():
             if item.get('sender_id')!=latest['sender_id'] or (stamp(item['time']),item.get('sequence',0))<=start:
                 continue

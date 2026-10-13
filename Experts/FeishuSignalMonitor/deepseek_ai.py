@@ -497,18 +497,25 @@ def publish_interpretation(db, c, row, value, now, scene_managed=False):
 
 
 def process_ai_batch(db, c, client, now, restore_scene=False):
+    from teacher_strategy import source_levels
     rows=pending_rows(db,c,now)
     restoring=False
     # 升级后已有消息可能全部DONE，但完整场景尚未建立。只重读本地缓存，
     # 不导入历史记录、不修改原消息时间、不重放成员五分钟信号。
     if restore_scene and not state(db,'teacher_scene',{}) and not state(db,'teacher_scene_initialized',False):
-        latest=db.execute("""SELECT m.*,m.rowid AS sequence,a.status AS ai_status,a.retry_at
+        candidates=db.execute("""SELECT m.*,m.rowid AS sequence,a.status AS ai_status,a.retry_at
             FROM messages m LEFT JOIN ai_messages a
             ON a.chat_id=m.chat_id AND a.message_id=m.message_id AND a.revision=m.revision
             WHERE m.chat_id=? AND m.sender=? AND m.historical=0 AND m.deleted=0 AND m.created<=?
-            ORDER BY m.created DESC,m.rowid DESC LIMIT 1""",(c['chat_id'],c['teacher_sender_id'],now+5)).fetchone()
-        if latest and latest['ai_status'] in ('DONE','RETRY') and (latest['retry_at'] or 0)<=now:
-            rows=[latest];restoring=True
+            ORDER BY m.created DESC,m.rowid DESC""",(c['chat_id'],c['teacher_sender_id'],now+5))
+        for latest in candidates:
+            # 中性地图由确定性路径维护，没有scene；跳过地图继续寻找旧方向/取消，
+            # 不能用“初始化完成”掩盖尚未恢复的条件计划。只有地图时保持本地MAP。
+            if source_levels(json.loads(latest['raw']),latest['sender'],c):
+                continue
+            if latest['ai_status'] in ('DONE','RETRY') and (latest['retry_at'] or 0)<=now:
+                rows=[latest];restoring=True
+            break
     if not rows:
         current=state(db,'deepseek_status',{})
         current.update(enabled=True,at=now,**lane_readiness(db,c,now))
@@ -571,7 +578,6 @@ def process_ai_batch(db, c, client, now, restore_scene=False):
             direct[row['message_id']]=dict(kind='UNKNOWN',plans=[],cancel_side='NONE',
                 reason='来源已撤回' if row['deleted'] else '图片/语音待识别，不能猜信号')
             continue
-        from teacher_strategy import source_levels
         if source_levels(raw,row['sender'],c):
             direct[row['message_id']]=dict(kind='MAP',plans=[],cancel_side='NONE',reason='确定性完整点位地图；方向计划分别保留')
             continue

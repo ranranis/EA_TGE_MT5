@@ -156,6 +156,52 @@ class SceneTests(unittest.TestCase):
         targets[0]['market_anchor']=0;targets[1]['market_anchor']=0
         self.assertEqual(validate_scene(scene,targets,context,4290,old)['plans'][0]['price'],4175)
 
+    def test_cancel_between_old_direction_and_new_price_rejects_both_sides(self):
+        for side,scope in [('BUY','BUY'),('BUY','ALL'),('SELL','SELL'),('SELL','ALL')]:
+            word='多单' if side=='BUY' else '空单'
+            old=message('old','4170'+word,1)
+            cancel=dict(message('cancel','取消'+(word if scope!='ALL' else '全部参考'),2),
+                        interpretation=dict(kind='CANCEL',cancel_side=scope))
+            new=message('new','到4175了',3)
+            p=plan(side,'4175',4175,'new','到4175了');p.update(direction_ref='old',direction_evidence=old['text'])
+            scene=dict(as_of='new',action='UPDATE',regime='UNKNOWN',regime_ref=None,plans=[p],
+                       inner_range=None,outer_range=None,summary='新价格借用旧方向')
+            with self.subTest(side=side,scope=scope),self.assertRaisesRegex(AIError,'取消前的旧方向'):
+                validate_scene(scene,[new],[old,cancel],4181)
+
+    def test_receipt_sequence_orders_cancel_between_same_time_evidence(self):
+        old=message('old','4170多单',1)
+        cancel=dict(message('cancel','取消多单',2),time=old['time'],interpretation=dict(kind='CANCEL',cancel_side='BUY'))
+        new=dict(message('new','到4175了',3),time=old['time'])
+        p=plan('BUY','4175',4175,'new',new['text']);p.update(direction_ref='old',direction_evidence=old['text'])
+        scene=dict(as_of='new',action='UPDATE',regime='UNKNOWN',regime_ref=None,plans=[p],
+                   inner_range=None,outer_range=None,summary='同时间按接收顺序核验')
+        with self.assertRaisesRegex(AIError,'取消前的旧方向'):validate_scene(scene,[new],[old,cancel],4181)
+
+    def test_new_explicit_direction_after_cancel_can_reestablish_plan(self):
+        for side,scope in [('BUY','BUY'),('BUY','ALL'),('SELL','SELL'),('SELL','ALL')]:
+            word='多单' if side=='BUY' else '空单'
+            old=message('old','4170'+word,1)
+            cancel=dict(message('cancel','取消'+(word if scope!='ALL' else '全部参考'),2),
+                        interpretation=dict(kind='CANCEL',cancel_side=scope))
+            new=message('new','4175'+word,3)
+            scene=dict(as_of='new',action='UPDATE',regime='UNKNOWN',regime_ref=None,
+                       plans=[plan(side,'4175',4175,'new',new['text'])],inner_range=None,outer_range=None,summary='新明确计划')
+            with self.subTest(side=side,scope=scope):
+                self.assertEqual(validate_scene(scene,[new],[old,cancel],4181)['plans'][0]['price'],4175)
+
+    def test_new_explicit_direction_can_use_earlier_price_evidence(self):
+        for side in ('BUY','SELL'):
+            word='多单' if side=='BUY' else '空单'
+            old=message('old','4170'+word,1)
+            cancel=dict(message('cancel','取消'+word,2),interpretation=dict(kind='CANCEL',cancel_side=side))
+            new=message('new','重新'+word,3)
+            p=plan(side,'4170',4170,'old',old['text']);p.update(direction_ref='new',direction_evidence=new['text'])
+            scene=dict(as_of='new',action='UPDATE',regime='UNKNOWN',regime_ref=None,plans=[p],
+                       inner_range=None,outer_range=None,summary='价格证据不会续期旧方向，新明确方向可重新建立')
+            with self.subTest(side=side):
+                self.assertEqual(validate_scene(scene,[new],[old,cancel],4181)['plans'][0]['direction_ref'],'new')
+
 
 class SceneWorkerTests(DatabaseFixture):
     # 继承既有隔离数据库夹具；只执行这里定义的场景集成用例。
