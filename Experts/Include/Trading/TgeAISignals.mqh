@@ -118,4 +118,87 @@ bool AIMarketSignal(Candidate &out)
    atr=values[0]; MqlRates bar; ZeroMemory(bar); bar.time=TimeCurrent();
    return AISignal(bar,q,out);
 }
+// 起飞个人成交参考使用独立短时通道，既不替换老师地图，也不扩展成地图机会。
+bool followReady=false;
+int followSign=0;
+double followPrice=0;
+datetime followGenerated=0,followCreated=0,followExpiry=0;
+string followSource="",followReason="等待起飞本人入场参考";
+string FollowVisitKey() { return "fv"+IntegerToString((long)Hash(followSource)); }
+string FollowMissKey() { return "fm"+IntegerToString((long)Hash(followSource)); }
+bool ReadMemberFollow()
+{
+   followReady=false;
+   int h=FileOpen("FeishuMT5SignalMonitor\\tge_member_follow.csv",FILE_READ|FILE_TXT|FILE_ANSI|FILE_COMMON|FILE_SHARE_READ,0,CP_UTF8);
+   if(h==INVALID_HANDLE) { followReason="等待新版监控生成起飞参考"; return false; }
+   string lines[]; bool ok=FileSize(h)<=4096;
+   while(ok && !FileIsEnding(h))
+   {
+      int n=ArraySize(lines); if(n>=3) { ok=false; break; }
+      ArrayResize(lines,n+1); lines[n]=FileReadString(h);
+   }
+   FileClose(h);
+   string head[],foot[];
+   if(!ok || ArraySize(lines)<2 || StringSplit(lines[0],',',head)!=12 ||
+      head[0]!="TGF" || head[1]!="1" || head[4]!=_Symbol ||
+      !Number(head[2]) || !Number(head[7]) || !Number(head[8]) || !Number(head[10]) ||
+      (head[3]!="0" && head[3]!="1"))
+   { followReason="起飞快照格式无效"; return false; }
+   int count=(int)StringToInteger(head[10]);
+   datetime generated=(datetime)StringToInteger(head[2]),at=(datetime)StringToInteger(head[7]),expiry=(datetime)StringToInteger(head[8]);
+   if(count>1 || ArraySize(lines)!=count+2 || StringSplit(lines[count+1],',',foot)!=2 ||
+      foot[0]!="END" || foot[1]!=head[10] || generated>TimeGMT()+5 || TimeGMT()-generated>10 ||
+      at>TimeGMT()+5 || expiry-at!=300)
+   { followReason="起飞快照过期/不完整"; return false; }
+   followSource=head[5]; followCreated=at; followExpiry=expiry; followGenerated=generated; followReason=head[11];
+   if(head[3]=="0") return count==0;
+   string fields[];
+   if(count!=1 || at<=0 || head[5]=="" || head[6]=="" || head[9]=="" ||
+      StringSplit(lines[1],',',fields)!=3 || fields[0]!="FOLLOW" ||
+      (fields[1]!="BUY" && fields[1]!="SELL") || !Number(fields[2],true))
+   { followReason="起飞方向/入场价缺失"; return false; }
+   followPrice=StringToDouble(fields[2]); followSign=fields[1]=="BUY" ? 1 : -1;
+   followReady=MathIsValidNumber(followPrice) && followPrice>0 && TimeGMT()<followExpiry;
+   if(!followReady) followReason="起飞参考超过5分钟，不再跟随";
+   return true;
+}
+bool FollowPriceAllowed(const MqlTick &q)
+{
+   // 只限制不利追价；价格更有利时仍可跟。错过状态按消息ID永久保留，编辑不重置。
+   if(Load(FollowMissKey())>0) { followReason="已错过起飞入场价，不补跟"; return false; }
+   double entry=followSign>0 ? q.ask : q.bid;
+   if(followSign*(entry-followPrice)>=起飞最大追价价格差)
+   {
+      Store(FollowMissKey(),1); GlobalVariablesFlush();
+      followReason="已错过起飞入场价，不补跟"; return false;
+   }
+   return true;
+}
+bool MemberFollowSignal(Candidate &out)
+{
+   if(!启用起飞跟随 || !followReady || TimeGMT()>=followExpiry || TimeGMT()-followGenerated>10) return false;
+   if(!healthOK || healthPaused || healthBeat<=0 || TimeGMT()-healthBeat>10 ||
+      healthSync<=0 || healthCheckpoint<=0 || TimeGMT()-healthSync>healthMaxAge || TimeGMT()-healthCheckpoint>healthMaxAge)
+   { followReason="飞书同步未就绪，暂停起飞跟随"; return false; }
+   if(Load(FollowVisitKey())>0) { followReason="此条起飞消息已尝试跟随"; return false; }
+   MqlTick q;
+   if(!FreshQuote(q)) { followReason="行情失效，等待新报价"; return false; }
+   if(!FollowPriceAllowed(q)) return false;
+   if(q.ask-q.bid>最大点差价格) { followReason="点差过大，暂不跟随"; return false; }
+   out.valid=true; out.ai=false; out.follow=true; out.direction=followSign; out.level=followPrice;
+   out.bar=TimeCurrent(); out.followExpiry=followExpiry; out.followKey=FollowVisitKey();
+   out.method="起飞5分钟跟随["+followSource+"]"; reason=out.method; return true;
+}
+string FollowCaption()
+{
+   if(!启用起飞跟随) return "起飞跟随 · 已关闭";
+   if(followReady && TimeGMT()<followExpiry)
+   {
+      if(Load(FollowVisitKey())>0) return "起飞跟随 · 此条消息已尝试";
+      if(Load(FollowMissKey())>0) return "起飞跟随 · 价格已错过，不补跟";
+      return "起飞 "+(followSign>0 ? "BUY " : "SELL ")+DoubleToString(followPrice,_Digits)+
+             " · 剩余"+IntegerToString((int)(followExpiry-TimeGMT()))+"秒 · "+followReason;
+   }
+   return "起飞跟随 · "+(followCreated>0 && TimeGMT()>=followExpiry ? "已超过5分钟" : followReason);
+}
 #endif

@@ -18,7 +18,7 @@ const props=new Map([['scale',3],['follow',true],['grid',false],['shift',true],[
 const indicatorWindows=[[]],indicatorHandles=new Map(),released=[];
 let nextHandle=100,failCreate=false,failAdd=false,failDelete=false;
 const objects=new Map(),globals=new Map(),periods=[],navigation=[];let paint=0,drawLevels=0,checks=0;
-const cx=vm.createContext({Math,
+const cx=vm.createContext({Math,FollowCaption:()=>'起飞跟随 · 等待消息',
  看盘均线1周期:5,看盘均线2周期:10,看盘均线3周期:20,看盘均线4周期:50,看盘均线5周期:100,看盘均线6周期:200,
  看盘主均线算法:0,看盘辅助均线算法:1,看盘指标计算价格:1,看盘布林周期:20,看盘布林标准差:2,
  看盘ADX周期:14,看盘ADX参考线:25,看盘KD周期:9,看盘KD平滑:3,看盘KD信号:3,看盘RSI周期:14,看盘MACD快线:12,看盘MACD慢线:26,看盘MACD信号线:9,看盘ATR周期:14,

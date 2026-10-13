@@ -9,6 +9,7 @@ import time
 
 from store import state, iso, stamp
 from teacher_strategy import sender_name, message_link
+from deepseek_ai import member_follow_snapshot
 
 
 def snapshot(home,c):
@@ -40,6 +41,7 @@ def snapshot(home,c):
                     message['status']=value['kind'];message['reason']=value['reason']
         count=db.execute('SELECT COUNT(*) FROM messages WHERE chat_id=?',(c['chat_id'],)).fetchone()[0]
         return dict(at=iso(now),chat_name=c['chat_name'],status=status,messages=messages,message_count=count,
+                    follow=member_follow_snapshot(db,c,now,status.get('paused',False)),
                     levels=state(db,'teacher_levels',{}),analysis=state(db,'teacher_analysis',{}),
                     ai=state(db,'deepseek_status',{}),ai_setup=state(db,'deepseek_setup',{}),
                     ai_recent=state(db,'deepseek_recent',[]),ai_review=state(db,'deepseek_review',{}),

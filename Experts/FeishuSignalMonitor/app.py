@@ -22,7 +22,7 @@ from mt5_reader import MT5Reader, QuoteError
 from paper import PaperEngine
 from teacher_strategy import TeacherAnalysis, source_levels
 from dashboard import serve
-from deepseek_ai import ai_worker, ai_snapshot
+from deepseek_ai import ai_worker, ai_snapshot, member_follow_snapshot
 
 ROOT=Path(__file__).resolve().parent
 DEFAULT_HOME=Path(os.environ.get('LOCALAPPDATA',str(Path.home())))/'FeishuMT5SignalMonitor'
@@ -64,6 +64,8 @@ def config_load(home):
     if not isinstance(c['teacher_sender_id'],str) or c['teacher_sender_id'] and not c['teacher_sender_id'].startswith('ou_'): raise ValueError('老师身份须为open_id')
     if not isinstance(c['point_source_senders'],list) or any(not isinstance(x,str) or not x.startswith('ou_') for x in c['point_source_senders']): raise ValueError('点位来源必须为open_id列表')
     if type(c['allow_group_point_updates']) is not bool: raise ValueError('群友点位更新开关必须为布尔值')
+    if not isinstance(c['follow_sender_id'],str) or c['follow_sender_id'] and not c['follow_sender_id'].startswith('ou_'): raise ValueError('跟随成员身份须为open_id')
+    if c['follow_sender_id'] and c['follow_sender_id'] in [c['teacher_sender_id']]+c['point_source_senders']: raise ValueError('跟随成员须与老师点位来源分开配置')
     if c['teacher_symbol'] not in c['symbols']: raise ValueError('老师点位品种缺少映射')
     if type(c['mt5_time_offset_seconds']) is not int or abs(c['mt5_time_offset_seconds'])>14*3600 or c['mt5_time_offset_seconds']%3600: raise ValueError('行情固定时间偏移须为整小时且不超过14小时')
     return c
@@ -175,6 +177,17 @@ def export_teacher_levels(db,c,paused,now):
     for plan in ai['plans']: aw.writerow(['SETUP',plan['side'],format(plan['price'],'.10f'),plan['mode'],'NEAR' if plan.get('near') else 'POINT'])
     aw.writerow(['END',len(ai['plans'])])
     atomic_text(folder/'tge_ai_setups.csv',bridge.getvalue())
+
+    follow=member_follow_snapshot(db,c,now,paused)
+    fb=io.StringIO(newline=''); fw=csv.writer(fb,lineterminator='\r\n')
+    plans=follow.get('plans',[])
+    note=str(follow['reason']).replace(',','，').replace('\r',' ').replace('\n',' ')[:160]
+    fw.writerow(['TGF','1',int(now),int(follow['active']),c['symbols'][c['teacher_symbol']],
+                 follow.get('message_id',''),follow.get('revision',''),int(follow.get('created',0)),
+                 int(follow.get('created',0))+300,follow.get('sender',''),len(plans),note])
+    for plan in plans: fw.writerow(['FOLLOW',plan['side'],format(plan['price'],'.10f')])
+    fw.writerow(['END',len(plans)])
+    atomic_text(folder/'tge_member_follow.csv',fb.getvalue())
 
     # 保留旧EA的24小时来源上限、90秒心跳及指定老师身份；新规则不绕过旧EA。
     healthy=bool(state(db,'last_sync_ok',False)) and now-state(db,'last_sync_at',0)<=c['sync_max_age_seconds'] and now-state(db,'checkpoint',0)<=c['sync_max_age_seconds']

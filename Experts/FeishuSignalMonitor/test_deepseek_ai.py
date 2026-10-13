@@ -7,7 +7,7 @@ import time
 import unittest
 from unittest.mock import Mock
 from app import config_load, export_teacher_levels
-from deepseek_ai import AIError, initialize_ai, validate_output, resolve_token, process_ai_batch, ai_snapshot
+from deepseek_ai import AIError, initialize_ai, validate_output, resolve_token, process_ai_batch, ai_snapshot, member_follow_snapshot
 from store import connect, ingest, set_state, state
 
 
@@ -136,6 +136,15 @@ class ContextTests(unittest.TestCase):
     def test_member_after_target_cannot_supply_missing_direction(self):
         with self.assertRaises(AIError):self.validate([])
 
+
+    def test_follow_context_is_not_market_and_unapproved_member_has_no_plans(self):
+        self.target.update(source_role='follow_member',sender_id='follower',direction_sender_id='teacher',text='我是86')
+        value=self.value();value['kind']='MEMBER_TRADE';value['plans'][0]['evidence']='我是86'
+        self.assertEqual(self.validate(value=value)['plans'][0]['side'],'BUY')
+        value=self.value();value['kind']='MEMBER_TRADE';value['plans'][0]['evidence']='我是86';value['plans'][0]['mode']='MARKET'
+        with self.assertRaises(AIError):self.validate(value=value)
+        self.target['source_role']='member'
+        with self.assertRaises(AIError):self.validate(value=value)
 
 
 class WorkerTests(unittest.TestCase):
@@ -287,6 +296,76 @@ class WorkerTests(unittest.TestCase):
         process_ai_batch(self.db,self.c,self.client('UNKNOWN'),self.now)
         self.assertTrue(state(self.db,'deepseek_review'))
         self.assertFalse(ai_snapshot(self.db,self.c,self.now,False)['active'])
+
+    def follow_client(self,kind='MEMBER_TRADE',plans=True):
+        def fake(targets,*_):
+            self.assertEqual(targets[0]['source_role'],'follow_member')
+            value=result(kind='SETUP',token='68',price=4168,evidence='68多上了')
+            value['kind']=kind
+            if not plans:value['plans']=[]
+            return {'interpretations':[dict(value,id=t['id']) for t in targets]}
+        return Mock(interpret=Mock(side_effect=fake))
+    def configure_follow(self):
+        self.c['follow_sender_id']='ou_follower'
+    def test_follow_source_is_separate_and_teacher_reference_survives(self):
+        self.seed();process_ai_batch(self.db,self.c,self.client(),self.now)
+        original=state(self.db,'deepseek_setup')
+        self.configure_follow();self.seed(mid='om_member',sender='ou_follower',text='68多上了',age=1)
+        process_ai_batch(self.db,self.c,self.follow_client(),self.now)
+        self.assertEqual(state(self.db,'deepseek_setup'),original)
+        follow=member_follow_snapshot(self.db,self.c,self.now,False)
+        self.assertTrue(follow['active']);self.assertEqual(follow['plans'][0]['price'],4168)
+        export_teacher_levels(self.db,self.c,False,self.now)
+        lines=(self.home/'common/FeishuMT5SignalMonitor/tge_member_follow.csv').read_text(encoding='utf-8').splitlines()
+        self.assertEqual(lines[-2],'FOLLOW,BUY,4168.0000000000');self.assertEqual(lines[-1],'END,1')
+        self.assertEqual(self.db.execute('SELECT count(*) FROM orders').fetchone()[0],0)
+    def test_follow_deadline_is_exactly_five_minutes_even_with_fresh_heartbeats(self):
+        self.configure_follow();self.seed(sender='ou_follower',text='68多上了',age=1)
+        process_ai_batch(self.db,self.c,self.follow_client(),self.now)
+        for age,active in [(298.9,True),(299,False),(300,False)]:
+            later=self.now+age
+            with self.db:
+                set_state(self.db,'last_sync_at',later);set_state(self.db,'checkpoint',later)
+                status=state(self.db,'deepseek_status');status['at']=later;set_state(self.db,'deepseek_status',status)
+            self.assertEqual(member_follow_snapshot(self.db,self.c,later,False)['active'],active)
+    def test_historical_follow_and_other_members_never_gain_follow_authority(self):
+        self.configure_follow();self.seed(sender='ou_follower',text='68多上了',historical=True)
+        process_ai_batch(self.db,self.c,self.follow_client(),self.now)
+        self.assertFalse(member_follow_snapshot(self.db,self.c,self.now,False)['active'])
+        self.seed(mid='om_other',sender='ou_random',text='68多上了',age=0)
+        process_ai_batch(self.db,self.c,self.client('MEMBER_TRADE'),self.now)
+        self.assertFalse(member_follow_snapshot(self.db,self.c,self.now,False)['active'])
+    def test_follow_receipt_can_use_teacher_direction_without_modifying_it(self):
+        self.seed(mid='om_direction',text='现在90可⬆️',age=20)
+        process_ai_batch(self.db,self.c,self.contextual_client(),self.now)
+        self.configure_follow();m=self.seed(mid='om_member',sender='ou_follower',text='我是85',age=0)
+        value=result(token='85',price=4185,evidence='我是85');value['kind']='MEMBER_TRADE'
+        value['plans'][0]['context_ref']='om_direction'
+        process_ai_batch(self.db,self.c,Mock(interpret=Mock(return_value={'interpretations':[value]})),self.now)
+        self.assertEqual(state(self.db,'deepseek_setup')['message_id'],'om_direction')
+        self.assertTrue(member_follow_snapshot(self.db,self.c,self.now,False)['active'])
+        origin=self.db.execute("SELECT raw FROM messages WHERE message_id='om_direction'").fetchone()
+        raw=json.loads(origin['raw']);ingest(self.db,'oc_test',[dict(raw,deleted=True)])
+        self.assertFalse(member_follow_snapshot(self.db,self.c,self.now,False)['active'])
+    def test_follow_withdrawal_and_cancel_do_not_fall_back_to_an_older_receipt(self):
+        self.configure_follow();self.seed(mid='old',sender='ou_follower',text='68多上了',age=30)
+        process_ai_batch(self.db,self.c,self.follow_client(),self.now)
+        m=self.seed(mid='new',sender='ou_follower',text='68多上了',age=10)
+        process_ai_batch(self.db,self.c,self.follow_client(),self.now)
+        ingest(self.db,'oc_test',[dict(m,deleted=True)])
+        process_ai_batch(self.db,self.c,Mock(interpret=Mock(side_effect=AssertionError('deleted message must be local'))),self.now)
+        self.assertFalse(member_follow_snapshot(self.db,self.c,self.now,False)['active'])
+        self.assertEqual(member_follow_snapshot(self.db,self.c,self.now,False)['message_id'],'new')
+    def test_follow_unknown_new_receipt_blocks_old_reference_and_sync_loss_blocks_follow(self):
+        self.configure_follow();self.seed(mid='old',sender='ou_follower',text='68多上了',age=30)
+        process_ai_batch(self.db,self.c,self.follow_client(),self.now)
+        self.assertFalse(member_follow_snapshot(self.db,self.c,self.now,True)['active'])
+        with self.db:set_state(self.db,'last_sync_ok',False)
+        self.assertFalse(member_follow_snapshot(self.db,self.c,self.now,False)['active'])
+        with self.db:set_state(self.db,'last_sync_ok',True)
+        self.seed(mid='new',sender='ou_follower',text='我是85',age=0)
+        process_ai_batch(self.db,self.c,self.follow_client(plans=False),self.now)
+        self.assertFalse(member_follow_snapshot(self.db,self.c,self.now,False)['active'])
 
 
 if __name__=='__main__':unittest.main()

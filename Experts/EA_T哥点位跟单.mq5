@@ -1,5 +1,5 @@
 #property strict
-#property version "1.32"
+#property version "1.33"
 #property description "T哥点位地图 / M5 MA5 / M1收线 / 0.02手分批。独立Magic，仅管理本EA持仓。"
 #include <Trade/Trade.mqh>
 #include <Canvas/Canvas.mqh>
@@ -14,6 +14,9 @@ input int    最大同时持仓=3;
 input double 最大点差价格=0.50;         // 黄金报价价格差，不是_Point倍数
 input ulong  EA魔法号=560056;
 input bool   读取AI即时策略=true;     // 读取本地DeepSeek语义桥；未就绪时等待，不猜方向
+input group "起飞 · 5分钟个人跟随"
+input bool   启用起飞跟随=true;
+input double 起飞最大追价价格差=2.00; // 达到此不利价差即跳过；有利价格仍可跟，单笔沿用0.02配置
 input group "T哥点位节奏与退出"
 input bool   允许震荡点位反应=true;
 input double 保险价格距离=10.0;
@@ -95,11 +98,11 @@ struct Pending
 Pending pending;
 struct Candidate
 {
-   bool valid,ai;
+   bool valid,ai,follow;
    int direction;
    double level;
-   datetime bar;
-   string method;
+   datetime bar,followExpiry;
+   string method,followKey;
 };
 
 uint Hash(const string text)
@@ -449,7 +452,7 @@ bool MapReaction(const MqlRates &bar,const MqlRates &previous,const MqlRates &m5
 }
 bool Signal(Candidate &out)
 {
-   out.valid=false; out.ai=false; signalRetry=false; ZeroMemory(entryView); entryView.bar=checkingMinute;
+   out.valid=false; out.ai=false; out.follow=false; signalRetry=false; ZeroMemory(entryView); entryView.bar=checkingMinute;
    // 同一收线的数据等待只发生在原有90秒窗口内，不补做已经过时的信号。
    if(checkingMinute>0 && TimeTradeServer()-checkingMinute>90) { reason="本根M1评估窗口已结束"; return false; }
    MqlTick quote;
@@ -686,19 +689,27 @@ void Open(const Candidate &signal)
    string blocked=ExecutionBlock();
    if(!CanExecute() || blocked!="") { reason=blocked=="" ? "执行条件未就绪" : blocked; return; }
    if((datetime)Load("attemptBar")>=signal.bar) { reason="本根M1已发送过请求"; return; }
-   string visit=signal.ai ? AIVisitKey(signal.level,signal.direction) : VisitKey(signal.level);
+   string visit=signal.follow ? signal.followKey : signal.ai ? AIVisitKey(signal.level,signal.direction) : VisitKey(signal.level);
    if(Load(visit)>0) { reason="本点位机会已消费"; return; }
    MqlTick q;
    if(!FreshQuote(q)) { signalRetry=true; reason="发送前报价失效，窗口内重试"; return; }
+   if(signal.follow && (TimeGMT()>=signal.followExpiry || !followReady || signal.followKey!=FollowVisitKey() ||
+      TimeGMT()-followGenerated>10 || !FollowPriceAllowed(q)))
+   { reason="起飞消息已过期/变更或价格错过，取消跟随"; return; }
    if(q.ask-q.bid>最大点差价格) { reason="发送前点差超过上限"; return; }
    if(!ExactLot(每次开仓手数)) { reason="开仓手数不符合券商规格"; return; }
    int sign=signal.direction;
    double entry=sign>0 ? q.ask : q.bid,sl=Align(entry-sign*保险价格距离,sign),tp;
-   if(!Target(entry,sign,tp,!signal.ai) || !Stops(sign,sl,tp,q)) { reason="价格保护不符合券商规格"; return; }
+   // 成员跟随沿用现有10点尾仓/5点分批退出，不把老师地图障碍当成他的入场价。
+   bool targetOK=true;
+   if(signal.follow) tp=Align(entry+sign*尾仓目标价格距离,-sign);
+   else targetOK=Target(entry,sign,tp,!signal.ai);
+   if(!targetOK || !Stops(sign,sl,tp,q)) { reason="价格保护不符合券商规格"; return; }
    ENUM_ORDER_TYPE type=sign>0 ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
    double margin=0;
    if(!OrderCalcMargin(type,_Symbol,每次开仓手数,entry,margin) || margin>AccountInfoDouble(ACCOUNT_MARGIN_FREE))
    { reason="可用保证金不足"; return; }
+   if(signal.follow && TimeGMT()>=signal.followExpiry) { reason="起飞消息超过5分钟"; return; }
    Store("attemptBar",(double)signal.bar); Store(visit,(double)signal.bar);
    ZeroMemory(pending); pending.kind=1; pending.at=TimeCurrent(); pending.bar=signal.bar;
    pending.volume=每次开仓手数; pending.sl=sl; pending.tp=tp; pending.level=signal.level; pending.direction=sign;
@@ -1295,7 +1306,7 @@ void Panel()
    int decisionY=heroY+heroHeight+12,positionY=decisionY+88;
    int mapY=positionY+24+MathMax(visible,1)*rowHeight+10;
    int mapHeight=62+pointRows*28;
-   int height=uiCollapsed ? 122 : uiStatistics ? (statsDetail==2 ? 650 : 570) : uiIndicators ? 592 : mapY+mapHeight+44;
+   int height=uiCollapsed ? 122 : uiStatistics ? (statsDetail==2 ? 650 : 570) : uiIndicators ? 592 : mapY+mapHeight+64;
    if(!EnsurePanel(height)) return;
    ArrayResize(uiHits,0);
    panelCanvas.Erase(UIInk(UI_ROOT));
@@ -1303,7 +1314,7 @@ void Panel()
    panelCanvas.FillRectangle(0,0,UIPx(559),UIPx(39),UIInk(UI_HEADER));
    string pageTitle=uiStatistics ? "交易统计" : uiIndicators ? "看盘设置" : "T哥点位监控";
    UIText(_Symbol+" · "+pageTitle,16,10,222,11,UI_TEXT);
-   UIText("v1.32",242,13,40,8,UI_DIM);
+   UIText("v1.33",242,13,40,8,UI_DIM);
    UIText(TimeToString(TimeGMT()+8*3600,TIME_SECONDS),286,12,100,10,UI_MUTED,true);
    UIButton(uiCollapsed ? "+" : "−",396,7,30,1);
    UIText(启用真实交易 ? "交易模式" : "观察模式",434,13,110,9,启用真实交易 ? UI_ACCENT : UI_WARN,true);
@@ -1416,13 +1427,14 @@ void Panel()
    if(gate=="" && feedActive && !FreshQuote(displayQuote)) gate="报价过期/断线，暂停新请求";
    else if(gate=="" && feedActive && displayQuote.ask-displayQuote.bid>最大点差价格) gate="当前点差超过上限";
    if(gate=="") gate=feedActive ? "按策略条件等待机会" : "等待有效点位地图";
+   UIText(FollowCaption(),16,height-49,526,8,UI_DIM);
    UIText("执行 · "+gate,16,height-29,526,9,pending.kind!=0 ? UI_WARN : UI_MUTED);
    panelCanvas.Update();
 }
 int OnInit()
 {
    if(每次开仓手数<=0 || 最大同时持仓<1 || 最大同时持仓>10 ||
-      最大点差价格<=0 ||
+      最大点差价格<=0 || 起飞最大追价价格差<=0 || !MathIsValidNumber(起飞最大追价价格差) ||
       保险价格距离<=0 || 首批止盈价格距离<=0 || 尾仓目标价格距离<=首批止盈价格距离 ||
       TickSize()<=0 || !ExactLot(每次开仓手数))
       return INIT_PARAMETERS_INCORRECT;
@@ -1446,15 +1458,15 @@ int OnInit()
    if(maHandle==INVALID_HANDLE || atrHandle==INVALID_HANDLE) return INIT_FAILED;
    RestorePending();
    InitView(); InitTgeMobileMarkers();
-   readyFrom=TimeCurrent(); ReadFeed(); ReadHealth(); ReadAISetups(); EventSetTimer(1); Panel();
+   readyFrom=TimeCurrent(); ReadFeed(); ReadHealth(); ReadAISetups(); ReadMemberFollow(); EventSetTimer(1); Panel();
    return INIT_SUCCEEDED;
 }
 void OnTimer()
 {
    if(busy) return; busy=true;
-   ReadFeed(); ReadHealth(); ReadAISetups(); Reconcile(); Manage();
+   ReadFeed(); ReadHealth(); ReadAISetups(); ReadMemberFollow(); Reconcile(); Manage();
    Candidate immediate; ZeroMemory(immediate);
-   if(AIMarketSignal(immediate)) Open(immediate);
+   if(AIMarketSignal(immediate) || MemberFollowSignal(immediate)) Open(immediate);
    datetime minute=iTime(_Symbol,PERIOD_M1,1);
    if(minute>0 && minute!=lastMinute)
    {

@@ -36,5 +36,6 @@
   "ai_enabled": false,
   "allow_group_point_updates": true,
   "point_source_senders": [],
+  "follow_sender_id": "",
   "ai_model": "deepseek-flash"
 }

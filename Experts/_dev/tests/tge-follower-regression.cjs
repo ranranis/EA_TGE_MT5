@@ -30,7 +30,7 @@ let checks=0;
 function test(name,fn) {fn();checks++;console.log('PASS '+name);}
 function env() {
   const e=vm.createContext({
-    读取AI即时策略:false,aiReady:false,aiMode:"WAIT",ReadAISetups:()=>{},AIMarketSignal:()=>false,MathMin:Math.min,MathMax:Math.max,MathAbs:Math.abs,MathFloor:Math.floor,MathCeil:Math.ceil,
+    读取AI即时策略:false,aiReady:false,aiMode:"WAIT",ReadAISetups:()=>{},ReadMemberFollow:()=>{},MemberFollowSignal:()=>false,AIMarketSignal:()=>false,MathMin:Math.min,MathMax:Math.max,MathAbs:Math.abs,MathFloor:Math.floor,MathCeil:Math.ceil,
     NormalizeDouble:(v,n)=>+v.toFixed(n),TickSize:()=>.01,
     SYMBOL_VOLUME_MIN:1,SYMBOL_VOLUME_STEP:2,SYMBOL_VOLUME_MAX:3,
     SymbolInfoDouble:(_,k)=>({1:.01,2:.01,3:100})[k],_Symbol:'XAUUSD',_Digits:2,
@@ -38,7 +38,7 @@ function env() {
     首批止盈价格距离:5,保险价格距离:10,尾仓目标价格距离:10,
     TimeCurrent:()=>1000,TimeTradeServer:()=>1000,
     PrintFormat:()=>{},GlobalVariablesFlush:()=>{},CanExecute:()=>true,SyncTgeMobileMarkers:()=>{},
-    pending:{kind:0},reason:'',TerminalInfoInteger:()=>true,TERMINAL_CONNECTED:1,
+    启用起飞跟随:true,起飞最大追价价格差:2,followReady:false,pending:{kind:0},reason:'',TerminalInfoInteger:()=>true,TERMINAL_CONNECTED:1,
     entryView:{},checkingMinute:0,signalRetry:false,EMPTY_VALUE:Number.MAX_VALUE,
     ZeroMemory:p=>{for(const k of Object.keys(p))delete p[k];},DecisionLog:()=>{},ExecutionBlock:()=>'',
     Store:()=>true,ClearPending:()=>{e.pending={kind:0};},SavePending:()=>{},
@@ -470,6 +470,93 @@ test('AI snapshot validates symbol, footer, heartbeat and provenance before acti
 test('AI WAIT snapshot clears execution readiness while keeping reference data separate',()=>{
  const r=aiFeed(['TGA,1,2000,0,XAUUSD,msg,revision,1900,0,WAIT,pause','END,0']);
  assert(r.ok);assert.equal(r.x.aiReady,false);assert.equal(r.x.aiMode,'WAIT');assert.equal(r.x.aiPlans.length,0);
+});
+
+
+function followEnv(){
+ const {x,memory}=aiEnv();
+ Object.assign(x,{followReady:true,followSign:1,followPrice:100,followCreated:750,followExpiry:1050,followGenerated:1000,
+ followSource:'member-entry',followReason:'ok',healthOK:true,healthPaused:false,healthBeat:1000,
+ healthSync:1000,healthCheckpoint:1000,healthMaxAge:120});
+ for(const [name,args] of [['FollowVisitKey',''],['FollowMissKey',''],['FollowPriceAllowed','q'],['MemberFollowSignal','out'],['FollowCaption','']])install(x,name,args);
+ return {x,memory};
+}
+test('member signal accepts better BUY prices without any lower-bound clamp',()=>{
+ const {x}=followEnv();x.FreshQuote=q=>Object.assign(q,{bid:95.8,ask:95.9});
+ const out={};assert(x.MemberFollowSignal(out));assert.equal(out.follow,true);assert.equal(out.level,100);
+ assert.equal(out.followExpiry,1050);assert(out.method.includes('起飞'));
+});
+test('member adverse BUY at exactly two prices is missed forever even after a favourable return',()=>{
+ const {x,memory}=followEnv();x.FreshQuote=q=>Object.assign(q,{bid:101.9,ask:102});
+ assert(!x.MemberFollowSignal({}));assert.equal(memory[x.FollowMissKey()],1);
+ x.FreshQuote=q=>Object.assign(q,{bid:95.8,ask:95.9});assert(!x.MemberFollowSignal({}));
+});
+test('member SELL accepts higher prices and rejects bids two prices below original entry',()=>{
+ const {x}=followEnv();x.followSign=-1;
+ assert(x.FollowPriceAllowed({bid:110,ask:110.1}));
+ assert(!x.FollowPriceAllowed({bid:98,ask:98.1}));
+});
+test('member five minute deadline remains effective with a fresh bridge heartbeat',()=>{
+ const {x}=followEnv();x.followCreated=700;x.followExpiry=1000;x.followGenerated=1000;
+ assert(!x.MemberFollowSignal({}));assert(x.FollowCaption().includes('超过5分钟'));
+});
+test('member request attempt is once per message and edit versions cannot re-arm the same source',()=>{
+ const {x,memory}=followEnv();const key=x.FollowVisitKey();memory[key]=999;
+ assert(!x.MemberFollowSignal({}));assert.equal(x.FollowVisitKey(),key);
+ x.followSource='different-message';assert.notEqual(x.FollowVisitKey(),key);assert(x.MemberFollowSignal({}));
+});
+test('member disconnected paused stale or unhealthy snapshots cannot produce a candidate',()=>{
+ for(const change of [{healthOK:false},{healthPaused:true},{healthBeat:980},{followGenerated:980},{启用起飞跟随:false}]){
+  const {x}=followEnv();Object.assign(x,change);assert(!x.MemberFollowSignal({}));
+ }
+ const {x}=followEnv();x.FreshQuote=()=>false;assert(!x.MemberFollowSignal({}));
+});
+test('member feed enforces exact 300 seconds expiry and independently clears readiness',()=>{
+ const good=['TGF,1,2000,1,XAUUSD,member,revision,1900,2200,member-sender,1,ok','FOLLOW,BUY,100','END,1'];
+ function read(rows){
+  const {x}=followEnv();let pos=0;Object.assign(x,{_Symbol:'XAUUSD',TimeGMT:()=>2000,
+  INVALID_HANDLE:-1,FILE_READ:1,FILE_TXT:2,FILE_ANSI:4,FILE_COMMON:8,FILE_SHARE_READ:16,CP_UTF8:65001,
+  FileOpen:()=>1,FileClose:()=>{},FileReadString:()=>rows[pos++],FileIsEnding:()=>pos>=rows.length,FileSize:()=>rows.join('\n').length,
+  StringSplit:(v,delim,out)=>{out.push(...v.split(delim));return out.length;},StringToInteger:Number,StringToDouble:Number,
+  Number:(s,decimal=false)=>decimal?/^\d+(?:\.\d+)?$/.test(s):/^\d+$/.test(s),
+  ArrayResize:(a,n)=>{while(a.length<n)a.push({});a.length=n;}});
+  install(x,'ReadMemberFollow','');return {ok:x.ReadMemberFollow(),x};
+ }
+ assert(read(good).x.followReady);
+ for(const rows of [good.slice(0,2),good.map(s=>s.replace(',2200,',',2400,')),good.map(s=>s.replace(',2000,',',1980,')),good.map(s=>s.replace('BUY','EXECUTE'))]){
+  const r=read(rows);assert(!r.ok);assert(!r.x.followReady);
+ }
+ const expired=read(good.map(s=>s.replace(',1900,2200,',',1700,2000,')));assert(!expired.x.followReady);
+ const wait=read(['TGF,1,2000,0,XAUUSD,member,revision,1900,2200,member-sender,0,paused','END,0']);
+ assert(wait.ok);assert(!wait.x.followReady);assert.equal(wait.x.aiPlans.length,2);
+});
+test('member candidate rechecks expiry and actual price at the existing request boundary',()=>{
+ assert(body('Open').includes('TimeGMT()>=signal.followExpiry'));
+ assert(body('Open').includes('!FollowPriceAllowed(q)'));
+ assert(body('Open').includes('signal.follow ? signal.followKey'));
+ assert(body('OnTimer').includes('MemberFollowSignal(immediate)'));
+ assert(!body('MemberFollowSignal').includes('PositionOpen'));
+});
+
+
+test('member request boundary accepts a favourable price using fixed configured exits and rejects expiry/changed price',()=>{
+ function prepare(){
+  const {x,memory}=followEnv(),calls=[];
+  Object.assign(x,{
+   每次开仓手数:.02,ORDER_TYPE_BUY:0,ORDER_TYPE_SELL:1,ACCOUNT_MARGIN_FREE:1,
+   ExactLot:()=>true,Stops:()=>true,OrderCalcMargin:()=>true,AccountInfoDouble:()=>10000,
+   RecordResult:()=>{},EntryTag:()=>'synthetic',execution:{PositionOpen:(...args)=>calls.push(args)}
+  });
+  install(x,'Open','signal');
+  const out={};assert(x.MemberFollowSignal(out));return {x,calls,out,memory};
+ }
+ let {x,calls,out}=prepare();x.levels=[90,97];x.FreshQuote=q=>Object.assign(q,{bid:95.8,ask:95.9});
+ x.Open(out);assert.equal(calls.length,1);assert.equal(calls[0][2],.02);
+ assert.equal(calls[0][3],95.9);assert.equal(calls[0][4],85.9);assert.equal(calls[0][5],105.9);
+ x.Open(out);assert.equal(calls.length,1);
+ ({x,calls,out}=prepare());out.followExpiry=1000;x.Open(out);assert.equal(calls.length,0);
+ ({x,calls,out}=prepare());x.FreshQuote=q=>Object.assign(q,{bid:101.9,ask:102});x.Open(out);assert.equal(calls.length,0);
+ x.FreshQuote=q=>Object.assign(q,{bid:95.8,ask:95.9});x.Open(out);assert.equal(calls.length,0);
 });
 
 // 单向明确计划未触发时，沿用生产Signal/Reaction/BreakRetest评估地图延续。
