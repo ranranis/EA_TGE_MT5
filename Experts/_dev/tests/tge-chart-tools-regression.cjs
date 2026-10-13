@@ -25,7 +25,7 @@ const cx=vm.createContext({Math,
  MODE_SMA:0,MODE_EMA:1,MODE_SMMA:2,MODE_LWMA:3,
  clrWhite:'white',clrOrangeRed:'red',clrGold:'gold',clrOrange:'orange',clrMediumTurquoise:'teal',clrDeepSkyBlue:'blue',clrMediumPurple:'purple',clrHotPink:'pink',uiX:8,uiY:24,panelWidth:560,panelHeight:565,panelScale:1,uiPrefix:'TGUI.42.',
  uiIndicatorLabels:['MA5','EMA20','布林','RSI','MACD','ATR','MA10','MA50','MA100','MA200','M5·MA5','M15·MA5','确认拐点','昨高低','ADX','随机KD'],uiIndicatorHandles:Array(16).fill(-1),uiIndicatorNotice:'',INVALID_HANDLE:-1,
- uiCollapsed:false,uiPointLines:true,uiStatistics:false,uiIndicators:false,statsPeriod:0,statsOffsets:[0,0,0],statsFilter:0,statsDetail:0,statsReview:0,statsDirty:true,statsLastAttempt:0,statsTrades:[],uiHits:[],uiPeriods:[1,5,15,30,16385,16388,16408],
+ uiWatchTab:0,uiUndoMask:-1,uiCollapsed:false,uiPointLines:true,uiStatistics:false,uiIndicators:false,statsPeriod:0,statsOffsets:[0,0,0],statsFilter:0,statsDetail:0,statsReview:0,statsDirty:true,statsLastAttempt:0,statsTrades:[],uiHits:[],uiPeriods:[1,5,15,30,16385,16388,16408],
  uiInitialized:false,uiOldMouseMove:false,uiDragging:false,uiOldScroll:false,uiLeftWasDown:false,uiPressedAction:0,uiDragDX:0,uiDragDY:0,panelReady:true,
  读取AI即时策略:false,每次开仓手数:.02,aiReady:false,aiMode:'WAIT',aiPlans:[],aiSourceTime:0,AIPlanCaption:()=>'AI等待',VIEW:'TGE_',_Symbol:'XAUUSD.c',UI_HEADER:0,UI_ACCENT:1,UI_MUTED:2,UI_DIM:3,
  uiMobileMarkers:true,启用手机标记挂单:true,markerStatus:'等待同步',markerPrefix:'TGM.test.',markerDirty:false,GlobalVariablesFlush:()=>{},
@@ -48,7 +48,7 @@ const cx=vm.createContext({Math,
  UIRound:()=>{},UICard:()=>{},UIText:()=>{},Panel:()=>paint++,DrawLevels:()=>drawLevels++,
  ArraySize:a=>a.length,ArrayResize:(a,n)=>{while(a.length<n)a.push({});a.length=n;}
 });
-for(const [name,args] of [['UIIndicatorPeriod','index'],['UIIsMovingAverage','index'],['UIIsOscillator','index'],['UIIndicatorLabel','index'],['UIMovingAverageGroup','trendGroup'],['UIIndicatorName','index'],['UIIndicatorWindow','index'],['UIIndicatorSet','index,enabled'],['CloseViewIndicators',''],['UIPx','value'],['SaveView',''],['InitView',''],['MovePanel',''],
+for(const [name,args] of [['UIViewMask',''],['UIPresetMask','preset'],['UIPresetLabel','preset'],['UICombinationText','mask'],['UISetMask','mask'],['UIApplyMask','mask'],['UIFavorite','slot,save'],['UIIndicatorPeriod','index'],['UIIsMovingAverage','index'],['UIIsOscillator','index'],['UIIndicatorLabel','index'],['UIMovingAverageGroup','trendGroup'],['UIIndicatorName','index'],['UIIndicatorWindow','index'],['UIIndicatorSet','index,enabled'],['CloseViewIndicators',''],['UIPx','value'],['SaveView',''],['InitView',''],['MovePanel',''],
  ['UIButton','text,x,y,w,action,active=false'],['ChartTools','y'],['HitAction','mouseX,mouseY'],
  ['ViewAction','action'],['OnChartEvent','id,lparam,dparam,sparam']])
  vm.runInContext('function '+name+'('+args+'){'+convert(body(name))+'}',cx);
@@ -371,6 +371,44 @@ for(const file of ['TgeChartOverlay.mq5','TgeChartOscillator.mq5']){
 }
 
 
+check('six exact presets replace EA indicators without accumulating or deleting manual indicators',()=>{
+ resetIndicators();cx.uiPointLines=false;
+ const expected=[[5,10,11,12],[0,1,3,6],[1,7,9,14],[2,3,13],[0,1,4],[10,12,13,15]];
+ for(let p=0;p<6;p++){
+  cx.ViewAction(82+p);
+  assert.deepEqual(Array.from({length:16},(_,i)=>i).filter(i=>cx.UIIndicatorWindow(i)>=0),expected[p]);
+  assert.equal(cx.uiPointLines,true);assert.equal(cx.UIViewMask(),cx.UIPresetMask(p));
+  assert(indicatorWindows[0].some(v=>v.name==='Manual MA5'));
+ }
+});
+check('favorite combinations survive reinitialization, include lines and report empty slots',()=>{
+ resetIndicators();cx.uiPointLines=false;cx.UIIndicatorSet(7,true);cx.UIIndicatorSet(15,true);
+ const mask=cx.UIViewMask();cx.ViewAction(94);cx.ViewAction(82);cx.CloseViewIndicators();cx.InitView();
+ cx.ViewAction(88);assert.equal(cx.UIViewMask(),mask);assert.equal(cx.uiPointLines,false);
+ globals.delete(cx.uiPrefix+'favorite1');cx.ViewAction(89);assert.equal(cx.UIViewMask(),mask);
+ assert(cx.uiIndicatorNotice.includes('尚未保存'));
+});
+check('clear preserves point lines, undo restores actual combination and is consumed',()=>{
+ resetIndicators();cx.ViewAction(84);const mask=cx.UIViewMask();cx.ViewAction(93);
+ assert.equal(cx.UIViewMask(),1<<16);assert.equal(cx.uiUndoMask,mask);
+ cx.ViewAction(92);assert.equal(cx.UIViewMask(),mask);assert.equal(cx.uiUndoMask,-1);
+ cx.ViewAction(92);assert.equal(cx.UIViewMask(),mask);
+});
+check('failed preset creation or removal does not claim success and preserves recoverable old state',()=>{
+ resetIndicators();cx.UIIndicatorSet(7,true);cx.uiPointLines=false;const old=cx.UIViewMask();
+ failCreate=true;assert.equal(cx.UIApplyMask(cx.UIPresetMask(0)),false);failCreate=false;
+ assert.equal(cx.UIViewMask(),old);assert(cx.uiIndicatorNotice.includes('已恢复'));
+ failDelete=true;assert.equal(cx.UIApplyMask(cx.UIPresetMask(1)),false);failDelete=false;
+ assert(cx.uiIndicatorNotice.includes('未完成'));assert(cx.UIIndicatorWindow(7)>=0);
+ assert.equal(cx.UIApplyMask(old),true);
+});
+check('combo captions follow configured MA periods and templates never set chart timeframe',()=>{
+ cx.看盘均线3周期=34;
+ assert(cx.UICombinationText(cx.UIPresetMask(2)).includes('EMA34'));cx.看盘均线3周期=20;
+ for(const name of ['UIViewMask','UIPresetMask','UISetMask','UIApplyMask','UIFavorite'])
+  assert(!/\bexecution\s*\.|\b(?:Open|Manage|Store|OrderSend|ChartSetSymbolPeriod)\s*\(/.test(body(name)));
+});
+
 // 使用生产Panel与IndicatorPage，分别记录内存绘制和Update发布，防止“画了但没显示”。
 resetIndicators();resetHits();props.set('width',1000);props.set('height',1000);
 let backBuffer=[],frames=[];
@@ -398,9 +436,10 @@ check('actual watch-tab click publishes the new bitmap before returning',()=>{
  const before=frames.length;gesture(4);
  assert.equal(cx.uiIndicators,true);assert.equal(cx.uiStatistics,false);
  assert.equal(frames.length,before+1,'watch page must call Canvas.Update');
- assert(displayed().includes('看盘设置'));assert(displayed().includes('MA5关'));
+ assert(displayed().includes('看盘工作台'));assert(displayed().includes('T哥点位'));
  assert(!displayed().includes('当前没有本EA持仓'));
- assert.equal(cx.uiHits.length,24);assert.equal(globals.get(cx.uiPrefix+'page'),2);
+ assert.equal(cx.uiHits.length,22);assert.equal(globals.get(cx.uiPrefix+'page'),2);
+ gesture(81);assert.equal(cx.uiWatchTab,1);assert(displayed().includes('MA5关'));
 });
 check('watch indicator clicks and redraws publish matching state without toggling back',()=>{
  const before=frames.length;gesture(50);
@@ -413,16 +452,16 @@ check('watch indicator clicks and redraws publish matching state without togglin
 check('returning from monitor or restored watch page publishes only current-page buttons',()=>{
  for(let i=0;i<3;i++){
   gesture(2);assert(displayed().includes('当前没有本EA持仓'));assert.equal(cx.uiHits.length,6);
-  gesture(4);assert(displayed().includes('看盘设置'));assert.equal(cx.uiHits.length,24);
+  gesture(4);assert(displayed().includes('看盘工作台'));assert.equal(cx.uiHits.length,28);
  }
  cx.SaveView();cx.uiIndicators=false;cx.uiStatistics=true;cx.InitView();
  const before=frames.length;cx.Panel();assert.equal(frames.length,before+1);
- assert.equal(cx.uiIndicators,true);assert.equal(cx.uiStatistics,false);assert(displayed().includes('看盘设置'));
+ assert.equal(cx.uiIndicators,true);assert.equal(cx.uiStatistics,false);assert(displayed().includes('看盘工作台'));
 });
 check('collapsed watch page removes hidden indicator hit targets and expands with refreshed state',()=>{
  gesture(1);assert.equal(cx.uiCollapsed,true);assert.equal(cx.uiHits.length,6);
  assert(!displayed().includes('MA5关'));assert(displayed().includes('看盘页 · 指标显示设置'));
- gesture(1);assert.equal(cx.uiCollapsed,false);assert.equal(cx.uiHits.length,24);assert(displayed().includes('MA5关'));
+ gesture(1);assert.equal(cx.uiCollapsed,false);assert.equal(cx.uiHits.length,28);assert(displayed().includes('MA5关'));
 });
 
 check('monitor page presents AI reference independently of the old map and daily-limit caption',()=>{
@@ -487,5 +526,5 @@ if(process.env.TGE_UI_PREVIEW){
  positions=[];cx.aiPlans.push({sign:1,level:4140,market:false},{sign:-1,level:4190,market:true});render('four-plans');
  cx.aiReady=false;cx.aiMode='WAIT';cx.aiPlans=[];cx.reason='AI消息待核对，等待有效方向';cx.AIPlanCaption=()=> '来源已编辑 · 等待重新解释';render('waiting');
  cx.uiCollapsed=true;render('compact');cx.uiCollapsed=false;
- cx.uiIndicators=true;render('indicators');
+ cx.uiIndicators=true;cx.uiWatchTab=0;render('presets');cx.uiWatchTab=1;render('indicators');
 }

@@ -1,5 +1,5 @@
 #property strict
-#property version "1.31"
+#property version "1.32"
 #property description "T哥点位地图 / M5 MA5 / M1收线 / 0.02手分批。独立Magic，仅管理本EA持仓。"
 #include <Trade/Trade.mqh>
 #include <Canvas/Canvas.mqh>
@@ -822,6 +822,7 @@ bool uiInitialized=false,uiOldMouseMove=false,uiDragging=false,uiOldScroll=false
 int uiDragDX=0,uiDragDY=0,uiPressedAction=0;
 // 统计页状态属于显示偏好，不参与交易管理。
 bool uiStatistics=false,uiIndicators=false;
+int uiWatchTab=0,uiUndoMask=-1; // 看盘子页与一次撤销，仅影响显示
 int statsPeriod=0,statsOffsets[3]={0,0,0},statsFilter=0,statsDetail=0,statsReview=0;
 // 1收起；27点位线；50..59旧指标；60/61均线组合；70..75策略辅助指标。
 
@@ -961,6 +962,78 @@ bool UIIndicatorSet(const int index,const bool enabled)
                      index==13 ? "：前一交易日高低，按券商D1日期" : "已显示；指标周期跟随当前图表");
    return true;
 }
+// 位0..15表示本EA的显示指标，位16表示老师点位线；不涉及手工指标。
+int UIViewMask()
+{
+   int mask=uiPointLines ? (1<<16) : 0;
+   for(int i=0;i<ArraySize(uiIndicatorLabels);i++)
+      if(UIIndicatorWindow(i)>=0) mask|=(1<<i);
+   return mask;
+}
+int UIPresetMask(const int preset)
+{
+   if(preset==0) return (1<<10)|(1<<11)|(1<<12)|(1<<5)|(1<<16);
+   if(preset==1) return (1<<0)|(1<<6)|(1<<1)|(1<<3)|(1<<16);
+   if(preset==2) return (1<<1)|(1<<7)|(1<<9)|(1<<14)|(1<<16);
+   if(preset==3) return (1<<2)|(1<<13)|(1<<3)|(1<<16);
+   if(preset==4) return (1<<0)|(1<<1)|(1<<4)|(1<<16);
+   return (1<<10)|(1<<12)|(1<<13)|(1<<15)|(1<<16);
+}
+string UIPresetLabel(const int preset)
+{
+   string names[6]={"T哥点位","短线节奏","趋势延续","区间震荡","动量确认","结构拐点"};
+   return names[preset];
+}
+string UICombinationText(const int mask)
+{
+   string text="";
+   for(int i=0;i<ArraySize(uiIndicatorLabels);i++)
+      if((mask & (1<<i))!=0) text+=(text=="" ? "" : " / ")+UIIndicatorLabel(i);
+   return text=="" ? "纯K线" : text;
+}
+bool UISetMask(const int mask)
+{
+   int oscillators=0;
+   for(int i=0;i<ArraySize(uiIndicatorLabels);i++)
+      if((mask & (1<<i))!=0 && UIIsOscillator(i)) oscillators++;
+   if(mask<0 || mask>131071 || oscillators>1) return false;
+   // 先加载目标主图，再加载副图；失败时不主动清空原有显示。
+   for(int i=0;i<ArraySize(uiIndicatorLabels);i++)
+      if((mask & (1<<i))!=0 && !UIIsOscillator(i) && !UIIndicatorSet(i,true)) return false;
+   for(int i=0;i<ArraySize(uiIndicatorLabels);i++)
+      if((mask & (1<<i))!=0 && UIIsOscillator(i) && !UIIndicatorSet(i,true)) return false;
+   for(int i=0;i<ArraySize(uiIndicatorLabels);i++)
+      if((mask & (1<<i))==0 && !UIIndicatorSet(i,false)) return false;
+   uiPointLines=(mask & (1<<16))!=0;
+   DrawLevels();
+   return UIViewMask()==mask;
+}
+bool UIApplyMask(const int mask)
+{
+   int previous=UIViewMask();
+   if(UISetMask(mask))
+   {
+      uiIndicatorNotice="当前组合："+UICombinationText(mask);
+      return true;
+   }
+   string detail=uiIndicatorNotice;
+   bool restored=UISetMask(previous);
+   uiIndicatorNotice=restored ? "切换失败，已恢复原组合："+detail : "切换未完成，请检查实际亮起的指标按钮";
+   Print(uiIndicatorNotice);
+   return false;
+}
+void UIFavorite(const int slot,const bool save)
+{
+   string key=uiPrefix+"favorite"+IntegerToString(slot);
+   if(save)
+   {
+      if(GlobalVariableSet(key,UIViewMask())==0) { uiIndicatorNotice="组合保存失败"; return; }
+      GlobalVariablesFlush();
+      uiIndicatorNotice="当前指标与点位线已保存到组合"+IntegerToString(slot+1);
+   }
+   else if(!GlobalVariableCheck(key)) uiIndicatorNotice="组合尚未保存：先选择指标，再点下方保存按钮";
+   else UIApplyMask((int)GlobalVariableGet(key));
+}
 void CloseViewIndicators()
 {
    for(int i=0;i<ArraySize(uiIndicatorLabels);i++)
@@ -979,6 +1052,7 @@ void SaveView()
    GlobalVariableSet(uiPrefix+"lines",uiPointLines ? 1 : 0);
    GlobalVariableSet(uiPrefix+"stats",uiStatistics ? 1 : 0);
    GlobalVariableSet(uiPrefix+"page",uiIndicators ? 2 : uiStatistics ? 1 : 0);
+   GlobalVariableSet(uiPrefix+"watchTab",uiWatchTab);
    GlobalVariableSet(uiPrefix+"period",statsPeriod); GlobalVariableSet(uiPrefix+"filter",statsFilter);
    GlobalVariableSet(uiPrefix+"detail",statsDetail);
    for(int i=0;i<3;i++) GlobalVariableSet(uiPrefix+"offset"+IntegerToString(i),statsOffsets[i]);
@@ -994,6 +1068,7 @@ void InitView()
    int page=GlobalVariableCheck(uiPrefix+"page") ? (int)GlobalVariableGet(uiPrefix+"page") :
             GlobalVariableGet(uiPrefix+"stats")>0 ? 1 : 0;
    page=MathMax(0,MathMin(page,2)); uiStatistics=page==1; uiIndicators=page==2;
+   uiWatchTab=(int)MathMax(0,MathMin(GlobalVariableGet(uiPrefix+"watchTab"),1));
    statsPeriod=(int)MathMax(0,MathMin(GlobalVariableGet(uiPrefix+"period"),2));
    statsFilter=(int)MathMax(0,MathMin(GlobalVariableGet(uiPrefix+"filter"),2));
    statsDetail=(int)MathMax(0,MathMin(GlobalVariableGet(uiPrefix+"detail"),3));
@@ -1027,22 +1102,49 @@ void PageTabs(const int y)
 }
 void IndicatorPage()
 {
-   UIText("看盘设置",16,94,240,17,UI_TEXT);
-   UIText("按用途切换指标组合",16,122,520,9,UI_MUTED);
-   UIText("均线",16,160,160,10,UI_MUTED);
-   UIText("点位与结构",16,268,200,10,UI_MUTED);
-   UIText("波动与动量",16,332,200,10,UI_MUTED);
-   ChartTools(190);
-   UIRound(12,438,536,66,UI_HEADER);
-   UIText(uiIndicatorNotice,26,449,508,9,UI_MUTED);
-   UIText("主图叠加均线与结构 · 副图一次显示一种动量指标",26,478,508,9,UI_DIM);
+   UIText("看盘工作台",16,94,240,17,UI_TEXT);
+   UIText("组合沿用输入参数中的周期 · 手工添加的指标保留",16,122,520,9,UI_MUTED);
+   UIButton("组合模板",16,146,100,80,uiWatchTab==0);
+   UIButton("单项指标",124,146,100,81,uiWatchTab==1);
+   UIButton("撤销切换",332,146,100,92,uiUndoMask>=0);
+   UIButton("清空指标",444,146,100,93);
+   if(uiWatchTab==0)
+   {
+      int mask=UIViewMask();
+      for(int i=0;i<6;i++)
+      {
+         int x=16+(i%2)*270,y=188+(i/2)*64;
+         UIRound(x,y,258,58,UI_CARD);
+         UIButton(UIPresetLabel(i),x+8,y+5,242,82+i,mask==UIPresetMask(i));
+         UIText(UICombinationText(UIPresetMask(i)),x+10,y+36,238,8,UI_DIM);
+      }
+      UIText("我的组合 · 保存当前显示，点击组合可恢复",16,390,528,9,UI_MUTED);
+      for(int i=0;i<3;i++)
+      {
+         string key=uiPrefix+"favorite"+IntegerToString(i);
+         bool saved=GlobalVariableCheck(key);
+         UIButton("组合"+IntegerToString(i+1)+(saved ? "" : " · 未保存"),16+i*180,416,168,88+i,
+                  saved && mask==(int)GlobalVariableGet(key));
+         UIButton("保存到 "+IntegerToString(i+1),16+i*180,452,168,94+i);
+      }
+   }
+   else
+   {
+      UIText("均线",16,192,160,10,UI_MUTED);
+      UIText("点位与结构",16,300,200,10,UI_MUTED);
+      UIText("波动与动量",16,364,200,10,UI_MUTED);
+      ChartTools(222);
+   }
+   UIRound(12,502,536,74,UI_HEADER);
+   UIText(uiIndicatorNotice,26,513,508,9,UI_MUTED);
+   UIText("仅调整看盘显示 · 不切换周期，不改变EA交易条件",26,541,508,9,UI_DIM);
    panelCanvas.Update();
 }
 void UIButton(const string text,const int x,const int y,const int w,const int action,const bool active=false)
 {
    // 导航用底部指示线；开关用状态灯；普通操作保留中性描边。
    bool navigation=(action>=2 && action<=4) || (action>=30 && action<=32) ||
-                   (action>=36 && action<=42);
+                   (action>=36 && action<=42) || action==80 || action==81;
    bool toggle=action==27 || action==28 || (action>=50 && action<=59) ||
                (action>=70 && action<=75);
    color edge=active ? C'57,121,111' : C'49,63,80';
@@ -1103,6 +1205,8 @@ bool UIMovingAverageGroup(const bool trendGroup)
 
 void ViewAction(const int action)
 {
+   int before=UIViewMask();
+   bool recordUndo=action==27 || (action>=50 && action<=75) || (action>=82 && action<=90) || action==93;
    if(action==1) uiCollapsed=!uiCollapsed;
     else if(action==2) { uiStatistics=false; uiIndicators=false; }
     else if(action==3) { uiStatistics=true; uiIndicators=false; }
@@ -1125,6 +1229,16 @@ void ViewAction(const int action)
    else if(action>=50 && action<=59) UIIndicatorSet(action-50,UIIndicatorWindow(action-50)<0);
    else if(action>=70 && action<=75) UIIndicatorSet(action-60,UIIndicatorWindow(action-60)<0);
    else if(action==60 || action==61) UIMovingAverageGroup(action==61);
+   else if(action==80 || action==81) uiWatchTab=action-80;
+   else if(action>=82 && action<=87) UIApplyMask(UIPresetMask(action-82));
+   else if(action>=88 && action<=90) UIFavorite(action-88,false);
+   else if(action>=94 && action<=96) UIFavorite(action-94,true);
+   else if(action==92)
+   {
+      if(uiUndoMask<0) uiIndicatorNotice="尚无可撤销的显示切换";
+      else if(UIApplyMask(uiUndoMask)) uiUndoMask=-1;
+   }
+   else if(action==93) UIApplyMask(before & (1<<16));
    else if(action==27) { uiPointLines=!uiPointLines; DrawLevels(); }
    else if(action==28)
    {
@@ -1134,6 +1248,7 @@ void ViewAction(const int action)
       uiMobileMarkers=enabled; markerDirty=true; GlobalVariablesFlush();
    }
    else return;
+   if(recordUndo && UIViewMask()!=before) uiUndoMask=before;
    // 先完成图表命令，再按实际状态画工具栏。
    ChartRedraw(0); Panel(); SaveView();
 }
@@ -1180,7 +1295,7 @@ void Panel()
    int decisionY=heroY+heroHeight+12,positionY=decisionY+88;
    int mapY=positionY+24+MathMax(visible,1)*rowHeight+10;
    int mapHeight=62+pointRows*28;
-   int height=uiCollapsed ? 122 : uiStatistics ? (statsDetail==2 ? 650 : 570) : uiIndicators ? 520 : mapY+mapHeight+44;
+   int height=uiCollapsed ? 122 : uiStatistics ? (statsDetail==2 ? 650 : 570) : uiIndicators ? 592 : mapY+mapHeight+44;
    if(!EnsurePanel(height)) return;
    ArrayResize(uiHits,0);
    panelCanvas.Erase(UIInk(UI_ROOT));
@@ -1188,7 +1303,7 @@ void Panel()
    panelCanvas.FillRectangle(0,0,UIPx(559),UIPx(39),UIInk(UI_HEADER));
    string pageTitle=uiStatistics ? "交易统计" : uiIndicators ? "看盘设置" : "T哥点位监控";
    UIText(_Symbol+" · "+pageTitle,16,10,222,11,UI_TEXT);
-   UIText("v1.31",242,13,40,8,UI_DIM);
+   UIText("v1.32",242,13,40,8,UI_DIM);
    UIText(TimeToString(TimeGMT()+8*3600,TIME_SECONDS),286,12,100,10,UI_MUTED,true);
    UIButton(uiCollapsed ? "+" : "−",396,7,30,1);
    UIText(启用真实交易 ? "交易模式" : "观察模式",434,13,110,9,启用真实交易 ? UI_ACCENT : UI_WARN,true);
