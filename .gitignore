@@ -21,6 +21,8 @@
 !/Experts/.codex/PROJECT_PROMPT.md
 !/Experts/.codex/skills/
 !/Experts/.codex/skills/**
+!/Experts/FeishuSignalMonitor/
+!/Experts/FeishuSignalMonitor/**
 !/Experts/docs/
 !/Experts/docs/**
 !/Experts/scripts/
