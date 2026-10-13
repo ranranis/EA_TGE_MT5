@@ -33,6 +33,7 @@ interpretations的plan只允许side/token/price/mode/evidence（或context_ref�
 9. 普通闲聊且不改变场景用KEEP，plans=[]，regime=UNKNOWN，其他证据字段null。确有变更用UPDATE并返回完整仍有效场景；无法可靠确定新交易指令用REVIEW，不能静默继续旧方向。
 10. summary可以解释突破后观察回踩等，但不能制造没有原文的交易价格、SL、TP、手数。不要把“15分钟连绿”的颜色直接判成趋势方向。
 11. 所有引用只用截至as_of的真实消息ID；价格尾数用该消息的market_anchor/previous_scene已验证同token价格复核，不按未来行情重新补全。
+12. previous_scene为空时，这是首次建立完整场景：必须结合context里的原文恢复截至as_of仍有效的计划，不能因为最后一句是补充说明就KEEP。没有可确认的计划返回UPDATE空计划；信息不足返回REVIEW。
 """
 
 
@@ -77,7 +78,7 @@ def validate_scene(value, targets, context, anchor, previous=None):
             raise AIError('AI场景价格证据字段无效')
         item=evidence(proof['message_id'],proof['evidence'])
         token=proof['token'];number=proof['price']
-        if not isinstance(token,str) or not re.search(r'(?<![\\d.])'+re.escape(token)+r'(?![\\d.])',proof['evidence']):
+        if not isinstance(token,str) or not re.search(r'(?<![\d.])'+re.escape(token)+r'(?![\d.])',proof['evidence']):
             raise AIError('AI场景价格不在原文或数字被截断')
         if isinstance(number,bool) or not isinstance(number,(int,float)) or not math.isfinite(number):
             raise AIError('AI场景价格不是有限数')
@@ -89,7 +90,7 @@ def validate_scene(value, targets, context, anchor, previous=None):
             item_anchor=match['price'] if match else (float(token) if len(token.split('.')[0])>=4 else 0)
         if abs(number-resolve_token(token,item_anchor))>0.001:
             raise AIError('AI场景价格补全未通过原时点复核')
-        if re.search(r'(?:EMA|MA|ATR|RSI|ADX|MACD)\\s*'+re.escape(token),proof['evidence'],re.I):
+        if re.search(r'(?:EMA|MA|ATR|RSI|ADX|MACD)\s*'+re.escape(token),proof['evidence'],re.I):
             raise AIError('指标周期不是入场价')
         return number
     clean=[]

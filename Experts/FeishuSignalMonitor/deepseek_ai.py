@@ -108,8 +108,9 @@ class DeepSeek:
             raise AIError('DeepSeek连接/响应或本机凭证异常：'+type(ex).__name__) from None
 
     def interpret(self, targets, context, anchor, levels, previous_scene=None):
+        scene_requested=any(t.get('source_role')=='teacher' and not t.get('historical') for t in targets)
         payload = {'model': self.config['ai_model'], 'thinking': {'type':'disabled'},
-            'messages': [{'role':'system','content':SYSTEM+SCENE_PROMPT},
+            'messages': [{'role':'system','content':SYSTEM+(SCENE_PROMPT if scene_requested else '\n本批没有老师新消息，只返回interpretations，不得输出或更新scene。')},
                          {'role':'user','content':json.dumps({'targets':targets,'context':context,
                           'market_anchor':anchor,'earlier_full_levels':levels,'previous_scene':previous_scene or {}},ensure_ascii=False)}],
             'response_format': {'type':'json_object'}, 'max_tokens': 4800}
@@ -323,15 +324,55 @@ def initialize_ai(db):
     db.commit()
 
 
-def pending_rows(db, c, now):
+def message_lane(c, row):
+    if row['sender']==c.get('follow_sender_id'):
+        return 'follow'
+    if row['sender'] in [c['teacher_sender_id']]+c.get('point_source_senders',[]) or row['message_id']==c.get('_map_message_id'):
+        return 'teacher'
+    return 'member'
+
+
+def pending_window_start(db, now):
     from datetime import datetime
     from store import TZ
     start = datetime.fromtimestamp(now,TZ).replace(hour=0,minute=0,second=0,microsecond=0).timestamp()
-    return db.execute("""SELECT m.*,m.rowid AS sequence FROM messages m LEFT JOIN ai_messages a
+    # 跨午夜仍处理有效计划之后的新消息；升级前更早的未解析聊天不阻塞现有计划。
+    setup=state(db,'deepseek_setup',{})
+    start=min(start,setup.get('created',start))
+    refs=setup.get('source_refs',[])
+    if refs:
+        slots=','.join('?' for _ in refs)
+        source_time=db.execute(f'SELECT min(created) FROM messages WHERE message_id IN ({slots})',
+                               [r['message_id'] for r in refs]).fetchone()[0]
+        if source_time is not None:start=min(start,source_time)
+    return start
+
+
+def pending_rows(db, c, now):
+    start=pending_window_start(db,now)
+    rows=db.execute("""SELECT m.*,m.rowid AS sequence FROM messages m LEFT JOIN ai_messages a
         ON a.chat_id=m.chat_id AND a.message_id=m.message_id AND a.revision=m.revision
         WHERE m.chat_id=?
         AND m.created>=? AND m.created<=? AND (a.status IS NULL OR (a.status='RETRY' AND a.retry_at<=?))
-        ORDER BY m.created,m.rowid LIMIT 8""",(c['chat_id'],start,now+5,now)).fetchall()
+        ORDER BY m.created,m.rowid""",(c['chat_id'],start,now+5,now)).fetchall()
+    # 分批隔离：成员格式错误不能把同批老师消息一起回滚；老师优先。
+    config=dict(c,_map_message_id=state(db,'teacher_levels',{}).get('message_id'))
+    for lane in ('teacher','follow','member'):
+        batch=[r for r in rows if message_lane(config,r)==lane]
+        if batch:return batch[:8]
+    return []
+
+
+def lane_readiness(db, c, now):
+    """等待退避的消息仍算待处理，仅阻塞自身通道；不让成员错误关闭老师计划。"""
+    rows=db.execute("""SELECT m.sender,m.message_id FROM messages m LEFT JOIN ai_messages a
+        ON a.chat_id=m.chat_id AND a.message_id=m.message_id AND a.revision=m.revision
+        WHERE m.chat_id=? AND m.historical=0 AND m.created>=? AND m.created<=?
+        AND (a.status IS NULL OR a.status='RETRY')""",(c['chat_id'],pending_window_start(db,now),now+5)).fetchall()
+    config=dict(c,_map_message_id=state(db,'teacher_levels',{}).get('message_id'))
+    pending={message_lane(config,r) for r in rows}
+    return dict(teacher_ready='teacher' not in pending,follow_ready='follow' not in pending,
+                backlog=len(rows))
 
 
 def publish_interpretation(db, c, row, value, now, scene_managed=False):
@@ -384,11 +425,22 @@ def publish_interpretation(db, c, row, value, now, scene_managed=False):
     set_state(db,'deepseek_recent',[event]+events[:29])
 
 
-def process_ai_batch(db, c, client, now):
+def process_ai_batch(db, c, client, now, restore_scene=False):
     rows=pending_rows(db,c,now)
+    restoring=False
+    # 升级后已有消息可能全部DONE，但完整场景尚未建立。只重读本地缓存，
+    # 不导入历史记录、不修改原消息时间、不重放成员五分钟信号。
+    if restore_scene and not state(db,'teacher_scene',{}) and not state(db,'teacher_scene_initialized',False):
+        latest=db.execute("""SELECT m.*,m.rowid AS sequence,a.status AS ai_status,a.retry_at
+            FROM messages m LEFT JOIN ai_messages a
+            ON a.chat_id=m.chat_id AND a.message_id=m.message_id AND a.revision=m.revision
+            WHERE m.chat_id=? AND m.sender=? AND m.historical=0 AND m.deleted=0 AND m.created<=?
+            ORDER BY m.created DESC,m.rowid DESC LIMIT 1""",(c['chat_id'],c['teacher_sender_id'],now+5)).fetchone()
+        if latest and latest['ai_status'] in ('DONE','RETRY') and (latest['retry_at'] or 0)<=now:
+            rows=[latest];restoring=True
     if not rows:
         current=state(db,'deepseek_status',{})
-        current.update(enabled=True,at=now,backlog=0)
+        current.update(enabled=True,at=now,**lane_readiness(db,c,now))
         set_state(db,'deepseek_status',current);db.commit()
         return 0
     targets=[]
@@ -470,18 +522,24 @@ def process_ai_batch(db, c, client, now):
                             'group_map' if row['message_id']==state(db,'teacher_levels',{}).get('message_id') else 'member'))
         api_rows.append(row)
     with db:
+        readiness=lane_readiness(db,c,now)
+        if restoring:readiness['teacher_ready']=False
         set_state(db,'deepseek_status',dict(enabled=True,online=False,at=now,model=c['ai_model'],
-            error='AI正在解释新消息',backlog=len(rows)))
+            error='AI正在恢复老师完整场景' if restoring else 'AI正在解释新消息',**readiness))
     try:
+        teacher_targets=any(t['source_role']=='teacher' and not t['historical'] for t in targets)
         raw_result=client.interpret(targets,context,live_anchor,
             state(db,'teacher_levels',{}).get('levels',[]),previous_scene) if targets else {'interpretations':[]}
         if not isinstance(raw_result,dict) or set(raw_result) not in ({'interpretations'},{'interpretations','scene'}):
             raise AIError('AI根字段错误')
-        if targets and isinstance(client,DeepSeek) and 'scene' not in raw_result:
+        if teacher_targets and isinstance(client,DeepSeek) and 'scene' not in raw_result:
             raise AIError('DeepSeek未返回完整交易场景')
         output=validate_interpretations(raw_result['interpretations'],targets,context,live_anchor,'scene' in raw_result) if targets else {}
         # 整批场景也必须通过本地核验；不因逐条WATCH而静默丢掉完整语义。
-        scene=validate_scene(raw_result['scene'],[dict(t,interpretation=output[t['id']]) for t in targets],context,live_anchor,previous_scene) if 'scene' in raw_result else None
+        # 成员批即使模型误带scene，也没有更新老师场景的权限，直接忽略该字段。
+        scene=validate_scene(raw_result['scene'],[dict(t,interpretation=output[t['id']]) for t in targets],context,live_anchor,previous_scene) if teacher_targets and 'scene' in raw_result else None
+        if restoring and (not scene or scene['action']=='KEEP'):
+            raise AIError('老师初始场景未重建，等待重新理解已有发言')
         with db:
             db.execute('BEGIN IMMEDIATE')
             if scene and not refs_current(db,c['chat_id'],scene.get('source_refs',[])):
@@ -504,14 +562,13 @@ def process_ai_batch(db, c, client, now):
                     payload=excluded.payload,processed=excluded.processed,error='',retry_at=0""",
                     (c['chat_id'],row['message_id'],row['revision'],row['created'],'DONE',payload,now))
                 publish_interpretation(db,c,row,value,now,scene_managed=scene is not None)
-            if scene:
-                retained={m['message_id']:m['market_anchor'] for m in context+targets if m.get('market_anchor')}
-                keep={ref['message_id'] for ref in scene.get('source_refs',[])}
-                set_state(db,'deepseek_anchors',{key:value for key,value in retained.items() if key in keep})
+            # 保存各消息原时点数量级；KEEP/成员批不再清掉老师旧锚点。
+            anchors.update({m['message_id']:m['market_anchor'] for m in context+targets if m.get('market_anchor')})
+            set_state(db,'deepseek_anchors',anchors)
             publish_scene(db,c,scene)
+            if restoring:set_state(db,'teacher_scene_initialized',True)
             set_state(db,'deepseek_status',dict(enabled=True,online=True,at=now,last_success=now,
-                model=c['ai_model'],backlog=1 if pending_rows(db,c,now) or db.execute(
-                    "SELECT 1 FROM ai_messages a JOIN messages m ON m.chat_id=a.chat_id AND m.message_id=a.message_id AND m.revision=a.revision WHERE a.status='RETRY' AND m.deleted=0 LIMIT 1").fetchone() else 0,
+                model=c['ai_model'],**lane_readiness(db,c,now),
                 error='',processed=len(rows)))
         logging.info('DeepSeek完成%d条消息解释，结果已本地校验',len(rows))
         return len(rows)
@@ -526,7 +583,7 @@ def process_ai_batch(db, c, client, now):
                     ON CONFLICT(chat_id,message_id,revision) DO UPDATE SET status='RETRY',
                     processed=excluded.processed,attempts=excluded.attempts,retry_at=excluded.retry_at,error=excluded.error""",
                     (c['chat_id'],row['message_id'],row['revision'],row['created'],'RETRY',now,attempts,retry,str(ex)))
-            set_state(db,'deepseek_status',dict(enabled=True,online=False,at=now,model=c['ai_model'],error=str(ex),backlog=len(rows)))
+            set_state(db,'deepseek_status',dict(enabled=True,online=False,at=now,model=c['ai_model'],error=str(ex),**lane_readiness(db,c,now)))
         logging.warning('AI解释暂不可用：%s；保留队列，退避重试',ex)
         return 0
 
@@ -539,7 +596,7 @@ def ai_worker(home, c, stop):
         while not stop.is_set():
             try:
                 if not (Path(home)/'control/pause').exists():
-                    process_ai_batch(db,c,client,time.time())
+                    process_ai_batch(db,c,client,time.time(),restore_scene=True)
             except (sqlite3.Error,OSError,ValueError,TypeError) as ex:
                 logging.warning('AI后台异常：%s',type(ex).__name__)
                 with db:set_state(db,'deepseek_status',dict(enabled=True,online=False,at=time.time(),error='AI后台异常，等待重试',backlog=1))
@@ -569,7 +626,8 @@ def ai_snapshot(db, c, now, paused):
             source_ok=False;reason='关联点位来源已编辑/撤回，等待新解释'
     # 新完整地图使此前方向参考退出；不会回退复活更旧方向。
     source_ok=source_ok and not (full.get('created',0)>setup.get('created',0))
-    if c.get('ai_enabled') and status.get('online') and now-status.get('at',0)<=30 and not status.get('backlog') and source_ok and healthy and not paused:
+    ready=status.get('teacher_ready',bool(status.get('online') and not status.get('backlog')))
+    if c.get('ai_enabled') and ready and now-status.get('at',0)<=30 and source_ok and healthy and not paused:
         mode=setup['mode'];reason=setup['reason'];plans=setup.get('plans',[])
         active=mode in ('MAP','SETUP')
     review=state(db,'deepseek_review',{})
@@ -604,7 +662,8 @@ def member_follow_snapshot(db, c, now, paused):
         result['reason']='起飞参考或关联方向已编辑/撤回'; return result
     status=state(db,'deepseek_status',{})
     healthy=state(db,'last_sync_ok',False) and now-state(db,'last_sync_at',0)<=c['sync_max_age_seconds'] and now-state(db,'checkpoint',0)<=c['sync_max_age_seconds']
-    if paused or not c.get('ai_enabled') or not status.get('online') or status.get('backlog') or now-status.get('at',0)>30 or not healthy:
+    ready=status.get('follow_ready',bool(status.get('online') and not status.get('backlog')))
+    if paused or not c.get('ai_enabled') or not ready or now-status.get('at',0)>30 or not healthy:
         result['reason']='监控/AI未就绪，暂停起飞跟随'; return result
     result.update(active=True,plans=setup['plans'],reason=setup['reason'],remaining=max(0,int(setup['created']+FOLLOW_TTL-now)))
     return result

@@ -78,6 +78,13 @@ class SceneTests(unittest.TestCase):
     def test_old_market_instruction_is_not_replayed_by_new_scene(self):
         targets,context,scene=example();scene['plans'][0]['mode']='MARKET'
         with self.assertRaises(AIError):validate_scene(scene,targets,context,4181)
+    def test_price_token_cannot_be_cut_out_of_larger_number_or_indicator_period(self):
+        for evidence,token in [('多单等到4175行动','75'),('多单MA 75','75')]:
+            targets,context,scene=example()
+            targets[0]['text']=evidence
+            scene['plans'][0].update(token=token,price_evidence=evidence,direction_evidence=evidence)
+            with self.subTest(evidence=evidence),self.assertRaises(AIError):
+                validate_scene(scene,targets,context,4181)
     def test_retained_tail_price_keeps_original_magnitude(self):
         targets,context,scene=example();old=validate_scene(scene,targets,context,4181)
         targets[0]['market_anchor']=0;targets[1]['market_anchor']=0
@@ -161,6 +168,102 @@ class SceneWorkerTests(DatabaseFixture):
         process_ai_batch(self.db,self.c,Mock(interpret=changed),self.now)
         self.assertIsNone(state(self.db,'teacher_scene'))
         self.assertEqual(self.db.execute("SELECT count(*) FROM ai_messages WHERE status='DONE'").fetchone()[0],0)
+
+    def test_member_scene_is_ignored_and_does_not_interrupt_teacher_during_request(self):
+        process_ai_batch(self.db,self.c,Mock(interpret=self.scene_case()),self.now)
+        before=state(self.db,'teacher_scene')
+        self.seed(mid='member',text='赞',sender='ou_other',age=0)
+        def response(targets,*args):
+            self.assertTrue(ai_snapshot(self.db,self.c,self.now,False)['active'])
+            return dict(interpretations=[result(kind='DISCUSSION')],scene={'action':'UPDATE','as_of':'invented'})
+        self.assertEqual(process_ai_batch(self.db,self.c,Mock(interpret=response),self.now),1)
+        self.assertEqual(state(self.db,'teacher_scene'),before)
+        self.assertTrue(ai_snapshot(self.db,self.c,self.now,False)['active'])
+
+    def test_member_failure_backoff_and_follow_failure_do_not_block_teacher(self):
+        process_ai_batch(self.db,self.c,Mock(interpret=self.scene_case()),self.now)
+        self.c['follow_sender_id']='ou_follower'
+        self.seed(mid='member',text='赞',sender='ou_other',age=0)
+        self.seed(mid='follow',text='整整75',sender='ou_follower',age=0)
+        failed=Mock(interpret=Mock(side_effect=AIError('成员解析失败')))
+        process_ai_batch(self.db,self.c,failed,self.now)
+        process_ai_batch(self.db,self.c,failed,self.now)
+        process_ai_batch(self.db,self.c,failed,self.now+2)
+        self.assertEqual(failed.interpret.call_count,2)
+        self.assertTrue(ai_snapshot(self.db,self.c,self.now+2,False)['active'])
+        status=state(self.db,'deepseek_status')
+        self.assertFalse(status['follow_ready'])
+        self.assertEqual(status['backlog'],2)
+        self.assertEqual(status['error'],'成员解析失败')
+
+    def test_teacher_and_member_are_never_in_same_batch_and_teacher_goes_first(self):
+        self.seed(mid='member',text='赞',sender='ou_other',age=40)
+        response=self.scene_case()
+        self.assertEqual(process_ai_batch(self.db,self.c,Mock(interpret=response),self.now),3)
+        self.assertTrue(ai_snapshot(self.db,self.c,self.now,False)['active'])
+        self.assertIsNone(self.db.execute("SELECT status FROM ai_messages WHERE message_id='member'").fetchone())
+
+    def test_new_teacher_failure_still_blocks_existing_plan_during_backoff(self):
+        process_ai_batch(self.db,self.c,Mock(interpret=self.scene_case()),self.now)
+        self.seed(mid='change',text='取消多单',age=0)
+        failed=Mock(interpret=Mock(side_effect=AIError('老师新指令解析失败')))
+        process_ai_batch(self.db,self.c,failed,self.now)
+        process_ai_batch(self.db,self.c,failed,self.now+2)
+        self.assertFalse(ai_snapshot(self.db,self.c,self.now+2,False)['active'])
+        self.assertEqual(state(self.db,'deepseek_status')['backlog'],1)
+
+    def test_restore_done_teacher_messages_once_without_replaying_follow_or_orders(self):
+        self.scene_case()
+        # 模拟旧版已逐条解析、只有空单但没有完整场景的数据库。
+        process_ai_batch(self.db,self.c,self.client('WATCH'),self.now)
+        with self.db:
+            set_state(self.db,'teacher_analysis',{'quote':{'bid':4300,'ask':4301,'at':self.now+3600},'bars':[]})
+        def restored(targets,context,*args):
+            self.assertEqual([t['message_id'] for t in targets],['range'])
+            by_id={m['message_id']:m for m in context}
+            self.assertAlmostEqual(by_id['buy']['market_anchor'],4181.1)
+            scene=dict(as_of='range',action='UPDATE',regime='UNKNOWN',regime_ref=None,
+                plans=[plan('BUY','75',4175,'buy','多单等到75行动'),plan('SELL','93',4193,'sell','上去93可↓')],
+                inner_range=None,outer_range=None,summary='恢复已有双向计划')
+            return dict(interpretations=[result(kind='WATCH')],scene=scene)
+        client=Mock(interpret=restored)
+        self.assertEqual(process_ai_batch(self.db,self.c,client,self.now+3600,restore_scene=True),1)
+        scene=state(self.db,'teacher_scene')
+        self.assertEqual([p['price'] for p in scene['plans']],[4175,4193])
+        self.assertLess(scene['plans'][0]['origin_created'],self.now)
+        self.assertTrue(state(self.db,'teacher_scene_initialized'))
+        self.assertEqual(process_ai_batch(self.db,self.c,client,self.now+3602,restore_scene=True),0)
+        self.assertIsNone(state(self.db,'member_follow_setups'))
+        self.assertEqual(self.db.execute('SELECT count(*) FROM orders').fetchone()[0],0)
+
+    def test_restore_keep_is_retried_with_backoff_instead_of_silently_initialized(self):
+        self.seed();process_ai_batch(self.db,self.c,self.client('WATCH'),self.now)
+        keep=dict(as_of='om_test',action='KEEP',regime='UNKNOWN',regime_ref=None,plans=[],inner_range=None,outer_range=None,summary='沿用')
+        client=Mock(interpret=Mock(return_value=dict(interpretations=[result(kind='WATCH')],scene=keep)))
+        self.assertEqual(process_ai_batch(self.db,self.c,client,self.now,restore_scene=True),0)
+        process_ai_batch(self.db,self.c,client,self.now+2,restore_scene=True)
+        self.assertEqual(client.interpret.call_count,1)
+        self.assertFalse(state(self.db,'teacher_scene_initialized',False))
+        self.assertFalse(ai_snapshot(self.db,self.c,self.now+2,False)['active'])
+
+    def test_restore_does_not_promote_historical_imports(self):
+        self.seed(historical=True)
+        process_ai_batch(self.db,self.c,self.client('WATCH'),self.now)
+        client=Mock(interpret=Mock(side_effect=AssertionError('不能重放历史导入')))
+        self.assertEqual(process_ai_batch(self.db,self.c,client,self.now,restore_scene=True),0)
+        client.interpret.assert_not_called()
+
+    def test_old_unprocessed_chat_does_not_block_but_cross_midnight_source_edit_does(self):
+        from deepseek_ai import pending_rows,lane_readiness
+        self.seed(mid='old-chat',text='旧的聊天',age=3*86400)
+        process_ai_batch(self.db,self.c,Mock(interpret=self.scene_case()),self.now)
+        self.assertTrue(lane_readiness(self.db,self.c,self.now)['teacher_ready'])
+        import json
+        raw=json.loads(self.db.execute("SELECT raw FROM messages WHERE message_id='buy'").fetchone()[0])
+        ingest(self.db,'oc_test',[dict(raw,content='取消多单',update_time='edited-next-day')])
+        tomorrow=self.now+86400
+        self.assertEqual([r['message_id'] for r in pending_rows(self.db,self.c,tomorrow)],['buy'])
+        self.assertFalse(lane_readiness(self.db,self.c,tomorrow)['teacher_ready'])
 
 
 # 复用夹具而不重复执行从父类继承的已有测试。
