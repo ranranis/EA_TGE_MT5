@@ -111,7 +111,8 @@ class SceneTests(unittest.TestCase):
         targets[-1]['revision']='new-range-version';b=validate_scene(scene,targets,context,4181)
         self.assertEqual(a['plans'][0]['origin_revision'],b['plans'][0]['origin_revision'])
         targets[0]['revision']='new-direction-version';c=validate_scene(scene,targets,context,4181)
-        self.assertNotEqual(a['plans'][0]['origin_revision'],c['plans'][0]['origin_revision'])
+        self.assertEqual(a['plans'][0]['origin_revision'],c['plans'][0]['origin_revision'])
+        self.assertNotEqual(a['source_refs'],c['source_refs'])
     def test_fabricated_price_direction_future_member_and_historical_sources_fail(self):
         for change in ['price','direction','future','member','historical']:
             targets,context,scene=example()
@@ -130,7 +131,7 @@ class SceneTests(unittest.TestCase):
             if change=='duplicate':scene['plans'].append(copy.deepcopy(scene['plans'][0]))
             with self.subTest(change=change),self.assertRaises(AIError):validate_scene(scene,targets,context,4181)
     def test_prior_cancel_and_new_map_cannot_be_ignored(self):
-        for kind,side in [('CANCEL','ALL'),('CANCEL','BUY'),('MAP','NONE')]:
+        for kind,side in [('CANCEL','ALL'),('CANCEL','BUY')]:
             targets,context,scene=example()
             context.append(dict(message('stop','取消多单参考',4),interpretation=dict(kind=kind,cancel_side=side)))
             with self.subTest(kind=kind),self.assertRaises(AIError):validate_scene(scene,targets,context,4181)

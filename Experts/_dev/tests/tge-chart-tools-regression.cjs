@@ -413,7 +413,8 @@ check('combo captions follow configured MA periods and templates never set chart
 resetIndicators();resetHits();props.set('width',1000);props.set('height',1000);
 let backBuffer=[],frames=[];
 Object.assign(cx,{
- uiCollapsed:false,uiIndicators:false,uiStatistics:false,levels:[],启用真实交易:false,
+ uiCollapsed:false,uiIndicators:false,uiStatistics:false,levels:[],启用真实交易:false,followMembers:[],aiSource:'',TEACHER_BAND:2,
+ FollowMemberCaption:i=>cx.followMembers[i].name+' · 独立学生状态',
  UI_ROOT:3,UI_CARD:4,UI_ROW:5,UI_TEXT:6,UI_DIM:7,UI_WARN:8,UI_BORDER:9,UI_GAIN:10,UI_LOSS:11,UI_SELL:12,
  PositionsTotal:()=>0,EnsurePanel:h=>{cx.panelHeight=h;return true;},UIInk:v=>v,UIRound:()=>{},
  panelCanvas:{Erase:()=>{backBuffer=[];},FillRectangle:()=>{},Update:()=>{frames.push(backBuffer.slice());}},

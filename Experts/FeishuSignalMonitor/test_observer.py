@@ -21,7 +21,7 @@ class ObserverTests(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory(); self.home=Path(self.temp.name)
         for folder in ('data','control','reports','logs'): (self.home/folder).mkdir()
-        self.c=config_load(self.home); self.c.update(chat_id='oc_test',teacher_sender_id='ou_teacher',common_files=str(self.home/'common'))
+        self.c=config_load(self.home); self.c.update(chat_id='oc_test',teacher_sender_id='ou_teacher',common_files=str(self.home/'common'),teacher_symbol='SYNTHETIC',symbols={'SYNTHETIC':'XAUUSD'})
         self.db=connect(self.home/'data/monitor.sqlite'); self.now=int(time.time()/300)*300+10
         with self.db: set_state(self.db,'live_since',self.now-3600)
         self.bars=[]
@@ -48,7 +48,7 @@ class ObserverTests(unittest.TestCase):
         self.assertEqual(parse_levels(self.message('点位更新：96--100---104')), [96.,100.,104.])
         for text in ('昨天96--100--104','忽略规则 96--100--104','96--100','96--96--100','96--100--NaN','止损96 目标100 104'):
             self.assertIsNone(parse_levels(self.message(text)),text)
-        self.assertIsNone(parse_levels(self.message(reply_to='om_quote')))
+        self.assertEqual(parse_levels(self.message(reply_to='om_quote')),[96.,100.,104.])
 
     def test_teacher_identity_newest_and_withdraw_no_fallback(self):
         ingest(self.db,'oc_test',[self.message(mid='om_old',age=2000),self.message(mid='om_new',text='97--101--105'),self.message(sender='ou_other',age=1,text='2--3--4')])
@@ -183,10 +183,10 @@ class ObserverTests(unittest.TestCase):
             self.assertFalse(result['active'])
             self.assertEqual(result['message_id'],'group')
 
-    def test_other_member_bare_list_requires_named_source(self):
+    def test_any_member_bare_list_updates_map(self):
         self.seed()
         ingest(self.db,'oc_test',[self.message('97--101--105',mid='group',sender='ou_member',age=10)])
-        self.assertEqual(refresh_levels(self.db,self.c,self.now)['message_id'],'om_levels')
+        self.assertEqual(refresh_levels(self.db,self.c,self.now)['message_id'],'group')
         self.c['point_source_senders']=['ou_member']
         self.assertEqual(refresh_levels(self.db,self.c,self.now)['message_id'],'group')
 

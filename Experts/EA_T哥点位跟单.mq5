@@ -1,5 +1,5 @@
 #property strict
-#property version "1.34"
+#property version "1.35"
 #property description "T哥点位地图 / M5 MA5 / M1收线 / 0.02手分批。独立Magic，仅管理本EA持仓。"
 #include <Trade/Trade.mqh>
 #include <Canvas/Canvas.mqh>
@@ -17,6 +17,12 @@ input bool   读取AI即时策略=true;     // 读取本地DeepSeek语义桥；�
 input group "起飞 · 5分钟个人跟随"
 input bool   启用起飞跟随=true;
 input double 起飞最大追价价格差=2.00; // 达到此不利价差即跳过；有利价格仍可跟，单笔沿用0.02配置
+input bool   启用其他学生跟随=true; // 按监控端真实账号名单分别启用
+input group "T哥近价 · 实时冲击检查"
+input int    冲击短窗毫秒=3000;
+input double 逆向冲击速度=0.60;       // 黄金报价价格差/秒，只检查对当前方向不利的净速度
+input double 冲击单向比例=0.85;
+input double 恢复回拉价格=0.35;
 input group "T哥点位节奏与退出"
 input bool   允许震荡点位反应=true;
 input double 保险价格距离=10.0;
@@ -94,6 +100,8 @@ struct Pending
    datetime at,bar;
    double volume,sl,tp,level;
    int direction;
+   bool fast;
+   uint originHash;
 };
 Pending pending;
 struct Candidate
@@ -102,7 +110,8 @@ struct Candidate
    int direction;
    double level;
    datetime bar,followExpiry;
-   string method,followKey;
+   string method,followKey,aiKey;
+   uint originHash;
 };
 
 uint Hash(const string text)
@@ -142,6 +151,7 @@ void SavePending()
    Store("at",(double)pending.at); Store("bar",(double)pending.bar);
    Store("volume",pending.volume); Store("sl",pending.sl); Store("tp",pending.tp);
    Store("level",pending.level); Store("direction",pending.direction);
+   Store("fast",pending.fast ? 1 : 0); Store("originHash",(double)pending.originHash);
    Store("kind",pending.kind); GlobalVariablesFlush();
 }
 void ClearPending()
@@ -154,6 +164,7 @@ void RestorePending()
    pending.position=(ulong)Load("position"); pending.at=(datetime)Load("at"); pending.bar=(datetime)Load("bar");
    pending.volume=Load("volume"); pending.sl=Load("sl"); pending.tp=Load("tp");
    pending.level=Load("level"); pending.direction=(int)Load("direction");
+   pending.fast=Load("fast")==1; pending.originHash=(uint)Load("originHash");
 }
 bool CanExecute()
 {
@@ -297,7 +308,9 @@ bool ReadFeed()
    bool active=head[3]=="1";
    if(active && (n<3 || head[5]=="" || head[6]=="" || head[10]=="")) return false;
    string next=head[5]+"|"+head[6];
-   if(next!=identity || active!=feedActive)
+   bool sameLevels=n==ArraySize(levels);
+   for(int i=0;i<n && sameLevels;i++) if(incoming[i]!=levels[i]) sameLevels=false;
+   if(!sameLevels || active!=feedActive)
    {
       readyFrom=TimeCurrent(); // 新版本/恢复后必须等随后完整形成的M1，不能追认历史K线。
       ZeroMemory(entryView); reason="点位状态变更，等待随后完整M1";
@@ -369,13 +382,14 @@ bool BreakRetest(const MqlRates &last,const MqlRates &breakbar,const MqlRates &b
    return before.close>=level && breakbar.close<level-escape &&
           last.high<=level+tolerance && last.high>=level-tolerance && last.close<level-escape;
 }
-bool Target(const double entry,const int sign,double &tp,const bool mapOnly=false)
+bool Target(const double entry,const int sign,double &tp,const bool mapOnly=false,const double reference=0)
 {
    double distance=尾仓目标价格距离;
    if(!mapOnly && 读取AI即时策略 && aiReady && aiMode=="SETUP")
    {
       for(int i=0;i<ArraySize(aiPlans);i++)
       {
+         if(reference>0 && MathAbs(aiPlans[i].level-reference)<=TickSize()) continue;
          double gap=sign*(aiPlans[i].level-entry);
          if(gap>TickSize()) distance=MathMin(distance,gap-MathMax(0.20,TickSize()*2));
       }
@@ -494,8 +508,8 @@ bool Signal(Candidate &out)
    // 优先级：老师明确点位 -> 独立地图支撑/压力反应 -> 同向突破延续。
    if(continuation)
    {
-      if(AISignal(m1[0],quote,out)) return true;
-      directReason=reason;
+      if(TeacherOwnsZone(quote)) { reason="老师近价区域优先："+reason; return false; }
+      directReason="老师明确计划使用独立实时通道";
    }
    if(continuation && MapReaction(m1[0],m1[1],m5[0],quote,out)) return true;
    string reactionReason=reason;
@@ -601,8 +615,16 @@ void RecordResult()
    PrintFormat("[T哥请求] 动作=%d retcode=%u order=%I64u deal=%I64u %s",
                 pending.kind,code,pending.order,execution.ResultDeal(),execution.ResultComment());
    DecisionLog("REQUEST_RESULT",execution.ResultComment(),code,execution.ResultDeal());
-   if(ExplicitReject(code)) { ClearPending(); reason="请求被明确拒绝，见日志"; }
-   else { SavePending(); reason="请求已发送，等待真实成交/持仓确认"; } // 未知结果不补发
+   if(ExplicitReject(code))
+   {
+      if(pending.kind==1 && pending.fast)
+      {
+         string key=AIKeyFromHash(pending.originHash,pending.level,pending.direction);
+         Store(key,0); Store(key+"r",(double)(TimeGMT()+5)); GlobalVariablesFlush();
+      }
+      ClearPending(); reason="请求被明确拒绝；老师5秒后可复查，学生本条不再尝试";
+   }
+   else { if(pending.kind==1) MergeOpportunity(pending.direction,pending.level); SavePending(); reason="请求已发送，等待真实成交/持仓确认"; } // 未知结果不补发
 }
 string EntryTag() { return "TG"+IntegerToString((long)pending.bar)+"_"+IntegerToString((long)Hash(DoubleToString(pending.level,_Digits))); }
 bool FinalOrderConfirmed(const ulong order)
@@ -680,7 +702,21 @@ void Reconcile()
       if(match>0 && !ambiguous) { pending.order=match; SavePending(); }
    }
    if(pending.order>0 && FinalOrderConfirmed(pending.order))
-   { DecisionLog("ORDER_RECONCILED","终态订单与实际Deal量已对账（不代表全量成交）"); ClearPending(); reason="请求已对账，等待下一根收线"; }
+   {
+      if(pending.kind==1)
+      {
+         // 返回结果写回前重启，也由真实订单/Deal对账补齐同机会合并状态。
+         double filled=HistoryOrderGetDouble(pending.order,ORDER_VOLUME_INITIAL)-HistoryOrderGetDouble(pending.order,ORDER_VOLUME_CURRENT);
+         if(filled>1e-8) MergeOpportunity(pending.direction,pending.level);
+         else if(pending.fast)
+         {
+            string key=AIKeyFromHash(pending.originHash,pending.level,pending.direction);
+            Store(key,0); Store(key+"r",(double)(TimeGMT()+5));
+            Store(SharedVisitKey(pending.level,pending.direction),0); GlobalVariablesFlush();
+         }
+      }
+      DecisionLog("ORDER_RECONCILED","终态订单与实际Deal量已对账（不代表全量成交）"); ClearPending(); reason="请求已对账，等待下一机会";
+   }
    if(pending.kind!=0 && TimeCurrent()-pending.at>30)
       reason="请求尚未完成服务器对账，暂停新请求（查看日志）";
 }
@@ -688,14 +724,23 @@ void Open(const Candidate &signal)
 {
    string blocked=ExecutionBlock();
    if(!CanExecute() || blocked!="") { reason=blocked=="" ? "执行条件未就绪" : blocked; return; }
-   if((datetime)Load("attemptBar")>=signal.bar) { reason="本根M1已发送过请求"; return; }
-   string visit=signal.follow ? signal.followKey : signal.ai ? AIVisitKey(signal.level,signal.direction) : VisitKey(signal.level);
+   if(!signal.ai && !signal.follow && (datetime)Load("attemptBar")>=signal.bar) { reason="本根M1已发送过请求"; return; }
+   string visit=signal.follow ? signal.followKey : signal.ai ? signal.aiKey : VisitKey(signal.level);
    if(Load(visit)>0) { reason="本点位机会已消费"; return; }
    MqlTick q;
    if(!FreshQuote(q)) { signalRetry=true; reason="发送前报价失效，窗口内重试"; return; }
    if(signal.follow && (TimeGMT()>=signal.followExpiry || !followReady || signal.followKey!=FollowVisitKey() ||
-      TimeGMT()-followGenerated>10 || !FollowPriceAllowed(q)))
-   { reason="起飞消息已过期/变更或价格错过，取消跟随"; return; }
+      TimeGMT()-followGenerated>10 || !FollowPriceAllowed(q) || TeacherOwnsZone(q) || SameOpportunity(signal.direction,signal.level)))
+   { reason="学生来源已变更/过期/错过，或老师优先/同机会合并"; return; }
+   if(signal.ai)
+   {
+      bool allowed=false;
+      for(int i=0;i<ArraySize(aiPlans);i++)
+         if(aiPlans[i].sign==signal.direction && aiPlans[i].level==signal.level && AIVisitKey(signal.level,signal.direction)==signal.aiKey)
+            allowed=TeacherEntryAllowed(i,q);
+      if(!allowed) { reason="发送前老师来源/区域/冲击检查未通过"; return; }
+   }
+   else if(!signal.follow && TeacherOwnsZone(q)) { reason="发送前老师明确区域优先"; return; }
    if(q.ask-q.bid>最大点差价格) { reason="发送前点差超过上限"; return; }
    if(!ExactLot(每次开仓手数)) { reason="开仓手数不符合券商规格"; return; }
    int sign=signal.direction;
@@ -703,16 +748,33 @@ void Open(const Candidate &signal)
    // 成员跟随沿用现有10点尾仓/5点分批退出，不把老师地图障碍当成他的入场价。
    bool targetOK=true;
    if(signal.follow) tp=Align(entry+sign*尾仓目标价格距离,-sign);
-   else targetOK=Target(entry,sign,tp,!signal.ai);
+   else targetOK=Target(entry,sign,tp,!signal.ai,signal.ai ? signal.level : 0);
    if(!targetOK || !Stops(sign,sl,tp,q)) { reason="价格保护不符合券商规格"; return; }
    ENUM_ORDER_TYPE type=sign>0 ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
    double margin=0;
    if(!OrderCalcMargin(type,_Symbol,每次开仓手数,entry,margin) || margin>AccountInfoDouble(ACCOUNT_MARGIN_FREE))
    { reason="可用保证金不足"; return; }
-   if(signal.follow && TimeGMT()>=signal.followExpiry) { reason="起飞消息超过5分钟"; return; }
-   Store("attemptBar",(double)signal.bar); Store(visit,(double)signal.bar);
+   // 保证金/规格计算后再次取得实时报价；变化时交回下一tick重新生成候选，不沿用旧价格。
+   MqlTick finalQuote;
+   if(!FreshQuote(finalQuote) || finalQuote.ask-finalQuote.bid>最大点差价格)
+   { reason="提交前报价过期或点差超限"; return; }
+   if(signal.follow && (TimeGMT()>=signal.followExpiry || !FollowPriceAllowed(finalQuote) || TeacherOwnsZone(finalQuote)))
+   { reason="提交前学生参考过期/永久错过或老师区域优先"; return; }
+   if(signal.ai)
+   {
+      RememberFastTick(finalQuote); bool stillAllowed=false;
+      for(int i=0;i<ArraySize(aiPlans);i++)
+         if(aiPlans[i].sign==signal.direction && aiPlans[i].level==signal.level && AIVisitKey(signal.level,signal.direction)==signal.aiKey)
+            stillAllowed=TeacherEntryAllowed(i,finalQuote);
+      if(!stillAllowed) { reason="提交前老师允许区域/冲击已变化"; return; }
+   }
+   if(MathAbs((sign>0 ? finalQuote.ask : finalQuote.bid)-entry)>TickSize()*0.5)
+   { reason="提交前执行价格变化，下一报价重新评估"; return; }
+   if(!signal.ai && !signal.follow) Store("attemptBar",(double)signal.bar);
+   Store(visit,(double)(signal.follow ? 1 : signal.bar));
    ZeroMemory(pending); pending.kind=1; pending.at=TimeCurrent(); pending.bar=signal.bar;
    pending.volume=每次开仓手数; pending.sl=sl; pending.tp=tp; pending.level=signal.level; pending.direction=sign;
+   pending.fast=signal.ai; pending.originHash=signal.originHash;
    SavePending(); if(!CanExecute()) { reason="请求意图已保存，但执行条件失效，待核对"; return; }
    DecisionLog("REQUEST_INTENT",signal.method);
    execution.PositionOpen(_Symbol,type,每次开仓手数,entry,sl,tp,EntryTag());
@@ -1302,11 +1364,11 @@ void Panel()
    int planCount=读取AI即时策略 && aiReady && aiMode=="SETUP" ? ArraySize(aiPlans) : 0;
    int planRows=MathMax((planCount+1)/2,1);
    int pointRows=MathMax((ArraySize(levels)+5)/6,1);
-   int heroY=180,heroHeight=56+planRows*68;
+   int heroY=180,heroHeight=56+planRows*104;
    int decisionY=heroY+heroHeight+12,positionY=decisionY+88;
    int mapY=positionY+24+MathMax(visible,1)*rowHeight+10;
    int mapHeight=62+pointRows*28;
-   int height=uiCollapsed ? 122 : uiStatistics ? (statsDetail==2 ? 650 : 570) : uiIndicators ? 592 : mapY+mapHeight+64;
+   int height=uiCollapsed ? 122 : uiStatistics ? (statsDetail==2 ? 650 : 570) : uiIndicators ? 592 : mapY+mapHeight+64+MathMax(ArraySize(followMembers)-1,0)*16;
    if(!EnsurePanel(height)) return;
    ArrayResize(uiHits,0);
    panelCanvas.Erase(UIInk(UI_ROOT));
@@ -1314,7 +1376,7 @@ void Panel()
    panelCanvas.FillRectangle(0,0,UIPx(559),UIPx(39),UIInk(UI_HEADER));
    string pageTitle=uiStatistics ? "交易统计" : uiIndicators ? "看盘设置" : "T哥点位监控";
    UIText(_Symbol+" · "+pageTitle,16,10,222,11,UI_TEXT);
-   UIText("v1.34",242,13,40,8,UI_DIM);
+   UIText("v1.35",242,13,40,8,UI_DIM);
    UIText(TimeToString(TimeGMT()+8*3600,TIME_SECONDS),286,12,100,10,UI_MUTED,true);
    UIButton(uiCollapsed ? "+" : "−",396,7,30,1);
    UIText(启用真实交易 ? "交易模式" : "观察模式",434,13,110,9,启用真实交易 ? UI_ACCENT : UI_WARN,true);
@@ -1322,7 +1384,7 @@ void Panel()
    ObjectSetString(0,VIEW+"CANVAS",OBJPROP_TOOLTIP,
                    "拖动标题移动面板；−收起 / +展开 · "+feedStatus+
                    " · 来源 "+sourceSender+" · 消息 "+identity+
-                   " · "+uiIndicatorNotice+" · 手机TP标记："+markerStatus);
+                   " · 老师来源 "+aiSource+" · "+uiIndicatorNotice+" · 手机TP标记："+markerStatus);
    if(uiCollapsed)
    {
       string compact=uiStatistics ? "统计页 · 点击 + 展开" :
@@ -1355,13 +1417,15 @@ void Panel()
    if(planCount>0)
       for(int i=0;i<planCount;i++)
       {
-         int x=24+(i%2)*260,y=heroY+40+(i/2)*68;
+         int x=24+(i%2)*260,y=heroY+40+(i/2)*104;
          bool buy=aiPlans[i].sign>0;
          color ink=buy ? UI_ACCENT : UI_SELL;
-         UIRound(x,y,252,58,buy ? C'20,47,44' : C'36,32,53');
+         UIRound(x,y,252,94,buy ? C'20,47,44' : C'36,32,53');
          UIText(buy ? "BUY / 多" : "SELL / 空",x+12,y+8,104,9,ink);
          UIText(DoubleToString(aiPlans[i].level,_Digits),x+12,y+27,148,18,UI_TEXT);
-         UIText(aiPlans[i].market ? "市价指令" : "到位观察",x+160,y+34,80,8,ink,true);
+         UIText(aiPlans[i].market ? "即时市价" : "实时近价",x+160,y+34,80,8,ink,true);
+          UIText(StringFormat("允许 %.2f—%.2f",aiPlans[i].level-TEACHER_BAND,aiPlans[i].level+TEACHER_BAND),x+12,y+58,228,8,UI_MUTED);
+          UIText(aiPlans[i].status,x+12,y+76,228,7.5,UI_MUTED);
       }
    else
    {
@@ -1373,7 +1437,7 @@ void Panel()
    string trendText=!entryView.ready ? "等待数据" : trend>0 ? "M5偏多" : trend<0 ? "M5偏空" : "M5震荡";
    UIText("当前判断",16,decisionY+3,106,9,UI_DIM);
    UIText(trendText,132,decisionY+3,132,9,UI_MUTED);
-   UIText(entryView.ready ? (entryView.reaction ? "M1反应已确认" : "等待M1反应") : "等待收线",
+   UIText(entryView.method=="T哥实时近价" ? (entryView.reaction ? "tick检查已通过" : "实时tick观察") : entryView.ready ? (entryView.reaction ? "M1反应已确认" : "等待M1反应") : "等待数据",
           336,decisionY+3,204,9,entryView.ready && entryView.reaction ? UI_ACCENT : UI_MUTED,true);
    UIText(reason,16,decisionY+25,526,12,UI_TEXT);
    string detail=entryView.ready ? StringFormat("%s参考 %.2f  ·  距点位 %.2f",
@@ -1415,7 +1479,7 @@ void Panel()
    // 地图作为次要参考，使用轻量分隔与数字，避免与即时方向争夺视觉注意力。
    UIRound(12,mapY,536,mapHeight,UI_HEADER);
    UIText("完整点位地图",28,mapY+11,180,10,UI_MUTED);
-   string source=sourceKind=="teacher" ? "T哥原文" : sourceKind=="" ? "等待来源" : "群友转述";
+   string source=sourceKind=="teacher" ? "T哥原文" : sourceKind=="" ? "等待来源" : "群成员地图";
    string sourceAt=sourceTime>0 ? TimeToString(sourceTime+8*3600,TIME_DATE|TIME_MINUTES) : "尚未同步";
    UIText(source+" · "+sourceAt,220,mapY+12,312,8,UI_DIM,true);
    for(int i=0;i<ArraySize(levels);i++)
@@ -1427,14 +1491,19 @@ void Panel()
    if(gate=="" && feedActive && !FreshQuote(displayQuote)) gate="报价过期/断线，暂停新请求";
    else if(gate=="" && feedActive && displayQuote.ask-displayQuote.bid>最大点差价格) gate="当前点差超过上限";
    if(gate=="") gate=feedActive ? "按策略条件等待机会" : "等待有效点位地图";
-   UIText(FollowCaption(),16,height-49,526,8,UI_DIM);
+   if(ArraySize(followMembers)==0) UIText(FollowCaption(),16,height-49,526,8,UI_DIM);
+   else for(int i=0;i<ArraySize(followMembers);i++)
+      UIText(FollowMemberCaption(i),16,mapY+mapHeight+15+i*16,526,8,UI_DIM);
    UIText("执行 · "+gate,16,height-29,526,9,pending.kind!=0 ? UI_WARN : UI_MUTED);
    panelCanvas.Update();
 }
 int OnInit()
 {
    if(每次开仓手数<=0 || 最大同时持仓<1 || 最大同时持仓>10 ||
-      最大点差价格<=0 || 起飞最大追价价格差<=0 || !MathIsValidNumber(起飞最大追价价格差) ||
+      冲击短窗毫秒<1000 || 冲击短窗毫秒>10000 || !MathIsValidNumber(逆向冲击速度) || 逆向冲击速度<=0 ||
+       !MathIsValidNumber(冲击单向比例) || 冲击单向比例<=0.5 || 冲击单向比例>1 ||
+       !MathIsValidNumber(恢复回拉价格) || 恢复回拉价格<=0 ||
+       最大点差价格<=0 || 起飞最大追价价格差<=0 || !MathIsValidNumber(起飞最大追价价格差) ||
       保险价格距离<=0 || 首批止盈价格距离<=0 || 尾仓目标价格距离<=首批止盈价格距离 ||
       TickSize()<=0 || !ExactLot(每次开仓手数))
       return INIT_PARAMETERS_INCORRECT;
@@ -1456,17 +1525,21 @@ int OnInit()
    execution.SetTypeFillingBySymbol(_Symbol); execution.SetAsyncMode(false);
    maHandle=iMA(_Symbol,PERIOD_M5,5,0,MODE_SMA,PRICE_CLOSE); atrHandle=iATR(_Symbol,PERIOD_M5,14);
    if(maHandle==INVALID_HANDLE || atrHandle==INVALID_HANDLE) return INIT_FAILED;
-   RestorePending();
+   RestorePending(); RestoreSharedVisits();
    InitView(); InitTgeMobileMarkers();
-   readyFrom=TimeCurrent(); ReadFeed(); ReadHealth(); ReadAISetups(); ReadMemberFollow(); EventSetTimer(1); Panel();
+   fastStarted=TimeGMT(); readyFrom=TimeCurrent(); ReadFeed(); ReadHealth(); ReadAISetups(); ReadMemberFollow(); EventSetTimer(1); Panel();
    return INIT_SUCCEEDED;
 }
 void OnTimer()
 {
    if(busy) return; busy=true;
    ReadFeed(); ReadHealth(); ReadAISetups(); ReadMemberFollow(); Reconcile(); Manage();
+   MqlTick sampled;
+   if(FreshQuote(sampled)) { RememberFastTick(sampled); UpdateTeacherVisits(sampled); UpdateSharedVisit(sampled); }
    Candidate immediate; ZeroMemory(immediate);
    if(AIMarketSignal(immediate) || MemberFollowSignal(immediate)) Open(immediate);
+   if(aiReady && FreshQuote(sampled))
+      for(int i=0;i<ArraySize(aiPlans);i++) TeacherEntryAllowed(i,sampled);
    datetime minute=iTime(_Symbol,PERIOD_M1,1);
    if(minute>0 && minute!=lastMinute)
    {
@@ -1478,7 +1551,16 @@ void OnTimer()
    }
    SyncTgeMobileMarkers(); Panel(); busy=false;
 }
-void OnTick() { }
+void OnTick()
+{
+   MqlTick q; if(!FreshQuote(q)) return;
+   RememberFastTick(q);
+   if(busy || pending.kind!=0 || !CanExecute() || !TeacherOwnsZone(q)) return;
+   busy=true;
+   Candidate immediate; ZeroMemory(immediate);
+   if(AIMarketSignal(immediate)) Open(immediate);
+   busy=false;
+}
 void OnTradeTransaction(const MqlTradeTransaction &trans,const MqlTradeRequest &request,const MqlTradeResult &result)
 {
    // 统计只标脏，不在交易事件里扫描历史或改变pending。

@@ -22,7 +22,7 @@ from mt5_reader import MT5Reader, QuoteError
 from paper import PaperEngine
 from teacher_strategy import TeacherAnalysis, source_levels
 from dashboard import serve
-from deepseek_ai import ai_worker, ai_snapshot, member_follow_snapshot
+from deepseek_ai import member_follow_snapshots, ai_worker, ai_snapshot, member_follow_snapshot
 
 ROOT=Path(__file__).resolve().parent
 DEFAULT_HOME=Path(os.environ.get('LOCALAPPDATA',str(Path.home())))/'FeishuMT5SignalMonitor'
@@ -66,6 +66,20 @@ def config_load(home):
     if type(c['allow_group_point_updates']) is not bool: raise ValueError('群友点位更新开关必须为布尔值')
     if not isinstance(c['follow_sender_id'],str) or c['follow_sender_id'] and not c['follow_sender_id'].startswith('ou_'): raise ValueError('跟随成员身份须为open_id')
     if c['follow_sender_id'] and c['follow_sender_id'] in [c['teacher_sender_id']]+c['point_source_senders']: raise ValueError('跟随成员须与老师点位来源分开配置')
+    if not isinstance(c['follow_members'],list) or len(c['follow_members'])>8:
+        raise ValueError('学生账号配置须为最多8项的列表')
+    ids=set()
+    for m in c['follow_members']:
+        if not isinstance(m,dict) or set(m)!={'sender_id','name','enabled','ttl_seconds','max_adverse_price'}:
+            raise ValueError('学生配置字段无效')
+        mid=m['sender_id']
+        if not isinstance(mid,str) or not mid.startswith('ou_') or mid==c['teacher_sender_id'] or mid in ids:
+            raise ValueError('学生账号须为独立唯一open_id')
+        if not isinstance(m['name'],str) or not m['name'] or len(m['name'])>40 or type(m['enabled']) is not bool:
+            raise ValueError('学生名称/开关无效')
+        if type(m['ttl_seconds']) is not int or not 1<=m['ttl_seconds']<=3600 or type(m['max_adverse_price']) not in (int,float) or not 0<m['max_adverse_price']<=100:
+            raise ValueError('学生有效期/不利价差无效')
+        ids.add(mid)
     if c['teacher_symbol'] not in c['symbols']: raise ValueError('老师点位品种缺少映射')
     if type(c['mt5_time_offset_seconds']) is not int or abs(c['mt5_time_offset_seconds'])>14*3600 or c['mt5_time_offset_seconds']%3600: raise ValueError('行情固定时间偏移须为整小时且不超过14小时')
     return c
@@ -191,6 +205,20 @@ def export_teacher_levels(db,c,paused,now):
     for plan in plans: fw.writerow(['FOLLOW',plan['side'],format(plan['price'],'.10f')])
     fw.writerow(['END',len(plans)])
     atomic_text(folder/'tge_member_follow.csv',fb.getvalue())
+
+    # 新EA读多账号快照；旧单成员文件仍独立保留，升级不改旧EA协议。
+    members=member_follow_snapshots(db,c,now,paused)
+    multi=io.StringIO(newline=''); mw=csv.writer(multi,lineterminator='\r\n')
+    mw.writerow(['TGF','2',int(now),c['symbols'][c['teacher_symbol']],len(members)])
+    for member in members:
+        plan=member['plans'][0] if member.get('active') else {}
+        safe=lambda v:str(v).replace(',','，').replace('\r',' ').replace('\n',' ')[:160]
+        mw.writerow(['MEMBER',member['sender'],safe(member['name']),int(member['active']),
+            member.get('message_id',''),member.get('revision',''),int(member.get('created',0)),
+            int(member.get('expiry',0)),member['ttl_seconds'],format(member['max_adverse_price'],'.10f'),
+            plan.get('side',''),format(plan.get('price',0),'.10f'),safe(member['reason'])])
+    mw.writerow(['END',len(members)])
+    atomic_text(folder/'tge_member_follows.csv',multi.getvalue())
 
     # 保留旧EA的24小时来源上限、90秒心跳及指定老师身份；新规则不绕过旧EA。
     healthy=bool(state(db,'last_sync_ok',False)) and now-state(db,'last_sync_at',0)<=c['sync_max_age_seconds'] and now-state(db,'checkpoint',0)<=c['sync_max_age_seconds']

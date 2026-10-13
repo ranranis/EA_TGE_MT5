@@ -105,8 +105,8 @@ class ContextTests(unittest.TestCase):
         variants.append([two])
         for history in variants:
             with self.subTest(history=history),self.assertRaises(AIError):self.validate(history)
-    def test_map_cancel_and_ambiguous_instruction_break_context(self):
-        for kind,text in [('MAP','4175--4190--4200'),('CANCEL','取消前面计划'),('UNKNOWN','现在换方向'),
+    def test_cancel_and_ambiguous_instruction_break_context(self):
+        for kind,text in [('CANCEL','取消前面计划'),('UNKNOWN','现在换方向'),
                           ('WATCH','先别做多'),('MODIFY','保护调一下'),('CLOSE','平仓')]:
             barrier=dict(self.origin,message_id='om_barrier',time='2026-10-13T14:10:00+08:00',
                          text=text,interpretation=result(kind=kind))

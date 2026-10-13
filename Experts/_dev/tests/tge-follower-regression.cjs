@@ -30,7 +30,7 @@ let checks=0;
 function test(name,fn) {fn();checks++;console.log('PASS '+name);}
 function env() {
   const e=vm.createContext({
-    读取AI即时策略:false,aiReady:false,aiMode:"WAIT",ReadAISetups:()=>{},ReadMemberFollow:()=>{},MemberFollowSignal:()=>false,AIMarketSignal:()=>false,MathMin:Math.min,MathMax:Math.max,MathAbs:Math.abs,MathFloor:Math.floor,MathCeil:Math.ceil,
+    读取AI即时策略:false,aiReady:false,aiMode:"WAIT",TeacherOwnsZone:()=>false,RememberFastTick:()=>{},UpdateTeacherVisits:()=>{},UpdateSharedVisit:()=>{},MergeOpportunity:()=>{},ReadAISetups:()=>{},ReadMemberFollow:()=>{},MemberFollowSignal:()=>false,AIMarketSignal:()=>false,MathMin:Math.min,MathMax:Math.max,MathAbs:Math.abs,MathFloor:Math.floor,MathCeil:Math.ceil,
     NormalizeDouble:(v,n)=>+v.toFixed(n),TickSize:()=>.01,
     SYMBOL_VOLUME_MIN:1,SYMBOL_VOLUME_STEP:2,SYMBOL_VOLUME_MAX:3,
     SymbolInfoDouble:(_,k)=>({1:.01,2:.01,3:100})[k],_Symbol:'XAUUSD',_Digits:2,
@@ -42,7 +42,7 @@ function env() {
     entryView:{},checkingMinute:0,signalRetry:false,EMPTY_VALUE:Number.MAX_VALUE,
     ZeroMemory:p=>{for(const k of Object.keys(p))delete p[k];},DecisionLog:()=>{},ExecutionBlock:()=>'',
     Store:()=>true,ClearPending:()=>{e.pending={kind:0};},SavePending:()=>{},
-    HistoryDealSelect:()=>false,EA魔法号:560056,DEAL_ORDER:10,
+    HistoryDealSelect:()=>false,HistoryOrderGetDouble:()=>0,ORDER_VOLUME_INITIAL:1,ORDER_VOLUME_CURRENT:2,EA魔法号:560056,DEAL_ORDER:10,
     execution:{ResultRetcode:()=>0,ResultOrder:()=>0,ResultDeal:()=>0,ResultComment:()=>''}
   });
   const constants=[...new Set(src.match(/\bTRADE_RETCODE_[A-Z_]+\b/g))];
@@ -78,7 +78,7 @@ test('fixed .02 lot accepted without resizing',()=>assert(e.ExactLot(.02)));
 test('off-step lot rejected rather than rounded',()=>assert(!e.ExactLot(.025)));
 function target(levels,entry=100,sign=1) {
  const x=env();x.levels=levels;x.tp=0;x.Align=(v,d)=>(d>0?Math.ceil(v/.01-1e-8):Math.floor(v/.01+1e-8))*.01;
- install(x,'Target','entry,sign,_tp=0,mapOnly=false');return {ok:x.Target(entry,sign),tp:x.tp};
+ install(x,'Target','entry,sign,_tp=0,mapOnly=false,reference=0');return {ok:x.Target(entry,sign),tp:x.tp};
 }
 test('tail target capped at 10 even when next level remote',()=>assert.equal(target([90,100,150]).tp,110));
 test('near obstacle trims target',()=>assert.equal(target([90,100,108]).tp,107.8));
@@ -148,7 +148,7 @@ function signal(options={}) {
   Align:v=>v,tp:0
  });
  for(const [name,args] of [['Reaction','bar,previous,level,sign,tolerance,escape'],['Trend','last,previous,ma0,ma1'],
-  ['BreakRetest','last,breakbar,before,level,sign,tolerance,escape'],['Target','entry,sign,_tp=0,mapOnly=false'],['VisitKey','level'],['MapReaction','bar,previous,m5,quote,out'],['Signal','out']])install(x,name,args);
+  ['BreakRetest','last,breakbar,before,level,sign,tolerance,escape'],['Target','entry,sign,_tp=0,mapOnly=false,reference=0'],['VisitKey','level'],['MapReaction','bar,previous,m5,quote,out'],['Signal','out']])install(x,name,args);
  const out={};return {ok:x.Signal(out),out,x,store};
 }
 test('complete production candidate selects MA5 pullback',()=>{const r=signal();assert(r.ok);assert.equal(r.out.method,'M5 MA5顺势回踩');});
@@ -390,191 +390,7 @@ test('one-percent daily equity lock removed even when legacy stopped GV exists',
  assert(!body('ExecutionBlock').includes('回撤限制'));assert(!body('OnInit').includes('Load("stopped")'));
 });
 
-function aiEnv(options={}){
- const x=env(),memory={};Object.assign(x,{读取AI即时策略:true,aiReady:true,aiMode:'SETUP',
-  aiPlans:(options.plans||[{sign:1,level:100,market:false},{sign:-1,level:112,market:false}]).map(p=>({origin:'',created:0,...p})),
-  feedActive:true,aiIdentity:'msg-new',aiSource:'msg-new',aiSourceTime:990,aiGenerated:1000,TimeGMT:()=>1000,
-  atr:2,atrHandle:2,MathIsValidNumber:Number.isFinite,tp:0,DBL_MAX:Number.MAX_VALUE,levels:[90,100,104],最大点差价格:.5,Hash:s=>[...s].reduce((a,v)=>a+v.charCodeAt(0),0),
-  IntegerToString:String,DoubleToString:(v,n)=>v.toFixed(n),Align:v=>v,
-  Load:k=>memory[k]||0,Store:(k,v)=>memory[k]=v,ArraySetAsSeries:()=>{},
-  FreshQuote:q=>Object.assign(q,{bid:100.4,ask:100.45}),CopyBuffer:(_h,_b,shift,n,out)=>{out.push(2);return 1;}});
- for(const [name,args] of [['Target','entry,sign,_tp=0,mapOnly=false'],['AIVisitKey','level,sign'],['AISignal','bar,q,out'],['AIMarketSignal','out']])install(x,name,args);
- return {x,memory};
-}
-test('authoritative AI BUY uses one completed M1 reaction without opposite MA veto',()=>{
- const {x}=aiEnv();x.trend=-1;const out={};
- assert(x.AISignal({...b,time:990},{bid:100.4,ask:100.45},out));assert.equal(out.direction,1);assert.equal(out.ai,true);
- assert(out.method.includes('msg-new'));
-});
-test('near/prefix wording allows a bounded price zone instead of missing an integer not exactly touched',()=>{
- const {x}=aiEnv({plans:[{sign:1,level:100,market:false,near:true},{sign:-1,level:120,market:false}]});
- const bar={time:990,open:106,low:104.6,high:109,close:108};
- assert(x.AISignal(bar,{bid:108,ask:108.05},{}));
- x.aiPlans[0].near=false;assert(!x.AISignal(bar,{bid:108,ask:108.05},{}));
- x.aiPlans[0].near=true;assert(!x.AISignal(bar,{bid:110,ask:110.05},{}));
-});
-test('AI SELL reference is not mistaken for a bidirectional neutral level',()=>{
- const {x}=aiEnv({plans:[{sign:-1,level:100,market:false},{sign:1,level:88,market:false}]});
- const out={};assert(x.AISignal({...invert(b),time:990},{bid:99.55,ask:99.6},out));assert.equal(out.direction,-1);
-});
-test('AI reaction still rejects a red buy bar or missing reclaim',()=>{
- const {x}=aiEnv();assert(!x.AISignal({...b,time:990,close:100.05},{bid:100.4,ask:100.45},{}));
- assert(!x.AISignal({...b,time:990,open:100.5},{bid:100.4,ask:100.45},{}));
-});
-test('new AI range controls target instead of obsolete morning obstacle',()=>{
- const {x}=aiEnv();assert.equal(x.Target(100,1),true);assert.equal(x.tp,110);
-});
-test('AI visit keys separate source and direction and prevent repeated same opportunity',()=>{
- const {x,memory}=aiEnv();const first=x.AIVisitKey(100,1);memory[first]=990;
- assert(!x.AISignal({...b,time:990},{bid:100.4,ask:100.45},{}));
- assert.notEqual(x.AIVisitKey(100,-1),first);x.aiIdentity='another';
- assert.notEqual(x.AIVisitKey(100,1),first);assert(x.AISignal({...b,time:990},{bid:100.4,ask:100.45},{}));
-});
-test('explicit AI market hint has live TTL and needs fresh quote and ATR',()=>{
- const {x}=aiEnv({plans:[{sign:1,level:100,market:true},{sign:-1,level:112,market:false}]});
- const out={};assert(x.AIMarketSignal(out));assert.equal(out.ai,true);assert(out.method.includes('市价'));
- x.aiSourceTime=800;assert(!x.AIMarketSignal({}));x.aiSourceTime=990;x.FreshQuote=()=>false;assert(!x.AIMarketSignal({}));
-});
-test('AI market path cannot bypass withdrawn map or dead bridge',()=>{
- const {x}=aiEnv({plans:[{sign:1,level:100,market:true}]});
- x.feedActive=false;assert(!x.AIMarketSignal({}));x.feedActive=true;x.aiGenerated=980;assert(!x.AIMarketSignal({}));
-});
-test('market hints are not rearmed merely because price moved away',()=>{
- const {x,memory}=aiEnv({plans:[{sign:1,level:100,market:true}]});
- memory[x.AIVisitKey(100,1)]=990;
- assert(!x.AISignal({...b,time:1000,close:105},{bid:100.4,ask:100.45},{}));assert.equal(memory[x.AIVisitKey(100,1)],990);
-});
-test('AI instant updates only use candle that finishes after activation',()=>{
- assert(body('Signal').includes('m1[0].time+60>readyFrom'));
- assert(body('OnTimer').includes('AIMarketSignal(immediate)'));
- assert(body('ReadAISetups').includes('lastMinute=0'));
-});
-
-function aiFeed(rows){
- const x=feed().x;let pos=0;
- Object.assign(x,{aiReady:true,aiMode:'SETUP',aiIdentity:'old',aiReason:'',aiPlans:[{sign:1,level:90}],lastMinute:88,
-  FileReadString:()=>rows[pos++],FileIsEnding:()=>pos>=rows.length,
-  FileSize:()=>rows.join('\n').length,ArrayResize:(a,n)=>{while(a.length<n)a.push({});a.length=n;},
-  TimeGMT:()=>2000});
- install(x,'ReadAISetups','');const ok=x.ReadAISetups();return {ok,x};
-}
-test('AI snapshot validates symbol, footer, heartbeat and provenance before activation',()=>{
- const valid=['TGA,1,2000,1,XAUUSD,msg,revision,1900,2,SETUP,ok','SETUP,BUY,100,REACTION,POINT','SETUP,SELL,112,REACTION,POINT','END,2'];
- const r=aiFeed(valid);assert(r.ok);assert(r.x.aiReady);assert.equal(r.x.aiPlans[1].sign,-1);assert.equal(r.x.readyFrom,1000);
- for(const rows of [valid.slice(0,3),valid.map(v=>v.replace('XAUUSD','EURUSD')),
-  valid.map(v=>v.replace(',2000,',',1980,')),valid.map(v=>v.replace('SELL','EXECUTE')),
-  valid.map(v=>v.replace('END,2','END,1'))]){
-  const f=aiFeed(rows);assert(!f.ok);assert.equal(f.x.aiReady,false);
- }
-});
-test('AI WAIT snapshot clears execution readiness while keeping reference data separate',()=>{
- const r=aiFeed(['TGA,1,2000,0,XAUUSD,msg,revision,1900,0,WAIT,pause','END,0']);
- assert(r.ok);assert.equal(r.x.aiReady,false);assert.equal(r.x.aiMode,'WAIT');assert.equal(r.x.aiPlans.length,0);
-});
-
-
-function followEnv(){
- const {x,memory}=aiEnv();
- Object.assign(x,{followReady:true,followSign:1,followPrice:100,followCreated:750,followExpiry:1050,followGenerated:1000,
- followSource:'member-entry',followReason:'ok',healthOK:true,healthPaused:false,healthBeat:1000,
- healthSync:1000,healthCheckpoint:1000,healthMaxAge:120});
- for(const [name,args] of [['FollowVisitKey',''],['FollowMissKey',''],['FollowPriceAllowed','q'],['MemberFollowSignal','out'],['FollowCaption','']])install(x,name,args);
- return {x,memory};
-}
-test('member signal accepts better BUY prices without any lower-bound clamp',()=>{
- const {x}=followEnv();x.FreshQuote=q=>Object.assign(q,{bid:95.8,ask:95.9});
- const out={};assert(x.MemberFollowSignal(out));assert.equal(out.follow,true);assert.equal(out.level,100);
- assert.equal(out.followExpiry,1050);assert(out.method.includes('起飞'));
-});
-test('member adverse BUY at exactly two prices is missed forever even after a favourable return',()=>{
- const {x,memory}=followEnv();x.FreshQuote=q=>Object.assign(q,{bid:101.9,ask:102});
- assert(!x.MemberFollowSignal({}));assert.equal(memory[x.FollowMissKey()],1);
- x.FreshQuote=q=>Object.assign(q,{bid:95.8,ask:95.9});assert(!x.MemberFollowSignal({}));
-});
-test('member SELL accepts higher prices and rejects bids two prices below original entry',()=>{
- const {x}=followEnv();x.followSign=-1;
- assert(x.FollowPriceAllowed({bid:110,ask:110.1}));
- assert(!x.FollowPriceAllowed({bid:98,ask:98.1}));
-});
-test('member five minute deadline remains effective with a fresh bridge heartbeat',()=>{
- const {x}=followEnv();x.followCreated=700;x.followExpiry=1000;x.followGenerated=1000;
- assert(!x.MemberFollowSignal({}));assert(x.FollowCaption().includes('超过5分钟'));
-});
-test('member request attempt is once per message and edit versions cannot re-arm the same source',()=>{
- const {x,memory}=followEnv();const key=x.FollowVisitKey();memory[key]=999;
- assert(!x.MemberFollowSignal({}));assert.equal(x.FollowVisitKey(),key);
- x.followSource='different-message';assert.notEqual(x.FollowVisitKey(),key);assert(x.MemberFollowSignal({}));
-});
-test('member disconnected paused stale or unhealthy snapshots cannot produce a candidate',()=>{
- for(const change of [{healthOK:false},{healthPaused:true},{healthBeat:980},{followGenerated:980},{启用起飞跟随:false}]){
-  const {x}=followEnv();Object.assign(x,change);assert(!x.MemberFollowSignal({}));
- }
- const {x}=followEnv();x.FreshQuote=()=>false;assert(!x.MemberFollowSignal({}));
-});
-test('member feed enforces exact 300 seconds expiry and independently clears readiness',()=>{
- const good=['TGF,1,2000,1,XAUUSD,member,revision,1900,2200,member-sender,1,ok','FOLLOW,BUY,100','END,1'];
- function read(rows){
-  const {x}=followEnv();let pos=0;Object.assign(x,{_Symbol:'XAUUSD',TimeGMT:()=>2000,
-  INVALID_HANDLE:-1,FILE_READ:1,FILE_TXT:2,FILE_ANSI:4,FILE_COMMON:8,FILE_SHARE_READ:16,CP_UTF8:65001,
-  FileOpen:()=>1,FileClose:()=>{},FileReadString:()=>rows[pos++],FileIsEnding:()=>pos>=rows.length,FileSize:()=>rows.join('\n').length,
-  StringSplit:(v,delim,out)=>{out.push(...v.split(delim));return out.length;},StringToInteger:Number,StringToDouble:Number,
-  Number:(s,decimal=false)=>decimal?/^\d+(?:\.\d+)?$/.test(s):/^\d+$/.test(s),
-  ArrayResize:(a,n)=>{while(a.length<n)a.push({});a.length=n;}});
-  install(x,'ReadMemberFollow','');return {ok:x.ReadMemberFollow(),x};
- }
- assert(read(good).x.followReady);
- for(const rows of [good.slice(0,2),good.map(s=>s.replace(',2200,',',2400,')),good.map(s=>s.replace(',2000,',',1980,')),good.map(s=>s.replace('BUY','EXECUTE'))]){
-  const r=read(rows);assert(!r.ok);assert(!r.x.followReady);
- }
- const expired=read(good.map(s=>s.replace(',1900,2200,',',1700,2000,')));assert(!expired.x.followReady);
- const wait=read(['TGF,1,2000,0,XAUUSD,member,revision,1900,2200,member-sender,0,paused','END,0']);
- assert(wait.ok);assert(!wait.x.followReady);assert.equal(wait.x.aiPlans.length,2);
-});
-test('member candidate rechecks expiry and actual price at the existing request boundary',()=>{
- assert(body('Open').includes('TimeGMT()>=signal.followExpiry'));
- assert(body('Open').includes('!FollowPriceAllowed(q)'));
- assert(body('Open').includes('signal.follow ? signal.followKey'));
- assert(body('OnTimer').includes('MemberFollowSignal(immediate)'));
- assert(!body('MemberFollowSignal').includes('PositionOpen'));
-});
-
-
-test('member request boundary accepts a favourable price using fixed configured exits and rejects expiry/changed price',()=>{
- function prepare(){
-  const {x,memory}=followEnv(),calls=[];
-  Object.assign(x,{
-   每次开仓手数:.02,ORDER_TYPE_BUY:0,ORDER_TYPE_SELL:1,ACCOUNT_MARGIN_FREE:1,
-   ExactLot:()=>true,Stops:()=>true,OrderCalcMargin:()=>true,AccountInfoDouble:()=>10000,
-   RecordResult:()=>{},EntryTag:()=>'synthetic',execution:{PositionOpen:(...args)=>calls.push(args)}
-  });
-  install(x,'Open','signal');
-  const out={};assert(x.MemberFollowSignal(out));return {x,calls,out,memory};
- }
- let {x,calls,out}=prepare();x.levels=[90,97];x.FreshQuote=q=>Object.assign(q,{bid:95.8,ask:95.9});
- x.Open(out);assert.equal(calls.length,1);assert.equal(calls[0][2],.02);
- assert.equal(calls[0][3],95.9);assert.equal(calls[0][4],85.9);assert.equal(calls[0][5],105.9);
- x.Open(out);assert.equal(calls.length,1);
- ({x,calls,out}=prepare());out.followExpiry=1000;x.Open(out);assert.equal(calls.length,0);
- ({x,calls,out}=prepare());x.FreshQuote=q=>Object.assign(q,{bid:101.9,ask:102});x.Open(out);assert.equal(calls.length,0);
- x.FreshQuote=q=>Object.assign(q,{bid:95.8,ask:95.9});x.Open(out);assert.equal(calls.length,0);
-});
-
-
-test('v2 scene plans retain consumption identity when only scene explanation changes',()=>{
- const valid=['TGA,2,2000,1,XAUUSD,scene-message,scene-rev,1900,2,SETUP,range',
- 'SETUP,BUY,100,REACTION,POINT,buy-source,buy-rev,1800',
- 'SETUP,SELL,112,REACTION,POINT,sell-source,sell-rev,1900','END,2'];
- const r=aiFeed(valid);assert(r.ok);assert(r.x.aiReady);
- r.x.Hash=s=>[...s].reduce((a,v)=>a+v.charCodeAt(0),0);r.x.TickSize=()=>.01;r.x.IntegerToString=String;r.x.DoubleToString=(v,n)=>v.toFixed(n);
- install(r.x,'AIVisitKey','level,sign');
- const key=r.x.AIVisitKey(100,1);r.x.aiIdentity='scene-message-new|different-summary';
- assert.equal(r.x.AIVisitKey(100,1),key);
- assert.equal(r.x.aiPlans[0].created,1800);assert.notEqual(r.x.AIVisitKey(112,-1),key);
-});
-test('scene refresh cannot revive an old market signal by moving the overall source timestamp',()=>{
- const {x}=aiEnv({plans:[{sign:1,level:100,market:true,origin:'older',created:700}]});
- x.aiSourceTime=999;assert(!x.AIMarketSignal({}));
-});
+// 实时老师/多学生的旧收线断言已由tge-near-entry-regression.cjs替换。
 // 单向明确计划未触发时，沿用生产Signal/Reaction/BreakRetest评估地图延续。
 function continuation(sign=1,memory={}){
  const {x}=signal({memory});const rates=x.CopyRates,buffers=x.CopyBuffer;
@@ -601,10 +417,6 @@ test('distant explicit pullback no longer suppresses same-direction map breakout
 test('downward continuation is symmetric and does not become a buy',()=>{
  const x=continuation(-1),out={};assert(x.Signal(out));assert.equal(out.direction,-1);assert.equal(out.level,100);assert.equal(out.ai,false);
 });
-test('explicit AI point keeps priority and original target mode',()=>{
- const x=continuation();x.aiPlans[0].level=100;const out={};
- assert(x.Signal(out));assert.equal(out.ai,true);assert.equal(out.level,100);
-});
 test('continuation requires an actual M5 break/retest rather than MA drift alone',()=>{
  const x=continuation(),copy=x.CopyRates;
  x.CopyRates=(s,tf,shift,count,out)=>{const n=copy(s,tf,shift,count,out);if(tf===5)out[2].close=100.2;return n;};
@@ -629,11 +441,7 @@ test('paused, canceled or stale AI snapshots still prevent continuation',()=>{
  x.aiReady=true;x.aiGenerated=1790;assert(!x.Signal({}));
  x.aiGenerated=1810;x.feedActive=false;assert(!x.Signal({}));
 });
-test('same and behind-reference map points cannot bypass direct-plan consumption',()=>{
- const x=continuation();x.aiPlans[0].level=100;x.Store(x.AIVisitKey(100,1),1740);x.levels=[90,100];
- assert(!x.Signal({}));assert(x.reason.includes('已消费'));
- x.aiPlans[0].level=110;assert(!x.Signal({}));
-});
+
 test('continuation honors persisted map visit after restart and next obstacle space',()=>{
  const x=continuation(1,{'visit100.00':1740});assert(!x.Signal({}));assert(x.reason.includes('已消费'));
  const y=continuation();y.levels=[90,100,104];assert(!y.Signal({}));assert(y.reason.includes('不足首批'));

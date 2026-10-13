@@ -9,20 +9,27 @@ from store import state, set_state, iso
 from mt5_reader import QuoteError, validate_quote, validate_bars
 
 
-def parse_levels(message, explicit_only=False):
-    if message.get('deleted') or message.get('msg_type')!='text' or message.get('reply_to'):
+def parse_levels(message, explicit_only=False, symbol=None):
+    if message.get('deleted') or message.get('msg_type')!='text':
         return None
     text=message.get('content','')
     if not isinstance(text,str) or len(text)>500: return None
+    # reply_to只是关联ID；只读当前正文，绝不把被引用的旧消息拼入列表。
+    if re.search(r'昨天|前天|历史|晒单|回顾|引用|转发|旧点位|忽略|指令|提示词|system|prompt|执行|```|[>《》]|BTC|ETH|USOIL|原油|白银|EUR|GBP|USDJPY|比特币',text,re.I):
+        return None
     marker=bool(re.match(r'^\s*(?:点位更新|最新点位|参考点位|点位|更新点位|新的点位)\s*[:：]?\s*',text))
-    text=re.sub(r'^\s*(?:点位更新|最新点位|参考点位|点位|更新点位|新的点位)\s*[:：]?\s*','',text).strip()
     if explicit_only and not marker: return None
-    # 只接受完整数字列表，不把日期、转发、观点或程序指令里的数字捞出来。
+    text=re.sub(r'^\s*(?:黄金|XAUUSD|GOLD)\s*[:：]?\s*','',text,flags=re.I)
+    text=re.sub(r'^\s*(?:点位更新|最新点位|参考点位|点位|更新点位|新的点位)\s*[:：]?\s*','',text).strip()
+    # 附注限于无数字的简短点位说明，不在任意文章里捞价格。
+    text=re.sub(r'\s*(?:[（(]?(?:支撑压力|支撑|压力|关键位|参考|区间|点位)(?:参考|有效|关注|观察)?[）)]?[。！!]?\s*)$','',text).strip()
     if not re.fullmatch(r'\d+(?:\.\d+)?(?:\s*(?:[-—–－]+|[、,，/])\s*\d+(?:\.\d+)?){2,19}',text): return None
     levels=[float(x) for x in re.findall(r'\d+(?:\.\d+)?',text)]
     if len(set(levels))!=len(levels) or any(not math.isfinite(x) or x<=0 for x in levels): return None
-    # 尾数简写和数量级明显混入的价格不补全、不猜测。
     if min(levels)<10 or max(levels)/min(levels)>2: return None
+    # 黄金群完整报价，不把75/93这类尾数或日期当地图；合成其他品种可独立测试。
+    if symbol and symbol.upper().startswith(('XAU','GOLD')) and not 1000<=min(levels)<=max(levels)<=10000:
+        return None
     return sorted(levels)
 
 
@@ -45,8 +52,8 @@ def order_key(row):
 
 def source_levels(raw,sender,c):
     if sender==c['teacher_sender_id'] or sender in c.get('point_source_senders',[]):
-        return parse_levels(raw)
-    return parse_levels(raw,explicit_only=True) if c.get('allow_group_point_updates',False) else None
+        return parse_levels(raw,symbol=c.get('teacher_symbol'))
+    return parse_levels(raw,symbol=c.get('teacher_symbol')) if c.get('allow_group_point_updates',False) else None
 
 
 def refresh_levels(db,c,now):
@@ -67,10 +74,10 @@ def refresh_levels(db,c,now):
         if candidate(row):
             selected=row; break
     if selected is None:
-        result={'active':False,'reason':'等待指定老师的完整文字点位列表','levels':[]}
+        result={'active':False,'reason':'等待目标群完整文字点位列表','levels':[]}
     else:
         raw=json.loads(selected['raw']); levels=candidate(selected)
-        same=previous.get('message_id')==selected['message_id'] and previous.get('revision')==selected['revision']
+        same=previous.get('active') and levels==previous.get('levels')
         reason='当前参考点位' if levels else '当前点位已撤回或改成非点位内容，等待新列表'
         if selected['created']>now+5: reason='消息时间异常'; levels=None
         result=dict(chat_id=c['chat_id'],teacher_id=c['teacher_sender_id'],message_id=selected['message_id'],revision=selected['revision'],
