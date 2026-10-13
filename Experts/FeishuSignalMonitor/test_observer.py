@@ -286,6 +286,29 @@ class ObserverTests(unittest.TestCase):
             n.mt5.symbol_info_tick=lambda _:SimpleNamespace(time_msc=(self.now-3600)*1000,bid=100,ask=100.02)
             with self.assertRaises(QuoteError): n.quote('XAUUSD',self.now)
 
+    def test_measured_clock_lead_accepted_large_lead_rejected(self):
+        n=_NativeReader.__new__(_NativeReader);n.config=self.c;n.ensure=lambda:None
+        spec=SimpleNamespace(visible=True,point=.01,trade_tick_size=.01,digits=2,volume_min=.01,volume_max=100,volume_step=.01,trade_stops_level=0)
+        n.mt5=SimpleNamespace(symbol_info=lambda _:spec)
+        with patch('mt5_reader.time.time',return_value=self.now):
+            for delta in (6.5,8):
+                n.mt5.symbol_info_tick=lambda _:SimpleNamespace(time_msc=(self.now+delta)*1000,bid=100,ask=100.02)
+                self.assertEqual(n.quote('XAUUSD',self.now).at,self.now)
+            for delta in (8.01,-11,-3600):
+                n.mt5.symbol_info_tick=lambda _:SimpleNamespace(time_msc=(self.now+delta)*1000,bid=100,ask=100.02)
+                with self.assertRaises(QuoteError):n.quote('XAUUSD',self.now)
+
+    def test_quote_failure_keeps_marked_snapshot_without_candidate(self):
+        self.seed();reader=self.reader()
+        analysis=TeacherAnalysis(self.db,self.c,reader,self.now-3600)
+        first=analysis.update(self.now,True,'')
+        reader.quote=Mock(side_effect=QuoteError('报价时间异常'))
+        second=analysis.update(self.now+10,True,'')
+        self.assertEqual(second['quote'],first['quote'])
+        self.assertEqual(second['bars'],first['bars'])
+        self.assertFalse(second['market_ok']);self.assertTrue(second['stale'])
+        self.assertIsNone(second['candidate']);self.assertEqual(second['status'],'BLOCKED')
+
     def test_task_starts_independent_service_and_single_instance(self):
         import xml.etree.ElementTree as ET
         root=ET.fromstring(task_xml(self.home)); ns={'t':'http://schemas.microsoft.com/windows/2004/02/mit/task'}

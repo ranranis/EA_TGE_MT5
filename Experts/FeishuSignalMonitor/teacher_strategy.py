@@ -3,6 +3,7 @@ import hashlib
 import json
 import math
 import re
+import time
 from urllib.parse import urlparse, parse_qs
 
 from store import state, set_state, iso
@@ -150,10 +151,13 @@ class TeacherAnalysis:
         context=refresh_levels(self.db,self.c,now)
         result=dict(at=now,status='BLOCKED',reason=blocked_reason or context['reason'],checks=[],candidate=None)
         quote=None
+        read_started=time.monotonic()
         try:
             symbol=self.c['symbols'][self.c['teacher_symbol']]
             quote=self.quotes.quote(symbol,now)
             bars=self.quotes.bars(symbol,now)
+            # IPC等待时间计入校验时钟，避免刚收到的tick被误判为未来报价。
+            now+=time.monotonic()-read_started
             if context['active']:
                 result=analyze(bars,quote,context['levels'],self.c,now,max(self.started,context['observed_at']))
                 if not allowed: result.update(status='BLOCKED',reason=blocked_reason,candidate=None)
@@ -162,7 +166,10 @@ class TeacherAnalysis:
             result['bars']=bars[-60:]
             result['quote']=quote.__dict__; result['market_ok']=True
         except QuoteError as ex:
-            result.update(reason=str(ex),market_ok=False)
+            previous=state(self.db,'teacher_analysis',{})
+            for key in ('quote','bars','ema20','ema50','atr14','trend','close','closed_at'):
+                if key in previous: result[key]=previous[key]
+            result.update(reason=str(ex),market_ok=False,stale=True,status='BLOCKED',candidate=None,checks=[])
             if quote: result['quote']=quote.__dict__
         # 网络读取在事务外；提交时重新检查来源版本，避免刚撤回的点位产生提示。
         with self.db:

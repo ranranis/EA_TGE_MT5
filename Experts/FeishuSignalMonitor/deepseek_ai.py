@@ -107,7 +107,7 @@ class DeepSeek:
         except (OSError, ValueError, TimeoutError) as ex:
             raise AIError('DeepSeek连接/响应或本机凭证异常：'+type(ex).__name__) from None
 
-    def interpret(self, targets, context, anchor, levels, previous_scene=None):
+    def interpret(self, targets, context, anchor, levels, previous_scene=None, rebuild=False):
         scene_requested=any(t.get('source_role')=='teacher' and not t.get('historical') for t in targets)
         # 长飞书ID容易被模型抄错一位。仅在本次API请求内使用短编号，
         # 回包后精确映射回真实ID，再走原有来源/版本/原文校验，禁止模糊猜ID。
@@ -132,6 +132,8 @@ class DeepSeek:
                           '\n所有消息引用字段必须原样使用本次输入的r001等短编号，不要编造、改写或沿用上次编号。interpretations.id仍使用对应target.id。'},
                          {'role':'user','content':json.dumps(request_data,ensure_ascii=False)}],
             'response_format': {'type':'json_object'}, 'max_tokens': 4800}
+        if rebuild:
+            payload['messages'][0]['content']+='\n本次是人工请求重读现有消息，仅生成预览。必须UPDATE完整当前场景或REVIEW，不得KEEP。核对截至最后老师消息的全部取消和改价；不重放MARKET市价指令；保留仍有效的条件计划。'
         data = self.request('/chat/completions', payload)
         try:
             choice = data['choices'][0]
@@ -498,13 +500,14 @@ def publish_interpretation(db, c, row, value, now, scene_managed=False):
     set_state(db,'deepseek_recent',[event]+events[:29])
 
 
-def process_ai_batch(db, c, client, now, restore_scene=False):
+def process_ai_batch(db, c, client, now, restore_scene=False, preview=False):
     from teacher_strategy import source_levels
     rows=pending_rows(db,c,now)
     restoring=False
     # 升级后已有消息可能全部DONE，但完整场景尚未建立。只重读本地缓存，
     # 不导入历史记录、不修改原消息时间、不重放成员五分钟信号。
-    if restore_scene and not state(db,'teacher_scene',{}) and not state(db,'teacher_scene_initialized',False):
+    if preview or (restore_scene and not state(db,'teacher_scene',{}) and not state(db,'teacher_scene_initialized',False)):
+        if preview: rows=[]
         candidates=db.execute("""SELECT m.*,m.rowid AS sequence,a.status AS ai_status,a.retry_at
             FROM messages m LEFT JOIN ai_messages a
             ON a.chat_id=m.chat_id AND a.message_id=m.message_id AND a.revision=m.revision
@@ -515,10 +518,11 @@ def process_ai_batch(db, c, client, now, restore_scene=False):
             # 不能用“初始化完成”掩盖尚未恢复的条件计划。只有地图时保持本地MAP。
             if source_levels(json.loads(latest['raw']),latest['sender'],c):
                 continue
-            if latest['ai_status'] in ('DONE','RETRY') and (latest['retry_at'] or 0)<=now:
+            if preview or latest['ai_status'] in ('DONE','RETRY') and (latest['retry_at'] or 0)<=now:
                 rows=[latest];restoring=True
             break
     if not rows:
+        if preview: raise AIError('没有可重新分析的非历史老师消息')
         current=state(db,'deepseek_status',{})
         current.update(enabled=True,at=now,**lane_readiness(db,c,now))
         set_state(db,'deepseek_status',current);db.commit()
@@ -615,15 +619,16 @@ def process_ai_batch(db, c, client, now, restore_scene=False):
                     proof=dict(origin,interpretation=dict(kind='SETUP',plans=[plan],source_refs=previous_scene['source_refs']))
             targets[-1]['direction_basis']=proof
         api_rows.append(row)
-    with db:
-        readiness=lane_readiness(db,c,now)
-        if restoring:readiness['teacher_ready']=False
-        set_state(db,'deepseek_status',dict(enabled=True,online=False,at=now,model=c['ai_model'],
-            error='AI正在恢复老师完整场景' if restoring else 'AI正在解释新消息',**readiness))
+    if not preview:
+        with db:
+            readiness=lane_readiness(db,c,now)
+            if restoring:readiness['teacher_ready']=False
+            set_state(db,'deepseek_status',dict(enabled=True,online=False,at=now,model=c['ai_model'],
+                error='AI正在恢复老师完整场景' if restoring else 'AI正在解释新消息',**readiness))
     try:
         teacher_targets=any(t['source_role']=='teacher' and not t['historical'] for t in targets)
         raw_result=client.interpret(targets,context,live_anchor,
-            state(db,'teacher_levels',{}).get('levels',[]),previous_scene) if targets else {'interpretations':[]}
+            state(db,'teacher_levels',{}).get('levels',[]),previous_scene,**({'rebuild':True} if preview else {})) if targets else {'interpretations':[]}
         if not isinstance(raw_result,dict) or set(raw_result) not in ({'interpretations'},{'interpretations','scene'}):
             raise AIError('AI根字段错误')
         if teacher_targets and isinstance(client,DeepSeek) and 'scene' not in raw_result:
@@ -636,6 +641,9 @@ def process_ai_batch(db, c, client, now, restore_scene=False):
             scene['plans']=[p for p in scene['plans'] if p['mode']!='MARKET']
         if restoring and (not scene or scene['action']=='KEEP'):
             raise AIError('老师初始场景未重建，等待重新理解已有发言')
+        if preview:
+            if not scene or scene['action']!='UPDATE': raise AIError('场景仍有歧义，未生成可应用预览')
+            return scene
         with db:
             db.execute('BEGIN IMMEDIATE')
             if scene and not refs_current(db,c['chat_id'],scene.get('source_refs',[])):
@@ -669,6 +677,7 @@ def process_ai_batch(db, c, client, now, restore_scene=False):
         logging.info('DeepSeek完成%d条消息解释，结果已本地校验',len(rows))
         return len(rows)
     except AIError as ex:
+        if preview: raise
         with db:
             for row in rows:
                 old=db.execute('SELECT attempts FROM ai_messages WHERE chat_id=? AND message_id=? AND revision=?',

@@ -1,5 +1,6 @@
-"""仅监听127.0.0.1的只读看板，不暴露配置、凭证或文件目录。"""
+"""仅监听127.0.0.1；同源令牌保护人工预览/应用，不暴露凭证或文件目录。"""
 import json
+import secrets
 from contextlib import closing
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -11,6 +12,8 @@ from store import state, iso, stamp
 from teacher_strategy import sender_name, message_link
 from deepseek_ai import member_follow_snapshot, member_follow_snapshots, ai_snapshot
 from teacher_scene import scene_view
+from plan_preview import begin_preview, generate_preview, apply_preview, public_preview
+from deepseek_ai import AIError
 
 
 def snapshot(home,c):
@@ -46,7 +49,7 @@ def snapshot(home,c):
                     follows=member_follow_snapshots(db,c,now,status.get('paused',False)),
                     execution_reference=ai_snapshot(db,c,now,status.get('paused',False)) if c.get('ai_enabled') else {},
                     levels=state(db,'teacher_levels',{}),analysis=state(db,'teacher_analysis',{}),
-                    scene=scene_view(db,c),ai=state(db,'deepseek_status',{}),ai_setup=state(db,'deepseek_setup',{}),
+                    preview=public_preview(state(db,'plan_preview',{})),scene=scene_view(db,c),ai=state(db,'deepseek_status',{}),ai_setup=state(db,'deepseek_setup',{}),
                     ai_recent=state(db,'deepseek_recent',[]),ai_review=state(db,'deepseek_review',{}),
                     events=state(db,'analysis_events',[]),last_sync=state(db,'last_sync_at',0),
                     poll_seconds=c['poll_seconds'],teacher_sender_id=c['teacher_sender_id'],
@@ -54,11 +57,42 @@ def snapshot(home,c):
 
 
 def serve(home,c):
-    html=Path(__file__).with_name('dashboard.html').read_bytes()
+    action_token=secrets.token_urlsafe(32)
+    html=Path(__file__).with_name('dashboard.html').read_text(encoding='utf-8').replace('__LOCAL_ACTION_TOKEN__',action_token).encode('utf-8')
     class Handler(BaseHTTPRequestHandler):
         def log_message(self,*args): pass
+        def do_POST(self):
+            origin=f'http://127.0.0.1:{self.server.server_port}'
+            if (self.headers.get('Host')!=origin.removeprefix('http://') or
+                self.headers.get('Origin')!=origin or
+                not secrets.compare_digest(self.headers.get('X-Local-Token',''),action_token)):
+                self.send_error(403); return
+            if self.path not in ('/api/plan-preview','/api/plan-apply'):
+                self.send_error(404); return
+            try:
+                size=int(self.headers.get('Content-Length','0'))
+                if not 0<size<=1024 or self.headers.get('Content-Type')!='application/json':
+                    self.send_error(400); return
+                body=json.loads(self.rfile.read(size))
+                if self.path=='/api/plan-preview':
+                    if body!={}: raise ValueError()
+                    result=begin_preview(home,c)
+                    threading.Thread(target=generate_preview,args=(home,c,result['id']),daemon=True,name='plan-preview').start()
+                else:
+                    if not isinstance(body,dict) or set(body)!={'id','confirmed'} or body['confirmed'] is not True or not isinstance(body['id'],str):
+                        raise ValueError()
+                    result=apply_preview(home,c,body['id'])
+                code=200
+            except AIError as ex: code=409; result={'error':str(ex)}
+            except (ValueError,TypeError): code=400; result={'error':'请求格式无效'}
+            except (OSError,sqlite3.Error): code=503; result={'error':'本地状态不可用，请稍后重试'}
+            data=json.dumps(result,ensure_ascii=False,allow_nan=False).encode('utf-8')
+            self.send_response(code); self.send_header('Content-Type','application/json; charset=utf-8')
+            self.send_header('Content-Length',str(len(data)));self.send_header('Cache-Control','no-store')
+            self.end_headers();self.wfile.write(data)
+
         def do_GET(self):
-            # Host校验拒绝DNS rebinding；同源读，无CORS，无写接口。
+            # Host校验拒绝DNS rebinding；无CORS。
             if self.headers.get('Host')!=f'127.0.0.1:{self.server.server_port}':
                 self.send_error(403); return
             if self.path=='/': body=html; kind='text/html; charset=utf-8'

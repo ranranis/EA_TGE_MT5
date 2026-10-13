@@ -20,8 +20,8 @@ class Quote:
     volume_step:float
     stops:float
 
-# 本机实测券商时钟快约5.02秒，留1秒边界余量；不动态对齐或改变旧报价有效期。
-SERVER_CLOCK_TOLERANCE_SECONDS=6
+# 2026-10-14实测券商时钟超前6.0～6.5秒，固定8秒容差；不改变旧报价有效期。
+SERVER_CLOCK_TOLERANCE_SECONDS=8
 
 class _NativeReader:
     def __init__(self,config):
@@ -94,7 +94,8 @@ class _NativeReader:
 def validate_quote(q,now,config,spread=True):
     values=[q.bid,q.ask,q.at,q.point,q.tick_size,q.volume_min,q.volume_max,q.volume_step]
     if any(not math.isfinite(v) or v<=0 for v in values) or q.ask<q.bid or q.volume_min>q.volume_max: raise QuoteError('报价/品种规格不完整')
-    if now-q.at>config['quote_max_age_seconds'] or q.at-now>2: raise QuoteError('报价过期或时间异常')
+    if now-q.at>config['quote_max_age_seconds'] or q.at-now>2:
+        raise QuoteError(f'报价时间异常：距本机时钟{now-q.at:+.2f}秒（正值为滞后），允许滞后{config["quote_max_age_seconds"]}秒')
     if spread and (q.ask-q.bid)/q.point>config['max_spread_points']+1e-7: raise QuoteError('点差超过模拟成交上限')
 
 
@@ -136,10 +137,10 @@ def _worker(pipe,config):
 class MT5Reader:
     """官方初始化实测会无视短 timeout 卡60秒；隔离后不阻塞监控/停止。"""
     def __init__(self,config):
-        self.config=config; self.process=None; self.pipe=None; self.retry_at=0
+        self.config=config; self.process=None; self.pipe=None; self.retry_at=0; self.last_error=""
 
     def _call(self,method,*args):
-        if time.monotonic()<self.retry_at: raise QuoteError('MT5连接退避中，暂不模拟成交')
+        if time.monotonic()<self.retry_at: raise QuoteError('MT5重试等待中：'+self.last_error)
         if self.process is None:
             ctx=multiprocessing.get_context('spawn'); self.pipe,child=ctx.Pipe()
             self.process=ctx.Process(target=_worker,args=(child,self.config),daemon=True,name='MT5-readonly')
@@ -151,6 +152,7 @@ class MT5Reader:
             if not ok: raise QuoteError(result)
             return result
         except (OSError,EOFError,QuoteError) as ex:
+            self.last_error=str(ex)
             self._terminate(); self.retry_at=time.monotonic()+30
             raise QuoteError(str(ex)) from ex
 
