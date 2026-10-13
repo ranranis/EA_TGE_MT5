@@ -1432,7 +1432,7 @@ void Panel()
    panelCanvas.FillRectangle(0,0,UIPx(559),UIPx(39),UIInk(UI_HEADER));
    string pageTitle=uiStatistics ? "交易统计" : uiIndicators ? "看盘设置" : "T哥点位监控";
    UIText(_Symbol+" · "+pageTitle,16,10,222,11,UI_TEXT);
-   UIText("v1.35",242,13,40,8,UI_DIM);
+   UIText("v1.36",242,13,40,8,UI_DIM);
    UIText(TimeToString(TimeGMT()+8*3600,TIME_SECONDS),286,12,100,10,UI_MUTED,true);
    UIButton(uiCollapsed ? "+" : "−",396,7,30,1);
    UIText(启用真实交易 ? "交易模式" : "观察模式",434,13,110,9,启用真实交易 ? UI_ACCENT : UI_WARN,true);
