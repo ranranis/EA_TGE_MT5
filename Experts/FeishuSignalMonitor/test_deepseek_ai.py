@@ -76,6 +76,68 @@ class ValidationTests(unittest.TestCase):
         self.check_value(result(kind='MAP'),[dict(id='0',text='4175--4185--4200')])
 
 
+class ContextTests(unittest.TestCase):
+    def setUp(self):
+        self.origin=dict(message_id='om_direction',revision='r1',sender_id='teacher',source_role='teacher',
+                         time='2026-10-13T14:00:00+08:00',text='现在90可⬆️',historical=False,
+                         interpretation=result(token='90',price=4190,evidence='90可⬆️'))
+        self.target=dict(id='0',message_id='om_reminder',revision='r2',sender_id='teacher',source_role='teacher',
+                         time='2026-10-13T14:25:00+08:00',text='86了 注意。。',market_anchor=4186)
+    def value(self):
+        value=result(token='86',price=4186,evidence='86了 注意。。')
+        value['plans'][0]['context_ref']='om_direction'
+        return value
+    def validate(self, history=None, value=None):
+        return validate_output({'interpretations':[value or self.value()]},
+                               [self.target],4186,[self.origin] if history is None else history)['0']
+    def test_reference_update_inherits_only_direction_and_keeps_new_price_evidence(self):
+        value=self.validate()
+        self.assertEqual(value['plans'][0]['price'],4186)
+        self.assertEqual(value['plans'][0]['mode'],'REACTION')
+        self.assertEqual(value['source_refs'],[dict(message_id='om_direction',revision='r1')])
+        self.assertIn('上下文承接',value['reason'])
+        self.assertFalse(value['plans'][0]['near'])
+    def test_no_basis_other_sender_future_historical_or_two_sided_basis_rejected(self):
+        variants=[[],[dict(self.origin,sender_id='other')],[dict(self.origin,time='2026-10-13T14:26:00+08:00')],
+                  [dict(self.origin,historical=True)]]
+        two=copy.deepcopy(self.origin);two['interpretation']['plans'].append(
+            dict(side='SELL',token='4200',price=4200,mode='REACTION',evidence='4200空'))
+        variants.append([two])
+        for history in variants:
+            with self.subTest(history=history),self.assertRaises(AIError):self.validate(history)
+    def test_map_cancel_and_ambiguous_instruction_break_context(self):
+        for kind,text in [('MAP','4175--4190--4200'),('CANCEL','取消前面计划'),('UNKNOWN','现在换方向'),
+                          ('WATCH','先别做多'),('MODIFY','保护调一下'),('CLOSE','平仓')]:
+            barrier=dict(self.origin,message_id='om_barrier',time='2026-10-13T14:10:00+08:00',
+                         text=text,interpretation=result(kind=kind))
+            with self.subTest(kind=kind),self.assertRaises(AIError):self.validate([self.origin,barrier])
+    def test_pressure_watch_does_not_invent_sell_or_erase_prior_buy(self):
+        watch=dict(self.origin,message_id='om_pressure',text='4200压力继续有效',interpretation=result(kind='WATCH'))
+        self.assertEqual(self.validate([self.origin,watch])['plans'][0]['side'],'BUY')
+        wrong=self.value();wrong['plans'][0]['side']='SELL'
+        with self.assertRaises(AIError):self.validate(value=wrong)
+    def test_context_cannot_upgrade_to_market_or_use_member_receipt(self):
+        for key,val in [('mode','MARKET'),('context_ref','invented'),('price',4286)]:
+            value=self.value();value['plans'][0][key]=val
+            with self.subTest(key=key),self.assertRaises(AIError):self.validate(value=value)
+        self.target['source_role']='member'
+        with self.assertRaises(AIError):self.validate()
+    def test_exit_negation_and_receipts_cannot_be_context_entry(self):
+        for text in ['86了 不要进场','止损改到86注意','86上了注意','昨天86了注意','如果86了注意','86压力注意']:
+            self.target['text']=text;v=self.value();v['plans'][0]['evidence']=text
+            with self.subTest(text=text),self.assertRaises(AIError):self.validate(value=v)
+    def test_same_batch_uses_earlier_target_even_when_model_output_order_is_reversed(self):
+        first=dict(self.origin,id='0',market_anchor=4190);first.pop('interpretation')
+        second=dict(self.target,id='1')
+        explicit=result(token='90',price=4190,evidence='90可⬆️')
+        reminder=dict(self.value(),id='1')
+        values=validate_output({'interpretations':[reminder,explicit]},[first,second],4190)
+        self.assertEqual(values['1']['source_refs'][0]['message_id'],'om_direction')
+    def test_member_after_target_cannot_supply_missing_direction(self):
+        with self.assertRaises(AIError):self.validate([])
+
+
+
 class WorkerTests(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory();self.home=Path(self.temp.name)
@@ -158,6 +220,73 @@ class WorkerTests(unittest.TestCase):
         self.seed(mid='om_watch',text='74了观察',age=0)
         process_ai_batch(self.db,self.c,self.client('WATCH'),self.now+1)
         self.assertFalse(ai_snapshot(self.db,self.c,self.now+1,False)['active'])
+
+    def contextual_client(self):
+        def fake(targets,context,*_):
+            outputs=[]
+            for t in targets:
+                if t['text']=='现在90可⬆️':
+                    value=result(token='90',price=4190,evidence='90可⬆️')
+                else:
+                    value=result(token='86',price=4186,evidence='86了 注意。。')
+                    value['plans'][0]['context_ref']='om_direction'
+                outputs.append(dict(value,id=t['id']))
+            return {'interpretations':outputs}
+        return Mock(interpret=Mock(side_effect=fake))
+    def seed_context(self):
+        origin=self.seed(mid='om_direction',text='现在90可⬆️',age=30)
+        self.seed(mid='om_reminder',text='86了 注意。。',age=10)
+        return origin
+    def test_context_chain_publishes_reference_and_all_versions_then_withdrawal_disables(self):
+        origin=self.seed_context();client=self.contextual_client()
+        self.assertEqual(process_ai_batch(self.db,self.c,client,self.now),2)
+        setup=state(self.db,'deepseek_setup')
+        self.assertEqual(setup['plans'][0]['price'],4186)
+        self.assertEqual({r['message_id'] for r in setup['source_refs']},{'om_direction','om_reminder'})
+        self.assertTrue(ai_snapshot(self.db,self.c,self.now,False)['active'])
+        self.assertEqual(self.db.execute('SELECT count(*) FROM orders').fetchone()[0],0)
+        ingest(self.db,'oc_test',[dict(origin,deleted=True)])
+        self.assertFalse(ai_snapshot(self.db,self.c,self.now,False)['active'])
+    def test_cached_context_has_ids_and_versions_and_edit_during_request_does_not_publish(self):
+        origin=self.seed(mid='om_direction',text='现在90可⬆️',age=30)
+        process_ai_batch(self.db,self.c,self.contextual_client(),self.now)
+        self.seed(mid='om_reminder',text='86了 注意。。',age=0)
+        good=self.contextual_client()
+        def changed(targets,context,*rest):
+            self.assertEqual(context[-1]['message_id'],'om_direction')
+            self.assertTrue(context[-1]['revision'])
+            response=good.interpret(targets,context,*rest)
+            ingest(self.db,'oc_test',[dict(origin,content='取消多单参考',update_time='changed')])
+            return response
+        process_ai_batch(self.db,self.c,Mock(interpret=changed),self.now)
+        self.assertEqual(state(self.db,'deepseek_setup')['message_id'],'om_direction')
+        self.assertFalse(ai_snapshot(self.db,self.c,self.now,False)['active'])
+        self.assertIsNone(self.db.execute("SELECT 1 FROM ai_messages WHERE message_id='om_reminder'").fetchone())
+    def test_same_timestamp_uses_receipt_order_not_lexical_message_id(self):
+        self.seed(mid='om_direction',text='现在90可⬆️',age=10)
+        self.seed(mid='om_aaa',text='86了 注意。。',age=10)
+        process_ai_batch(self.db,self.c,self.contextual_client(),self.now)
+        self.assertEqual(state(self.db,'deepseek_setup')['message_id'],'om_aaa')
+        self.assertEqual(state(self.db,'deepseek_setup')['plans'][0]['price'],4186)
+    def test_retry_batch_cannot_skip_cached_cancel_between_targets(self):
+        self.seed(mid='om_direction',text='现在90可⬆️',age=30)
+        process_ai_batch(self.db,self.c,self.contextual_client(),self.now)
+        self.seed(mid='om_cancel',text='取消前面的参考',age=20)
+        cancel=result(kind='CANCEL');cancel['cancel_side']='ALL'
+        process_ai_batch(self.db,self.c,Mock(interpret=Mock(return_value={'interpretations':[cancel]})),self.now)
+        self.db.execute("UPDATE ai_messages SET status='RETRY',retry_at=0 WHERE message_id='om_direction'")
+        self.db.commit()
+        self.seed(mid='om_reminder',text='86了 注意。。',age=10)
+        client=self.contextual_client()
+        self.assertEqual(process_ai_batch(self.db,self.c,client,self.now),0)
+        self.assertEqual(state(self.db,'deepseek_setup')['mode'],'WAIT')
+        self.assertIn('om_cancel',[m['message_id'] for m in client.interpret.call_args.args[1]])
+    def test_uncertain_numeric_reminder_is_visible_for_review(self):
+        self.seed();process_ai_batch(self.db,self.c,self.client(),self.now)
+        self.seed(mid='om_unknown',text='86了 注意。。',age=0)
+        process_ai_batch(self.db,self.c,self.client('UNKNOWN'),self.now)
+        self.assertTrue(state(self.db,'deepseek_review'))
+        self.assertFalse(ai_snapshot(self.db,self.c,self.now,False)['active'])
 
 
 if __name__=='__main__':unittest.main()
