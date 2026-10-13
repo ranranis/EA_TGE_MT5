@@ -186,12 +186,14 @@ def export_teacher_levels(db,c,paused,now):
     ai=ai_snapshot(db,c,now,paused) if c.get('ai_enabled') else dict(active=False,mode='WAIT',plans=[],reason='AI未启用')
     bridge=io.StringIO(newline=''); aw=csv.writer(bridge,lineterminator='\r\n')
     note=str(ai['reason']).replace(',','，').replace('\r',' ').replace('\n',' ')[:160]
-    aw.writerow(['TGA','2',int(now),int(ai['active']),c['symbols'][c['teacher_symbol']],
+    aw.writerow(['TGA','3',int(now),int(ai['active']),c['symbols'][c['teacher_symbol']],
                  ai.get('message_id',''),ai.get('revision',''),int(ai.get('created',0)),len(ai['plans']),ai['mode'],note])
     for plan in ai['plans']:
         aw.writerow(['SETUP',plan['side'],format(plan['price'],'.10f'),plan['mode'],'NEAR' if plan.get('near') else 'POINT',
                      plan.get('origin_id',ai.get('message_id','')),plan.get('origin_revision',ai.get('revision','')),
-                     int(plan.get('origin_created',ai.get('created',0)))])
+                     int(plan.get('origin_created',ai.get('created',0))),
+                     *[format(((plan.get('exits') or {}).get(key) or {}).get('price',0),'.10f')
+                       for key in ('sl','tp1','tp2','breakeven')]])
     aw.writerow(['END',len(ai['plans'])])
     atomic_text(folder/'tge_ai_setups.csv',bridge.getvalue())
 

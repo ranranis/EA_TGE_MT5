@@ -175,7 +175,7 @@ class WorkerTests(unittest.TestCase):
         process_ai_batch(self.db,self.c,client,self.now+2);self.assertEqual(client.interpret.call_count,1)
         export_teacher_levels(self.db,self.c,False,self.now)
         lines=(self.home/'common/FeishuMT5SignalMonitor/tge_ai_setups.csv').read_text(encoding='utf-8').splitlines()
-        self.assertIn('SETUP,BUY,4168.0000000000,REACTION,POINT,om_test,'+state(self.db,'deepseek_setup')['revision']+','+str(int(state(self.db,'deepseek_setup')['created'])),lines);self.assertEqual(lines[-1],'END,1')
+        self.assertIn('SETUP,BUY,4168.0000000000,REACTION,POINT,om_test,'+state(self.db,'deepseek_setup')['revision']+','+str(int(state(self.db,'deepseek_setup')['created']))+',0.0000000000,0.0000000000,0.0000000000,0.0000000000',lines);self.assertEqual(lines[-1],'END,1')
     def test_api_failure_retries_without_advancing_or_order(self):
         self.seed();client=Mock(interpret=Mock(side_effect=AIError('timeout')))
         process_ai_batch(self.db,self.c,client,self.now)
@@ -193,9 +193,17 @@ class WorkerTests(unittest.TestCase):
     def test_withdraw_pause_sync_and_worker_failure_block_old_plan(self):
         m=self.seed();process_ai_batch(self.db,self.c,self.client(),self.now)
         self.assertFalse(ai_snapshot(self.db,self.c,self.now,True)['active'])
-        self.assertFalse(ai_snapshot(self.db,self.c,self.now+31,False)['active'])
+        self.assertTrue(ai_snapshot(self.db,self.c,self.now+31,False)['active'])
+        self.assertFalse(ai_snapshot(self.db,self.c,self.now+self.c['sync_max_age_seconds']+1,False)['active'])
         ingest(self.db,'oc_test',[dict(m,deleted=True)])
         self.assertFalse(ai_snapshot(self.db,self.c,self.now,False)['active'])
+    def test_persistent_plan_still_blocks_unread_cancel_and_explicit_worker_failure(self):
+        self.seed();process_ai_batch(self.db,self.c,self.client(),self.now)
+        self.seed(mid='cancel',text='取消全部参考',age=0)
+        self.assertFalse(ai_snapshot(self.db,self.c,self.now+31,False)['active'])
+        with self.db:set_state(self.db,'deepseek_status',dict(online=False,backlog=1,at=self.now))
+        self.assertFalse(ai_snapshot(self.db,self.c,self.now,False)['active'])
+
     def test_historical_import_is_audit_only(self):
         self.seed(historical=True);process_ai_batch(self.db,self.c,self.client(),self.now)
         self.assertIsNone(state(self.db,'deepseek_setup'))

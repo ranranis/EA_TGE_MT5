@@ -2,13 +2,18 @@
 Only copies the EA's quoted includes/resources; never overwrites the live EX5.
 """
 from pathlib import Path
+import argparse
 import re
 import shutil
 import subprocess
 root=Path.cwd()
-out=root/'_dev/compile/tge-v1.35'
-out.mkdir(parents=True,exist_ok=True)
 source=root/'EA_T哥点位跟单.mq5'
+version=re.search(r'#property version "([^"]+)"',source.read_text(encoding='utf-8-sig'))[1]
+parser=argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--output',default='_dev/compile/tge-v'+version)
+args=parser.parse_args()
+out=root/args.output
+out.mkdir(parents=True,exist_ok=True)
 seen=set()
 def copy(p):
     p=p.resolve()

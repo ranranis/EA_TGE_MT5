@@ -31,8 +31,8 @@ T哥SETUP的context_ref只能引用同一发送人更早的、已验证SETUP，�
 只在数量级由market_anchor与早先完整价格明确支持时补全尾数，不确定输出UNKNOWN。
 每个plan的token必须是当前原文中的数字，evidence必须是当前原文包含该token的连续片段。直接计划的evidence还必须含唯一方向，例如68⬆️；上下文承接计划可不含方向，但必须增加context_ref字段，方向来自被引用计划。无价格消息不能猜当前入场价。
 默认mode=REACTION，表示持续有效的明确条件计划；由EA在目标上下2.00区内用实时tick检查逆向冲击，不等收线。只有原文明确“现价/市价/直接进”且带数字价格才允许MARKET。
-“415开头的单多拿拿”是HOLD，不能猜TP；SL/TP/手数不允许你填造，EA使用已经配置的退出策略。非黄金品种归为DISCUSSION，没有本EA入场计划。
-CLOSE/MODIFY仅归类并说明，订单关联缺失时不猜该改哪笔；本模块不会执行这种请求。
+“415开头的单多拿拿”是HOLD，不能猜TP；SL/TP/手数不允许你填造。scene可另行提供有原文证据且唯一关联的退出价，无证据时由EA使用已有退出策略。非黄金品种归为DISCUSSION，没有本EA入场计划。
+CLOSE/MODIFY仅归类并说明，订单关联缺失时不猜该改哪笔；scene退出信息仅供后续新仓锁定，不直接修改既有仓位。
 JSON格式：{"interpretations":[{"id":"0","kind":"SETUP","plans":[{"side":"BUY","token":"68","price":4168,"mode":"REACTION","evidence":"68⬆️"}],"cancel_side":"NONE","reason":"中文说明"}]}
 kind只能MAP/SETUP/WATCH/HOLD/CANCEL/CLOSE/MODIFY/DISCUSSION/MEMBER_TRADE/UNKNOWN。除follow_member的MEMBER_TRADE可有一个plan外，非SETUP的plans为空。
 CANCEL只在明确取消当前参考时使用，cancel_side=ALL/BUY/SELL；其余为NONE。
@@ -721,7 +721,9 @@ def ai_snapshot(db, c, now, paused):
             source_ok=False;reason='关联点位来源已编辑/撤回，等待新解释'
     # 中性地图独立维护，不能取消老师仍有效的明确计划。
     ready=status.get('teacher_ready',bool(status.get('online') and not status.get('backlog'))) and lane_readiness(db,c,now)['teacher_ready']
-    if c.get('ai_enabled') and ready and now-status.get('at',0)<=30 and source_ok and healthy and not paused:
+    # 条件计划不因AI空闲心跳过30秒失效；新消息待解释、编辑/撤回、同步故障仍立即拦截。
+    persistent=setup.get('mode')=='SETUP' and all(p.get('mode')=='REACTION' for p in setup.get('plans',[]))
+    if c.get('ai_enabled') and ready and (persistent or now-status.get('at',0)<=30) and source_ok and healthy and not paused:
         mode=setup['mode'];reason=setup['reason'];plans=setup.get('plans',[])
         active=mode in ('MAP','SETUP')
     review=state(db,'deepseek_review',{})

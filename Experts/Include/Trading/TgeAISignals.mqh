@@ -1,17 +1,41 @@
 #ifndef TGE_AI_SIGNALS_MQH
 #define TGE_AI_SIGNALS_MQH
 // 这里只读经Python校验的参考快照；模型无权决定账号、手数或调用交易接口。
-struct AIPlan { int sign; double level; bool market,near; string origin,status; datetime created,left; };
+struct AIPlan { int sign; double level,sl,first,tp,breakeven; bool market,near; string origin,status; datetime created,left; };
 AIPlan aiPlans[];
 string aiMode="WAIT",aiReason="等待AI策略桥接",aiSource="",aiIdentity="";
 datetime aiGenerated=0,aiSourceTime=0;
 bool aiReady=false;
+bool aiPlanCached=false;
+
+bool AIChannelReady()
+{
+   long now=(long)TimeGMT();
+   return aiReady && healthOK && !healthPaused && aiGenerated>0 && healthBeat>0 && healthSync>0 && healthCheckpoint>0 && aiGenerated<=now+5 &&
+          now-aiGenerated<=healthMaxAge && healthBeat<=now+5 && healthSync<=now+5 &&
+          healthCheckpoint<=now+5 && now-healthBeat<=healthMaxAge &&
+          now-healthSync<=healthMaxAge && now-healthCheckpoint<=healthMaxAge;
+}
+bool KeepCachedAI(const string why)
+{
+   aiReady=aiPlanCached;
+   if(AIChannelReady())
+   {
+      aiReason=why+"；同步健康，短暂沿用已验证计划";
+      return true;
+   }
+   aiReady=false; aiReason=why; return false;
+}
+bool InvalidAI(const string why)
+{
+   aiReady=false; aiPlanCached=false; aiReason=why; return false;
+}
 
 bool ReadAISetups()
 {
    aiReady=false;
    int h=FileOpen("FeishuMT5SignalMonitor\\tge_ai_setups.csv",FILE_READ|FILE_TXT|FILE_ANSI|FILE_COMMON|FILE_SHARE_READ,0,CP_UTF8);
-   if(h==INVALID_HANDLE) { aiReason="AI快照尚未生成"; return false; }
+   if(h==INVALID_HANDLE) return KeepCachedAI("AI快照暂时不可读");
    string lines[];
    bool ok=FileSize(h)<=8192;
    while(ok && !FileIsEnding(h))
@@ -22,40 +46,55 @@ bool ReadAISetups()
    FileClose(h);
    string head[],foot[];
    if(!ok || ArraySize(lines)<2 || StringSplit(lines[0],',',head)!=11 ||
-      head[0]!="TGA" || (head[1]!="1" && head[1]!="2") || head[4]!=_Symbol ||
+      head[0]!="TGA" || (head[1]!="1" && head[1]!="2" && head[1]!="3") || head[4]!=_Symbol ||
       !Number(head[2]) || !Number(head[7]) || !Number(head[8]) || (head[3]!="0" && head[3]!="1"))
-   { aiReason="AI快照格式错误"; return false; }
+   { return InvalidAI("AI快照格式错误"); }
    int count=(int)StringToInteger(head[8]);
    datetime generated=(datetime)StringToInteger(head[2]),at=(datetime)StringToInteger(head[7]);
    if(count>4 || ArraySize(lines)!=count+2 || StringSplit(lines[count+1],',',foot)!=2 ||
-      foot[0]!="END" || foot[1]!=head[8] || generated>TimeGMT()+5 || TimeGMT()-generated>10 || at>TimeGMT()+5 ||
+      foot[0]!="END" || foot[1]!=head[8] || generated>TimeGMT()+5 || TimeGMT()-generated>healthMaxAge || at>TimeGMT()+5 ||
       (head[9]!="MAP" && head[9]!="SETUP" && head[9]!="WAIT"))
-   { aiReason="AI快照不完整/心跳中断"; return false; }
+   { return InvalidAI("AI快照心跳中断"); }
    AIPlan incoming[]; ArrayResize(incoming,count);
    for(int i=0;i<count;i++)
    {
       string fields[];
-      if(StringSplit(lines[i+1],',',fields)!=(head[1]=="2" ? 8 : 5) || fields[0]!="SETUP" ||
+      if(StringSplit(lines[i+1],',',fields)!=(head[1]=="3" ? 12 : head[1]=="2" ? 8 : 5) || fields[0]!="SETUP" ||
          (fields[1]!="BUY" && fields[1]!="SELL") || !Number(fields[2],true) ||
          (fields[3]!="REACTION" && fields[3]!="MARKET") || (fields[4]!="POINT" && fields[4]!="NEAR"))
-      { aiReason="AI方向/价格字段无效"; return false; }
+      { return InvalidAI("AI方向/价格字段无效"); }
       incoming[i].left=0; incoming[i].status="等待靠近";
+      incoming[i].sl=0; incoming[i].first=0; incoming[i].tp=0; incoming[i].breakeven=0;
       incoming[i].sign=fields[1]=="BUY" ? 1 : -1;
       incoming[i].level=StringToDouble(fields[2]); incoming[i].market=fields[3]=="MARKET"; incoming[i].near=fields[4]=="NEAR";
       incoming[i].origin=head[5]+"|"+head[6]+"|"+head[9]; incoming[i].created=at;
-      if(head[1]=="2")
+      if(head[1]!="1")
       {
          if(fields[5]=="" || fields[6]=="" || !Number(fields[7]) ||
             StringToInteger(fields[7])<=0 || StringToInteger(fields[7])>TimeGMT()+5)
-         { aiReason="AI计划来源无效"; return false; }
+        { return InvalidAI("AI计划来源无效"); }
          incoming[i].origin=fields[5]+"|"+fields[6]+"|SETUP";
          incoming[i].created=(datetime)StringToInteger(fields[7]);
       }
-      if(incoming[i].level<=0 || !MathIsValidNumber(incoming[i].level)) return false;
+      if(head[1]=="3")
+      {
+         for(int k=8;k<12;k++)
+            if(!Number(fields[k],true) || !MathIsValidNumber(StringToDouble(fields[k]))) return InvalidAI("退出价格无效");
+         incoming[i].sl=StringToDouble(fields[8]); incoming[i].first=StringToDouble(fields[9]);
+         incoming[i].tp=StringToDouble(fields[10]); incoming[i].breakeven=StringToDouble(fields[11]);
+         int sign=incoming[i].sign; double level=incoming[i].level;
+         if((incoming[i].sl>0 && sign*(level-incoming[i].sl)<=0) ||
+            (incoming[i].first>0 && sign*(incoming[i].first-level)<=0) ||
+            (incoming[i].tp>0 && sign*(incoming[i].tp-level)<=0) ||
+            (incoming[i].breakeven>0 && sign*(incoming[i].breakeven-level)<=0) ||
+            (incoming[i].first>0 && incoming[i].tp>0 && sign*(incoming[i].tp-incoming[i].first)<=0))
+            return InvalidAI("退出价格方向/先后顺序无效");
+      }
+      if(incoming[i].level<=0 || !MathIsValidNumber(incoming[i].level)) return InvalidAI("AI计划价格无效");
    }
    bool active=head[3]=="1";
    if(active && (at<=0 || head[5]=="" || head[6]=="" ||
-      (head[9]=="SETUP" && count<1) || (head[9]=="MAP" && count!=0))) return false;
+      (head[9]=="WAIT") || (head[9]=="SETUP" && count<1) || (head[9]=="MAP" && count!=0))) return InvalidAI("AI快照激活状态无效");
    string next=head[5]+"|"+head[6]+"|"+head[9];
    if(active && (!aiReady || next!=aiIdentity))
    {
@@ -64,6 +103,7 @@ bool ReadAISetups()
    }
    aiIdentity=next; aiSource=head[5]; aiMode=head[9]; aiSourceTime=at; aiGenerated=generated;
    aiReason=head[10]; aiReady=active;
+   aiPlanCached=active && head[9]=="SETUP" && count>0;
    for(int i=0;i<count;i++)
       for(int j=0;j<ArraySize(aiPlans);j++)
          if(aiPlans[j].origin==incoming[i].origin && aiPlans[j].sign==incoming[i].sign && aiPlans[j].level==incoming[i].level)
@@ -139,7 +179,7 @@ bool InTeacherBand(const double entry,const double level)
 }
 bool LiveTeacherPlan(const int i)
 {
-   return 读取AI即时策略 && aiReady && aiMode=="SETUP" && TimeGMT()-aiGenerated<=10 &&
+   return 读取AI即时策略 && AIChannelReady() && aiMode=="SETUP" &&
           (!aiPlans[i].market || (aiPlans[i].created>fastStarted && TimeGMT()>=aiPlans[i].created && TimeGMT()-aiPlans[i].created<180));
 }
 bool TeacherOwnsZone(const MqlTick &q)
@@ -156,7 +196,7 @@ bool TeacherEntryAllowed(const int i,const MqlTick &q)
    if(!LiveTeacherPlan(i)) status="来源未就绪/市价已过时";
    else if(!InTeacherBand(entry,aiPlans[i].level)) status="离开允许区域，不追价";
    else if(SameOpportunity(aiPlans[i].sign,aiPlans[i].level) && Load(key)==0) status="同向同机会已合并，等待重新离区";
-   else if(Load(key)>0) status="本次触及已消费，需离开4.00至少5秒且持仓结束";
+   else if(Load(key)>0) status="本次触及已消费，需离开4.00至少5秒后再回区";
    else if(Load(key+"r")>TimeGMT()) status="明确拒绝后的短暂重试冷却";
    else if(!TickImpact(aiPlans[i].sign,q.time_msc,speed,oneway,pullback)) status="短暂采样：需4个tick覆盖1秒";
    else if(speed>=逆向冲击速度 && oneway>=冲击单向比例 && pullback<恢复回拉价格)
@@ -167,13 +207,13 @@ bool TeacherEntryAllowed(const int i,const MqlTick &q)
 }
 void UpdateTeacherVisits(const MqlTick &q)
 {
-   // 定时器观察连续离区；重启清掉left计时但保留消费，不把停机时间算离区。
+   // Tick和定时器观察离区；重启清掉left计时但保留消费，不把停机时间算离区。
    for(int i=0;i<ArraySize(aiPlans);i++)
    {
       string key=AIVisitKey(aiPlans[i].level,aiPlans[i].sign);
       double entry=aiPlans[i].sign>0 ? q.ask : q.bid;
-      if(Load(key)>0 && !aiPlans[i].market && MathAbs(entry-aiPlans[i].level)>=REARM_DISTANCE &&
-         pending.kind==0 && OwnCount()==0)
+      if(Load(key)>0 && !aiPlans[i].market && 允许同机会重入 &&
+         MathAbs(entry-aiPlans[i].level)>=REARM_DISTANCE && pending.kind==0)
       {
          if(aiPlans[i].left==0) aiPlans[i].left=TimeGMT();
          if(TimeGMT()-aiPlans[i].left>=REARM_SECONDS)
@@ -197,11 +237,10 @@ bool AISignal(const MqlRates &bar,const MqlTick &q,Candidate &out)
          entryView.distance=gap; entryView.bar=TimeCurrent(); entryView.reaction=allowed; entryView.method="T哥实时近价";
       }
       if(!allowed) continue;
-      double tp;
-      if(!Target(aiPlans[i].sign>0 ? q.ask : q.bid,aiPlans[i].sign,tp,false,aiPlans[i].level))
-      { reason="现有退出模板空间不足"; aiPlans[i].status=reason; continue; }
       out.valid=true; out.ai=true; out.follow=false; out.direction=aiPlans[i].sign; out.level=aiPlans[i].level;
       out.bar=TimeCurrent(); out.originHash=Hash(aiPlans[i].origin); out.aiKey=AIVisitKey(out.level,out.direction);
+      out.exitSL=aiPlans[i].sl; out.exitFirst=aiPlans[i].first;
+      out.exitTP=aiPlans[i].tp; out.exitBE=aiPlans[i].breakeven;
       out.method=(aiPlans[i].market ? "T哥市价候选[" : "T哥近价候选[")+aiSource+"]";
       reason=out.method; return true;
    }
@@ -210,7 +249,7 @@ bool AISignal(const MqlRates &bar,const MqlTick &q,Candidate &out)
 bool AIMarketSignal(Candidate &out)
 {
    // 兼容旧调用名：MARKET与持续条件计划都走实时通道，不调用CopyRates/CopyBuffer。
-   if(!读取AI即时策略 || !aiReady || aiMode!="SETUP" || TimeGMT()-aiGenerated>10) return false;
+   if(!读取AI即时策略 || !AIChannelReady() || aiMode!="SETUP") return false;
    MqlTick q;
    if(!FreshQuote(q)) { reason="报价过期/断线"; return false; }
    RememberFastTick(q);
@@ -220,7 +259,7 @@ bool AIMarketSignal(Candidate &out)
 }
 string AIPlanCaption()
 {
-   if(!aiReady) return "老师通道WAIT："+aiReason;
+   if(!AIChannelReady()) return "老师通道WAIT："+aiReason;
    if(aiMode=="MAP") return "中性地图已就绪 · 普通策略仍用M5/M1确认";
    return "老师计划优先 · 实时±2.00 · 请求后等待券商Deal确认";
 }
@@ -371,8 +410,8 @@ void UpdateSharedVisit(const MqlTick &q)
    {
       int sign=sharedVisits[i].sign;
       string key=SharedVisitKey(sharedVisits[i].level,sign);
-      if(Load(key)>0 && MathAbs((sign>0 ? q.ask : q.bid)-sharedVisits[i].level)>=REARM_DISTANCE &&
-         pending.kind==0 && OwnCount()==0)
+      if(Load(key)>0 && 允许同机会重入 &&
+         MathAbs((sign>0 ? q.ask : q.bid)-sharedVisits[i].level)>=REARM_DISTANCE && pending.kind==0)
       {
          if(sharedVisits[i].left==0) sharedVisits[i].left=TimeGMT();
          if(TimeGMT()-sharedVisits[i].left>=REARM_SECONDS) { Store(key,0); GlobalVariablesFlush(); }

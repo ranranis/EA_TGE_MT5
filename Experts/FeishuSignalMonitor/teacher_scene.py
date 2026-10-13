@@ -17,10 +17,12 @@ regime_ref有证据时为{"message_id":"真实来源ID","evidence":"原文连续
 每个plan固定字段：
 {"side":"BUY|SELL","token":"价格原文数字","price":4175,"mode":"REACTION|MARKET",
 "price_ref":"价格所在原消息ID","price_evidence":"含该token的原文连续片段",
-"direction_ref":"方向依据所在原消息ID","direction_evidence":"表达买卖方向的原文连续片段"}
+"direction_ref":"方向依据所在原消息ID","direction_evidence":"表达买卖方向的原文连续片段",
+"exits":{"sl":null,"tp1":null,"tp2":null,"breakeven":null}}
 range对象固定为{"low":价格证据对象,"high":价格证据对象}；
 价格证据对象固定为{"message_id":"来源","token":"数字","price":4175,"evidence":"原文连续片段"}。
-interpretations的plan只允许side/token/price/mode/evidence（或context_ref），不能复制context中的near/source_refs/origin等本地内部字段。scene.plan使用自己定义的八个字段，与逐条plan字段不同。
+interpretations的plan只允许side/token/price/mode/evidence（或context_ref），不能复制context中的near/source_refs/origin等本地内部字段。scene.plan另可带exits，与逐条plan字段不同。
+exits各项为价格证据对象或null，sl是绝对止损价，tp1为首批减仓价，tp2为最终止盈价，breakeven为到达后推至开仓价的触发价。仅提取老师明确给出且与此入场计划唯一关联的价格，证据连续片段须包含对应价格及止损/止盈/保本角色；跨消息时须明确写出入场价和方向。缺失字段填null，不能把行情位置、点位列表或距离推算成退出价。只有一个明确止盈目标时填tp2；无tp1时由EA原有分批模板处理。退出信息更新用UPDATE保留完整计划。没有明确关联的“保本/出一半”只解释，不猜具体仓位。
 处理原则：
 1. 理解语义与数字角色。当前行情价、时间周期、入场价、目标价分开：例如“15分钟连绿，现在81了，多单等到75行动”明确表达等4175再做多，必须提取BUY4175（REACTION），81是行情位置、15是周期，不是入场价。
 2. “然后上去93可↓”是补充SELL4193，应保留此前BUY4175；多空计划分别维护。明确“改到/不做/取消/最新取代”等才移除或替换对应旧计划，完整地图更新后不能复活此前作废方向。
@@ -98,7 +100,7 @@ def validate_scene(value, targets, context, anchor, previous=None):
     clean=[]
     for plan in value['plans']:
         required={'side','token','price','mode','price_ref','price_evidence','direction_ref','direction_evidence'}
-        if not isinstance(plan,dict) or set(plan)!=required or plan['side'] not in ('BUY','SELL') or plan['mode'] not in ('REACTION','MARKET'):
+        if not isinstance(plan,dict) or set(plan) not in (required,required|{'exits'}) or plan['side'] not in ('BUY','SELL') or plan['mode'] not in ('REACTION','MARKET'):
             raise AIError('AI场景计划字段无效')
         price(dict(message_id=plan['price_ref'],token=plan['token'],price=plan['price'],evidence=plan['price_evidence']))
         direction=evidence(plan['direction_ref'],plan['direction_evidence'])
@@ -119,6 +121,37 @@ def validate_scene(value, targets, context, anchor, previous=None):
             raise AIError('AI场景计划重复')
         if any(p['price']==plan['price'] and p['side']!=plan['side'] for p in clean):
             raise AIError('同价双向条件矛盾，等待老师确认')
+        exits=plan.get('exits')
+        if exits is not None:
+            if not isinstance(exits,dict) or set(exits)!={'sl','tp1','tp2','breakeven'}:
+                raise AIError('退出计划字段无效')
+            sign=1 if plan['side']=='BUY' else -1
+            roles={'sl':r'止损|SL','tp1':r'止盈|减仓|首批|第一目标|先看|TP1',
+                   'tp2':r'止盈|目标|尾仓|TP2|TP','breakeven':r'保本|推保护'}
+            prices={}
+            for key,proof in exits.items():
+                if proof is None: continue
+                number=price(proof); quote=proof['evidence']; item=items[proof['message_id']]
+                if re.search(r'历史|晒单|转发|假设|昨天|回顾|玩笑|不要|取消|不是|不在|别设',quote):
+                    raise AIError('退出证据不是当前明确计划')
+                token=re.escape(proof['token'])
+                # 价格紧邻角色，避免一段话里把入场价/行情价错贴为止损。
+                if not re.search(r'(?:'+roles[key]+r')[\s:：]*(?:(?:设在|放在|放|到|在|看)\s*)?'+token+r'(?![\d.])|(?<![\d.])'+token+r'\s*(?:'+roles[key]+r')',quote,re.I):
+                    raise AIError('退出价格缺少明确角色')
+                same_source=proof['message_id']==plan['price_ref'] and sum(p['price_ref']==plan['price_ref'] for p in value['plans'])==1
+                source_buy=bool(re.search(r'做多|多单|买入|↑',item['text']))
+                source_sell=bool(re.search(r'做空|空单|卖出|↓',item['text']))
+                same_source=same_source and source_buy!=source_sell and source_buy==(sign==1)
+                entry_tokens=(plan['token'],format(plan['price'],'g'))
+                has_entry=any(re.search(r'(?<![\d.])'+re.escape(t)+r'(?![\d.])',quote) for t in entry_tokens)
+                has_buy=bool(re.search(r'做多|多单|买入|↑',quote));has_sell=bool(re.search(r'做空|空单|卖出|↓',quote))
+                if not same_source and not (has_entry and has_buy!=has_sell and has_buy==(sign==1)):
+                    raise AIError('退出计划无法唯一关联入场')
+                if sign*(number-plan['price'])*( -1 if key=='sl' else 1)<=0:
+                    raise AIError('退出价格方向无效')
+                prices[key]=number
+            if prices.get('tp1') and prices.get('tp2') and sign*(prices['tp2']-prices['tp1'])<=0:
+                raise AIError('首批与尾仓目标顺序无效')
         source=items[plan['price_ref']]
         # 价格只证明数值，不给方向续期：从方向证据开始核对其取消生命周期。
         # 取消后有新的明确方向时，以新方向来源重新建立；较早价格证据仍单独校验。

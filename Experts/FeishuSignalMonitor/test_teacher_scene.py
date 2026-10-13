@@ -100,6 +100,62 @@ class ReferenceTransportTests(unittest.TestCase):
             validate_scene(output['scene'],targets,context,4181)
 
 
+class ExitPlanTests(unittest.TestCase):
+    def case(self):
+        text='4175做多，止损4168，首批4180，尾仓4190，保本4178'
+        targets=[message('entry',text,1)]
+        value=dict(as_of='entry',action='UPDATE',regime='UNKNOWN',regime_ref=None,
+                   plans=[plan('BUY','4175',4175,'entry','4175做多')],
+                   inner_range=None,outer_range=None,summary='有证据的退出计划')
+        def proof(token,evidence=None):
+            return dict(message_id='entry',token=token,price=float(token),evidence=evidence or text)
+        value['plans'][0]['exits']={k:proof(t) for k,t in
+            [('sl','4168'),('tp1','4180'),('tp2','4190'),('breakeven','4178')]}
+        return targets,value
+
+    def test_explicit_exit_prices_and_proof_survive_validation(self):
+        targets,value=self.case()
+        clean=validate_scene(value,targets,[],4181)
+        self.assertEqual(clean['plans'][0]['exits']['sl']['price'],4168)
+        self.assertEqual(clean['plans'][0]['exits']['breakeven']['price'],4178)
+
+    def test_unknown_price_role_reversed_targets_and_missing_association_fail(self):
+        for change in ('number','role','order','foreign','historical','direction'):
+            with self.subTest(change=change),self.assertRaises(AIError):
+                targets,value=self.case();exits=value['plans'][0]['exits']
+                if change=='number':exits['sl']['price']=4268
+                if change=='role':exits['sl'].update(token='4175',price=4175)
+                if change=='order':
+                    exits['tp1'],exits['tp2']=exits['tp2'],exits['tp1']
+                    targets[0]['text']+='，止盈4180，止盈4190'
+                    exits['tp1']['evidence']=exits['tp2']['evidence']=targets[0]['text']
+                if change in ('foreign','historical'):
+                    targets.append(message('exit','昨天止损4168' if change=='historical' else '止损4168',2))
+                    value['as_of']='exit';exits['sl'].update(message_id='exit',evidence=targets[-1]['text'])
+                if change=='direction':
+                    targets[0]['text']=targets[0]['text'].replace('4168','4185')
+                    exits['sl'].update(token='4185',price=4185,evidence=targets[0]['text'])
+                    for k in ('tp1','tp2','breakeven'):exits[k]=None
+                validate_scene(value,targets,[],4181)
+
+    def test_cross_message_requires_stated_entry_direction_and_tracks_source(self):
+        targets,value=self.case()
+        targets.append(message('update','4175多单止损4169',2))
+        value['as_of']='update'
+        value['plans'][0]['exits']['sl']=dict(message_id='update',token='4169',price=4169,evidence=targets[-1]['text'])
+        clean=validate_scene(value,targets,[],4181)
+        self.assertIn('update',{r['message_id'] for r in clean['source_refs']})
+        self.assertEqual(clean['plans'][0]['exits']['sl']['price'],4169)
+
+    def test_one_clause_cannot_assign_other_plan_exit(self):
+        targets,value=self.case()
+        targets[0]['text']+='；4193做空，止损4200'
+        value['plans'].append(plan('SELL','4193',4193,'entry','4193做空'))
+        # 证据只有另一个计划的止损，不能仅凭同消息就套在多单上。
+        value['plans'][0]['exits']['sl'].update(token='4200',price=4200,evidence='4193做空，止损4200')
+        with self.assertRaises(AIError):validate_scene(value,targets,[],4181)
+
+
 class SceneTests(unittest.TestCase):
     def test_full_conversation_has_both_directions_and_ranges(self):
         targets,context,scene=example();clean=validate_scene(scene,targets,context,4181)
@@ -218,6 +274,26 @@ class SceneWorkerTests(DatabaseFixture):
             return dict(interpretations=[dict(result(kind='WATCH'),id=t['id']) for t in targets],scene=scene)
         with self.db:set_state(self.db,'teacher_analysis',{'quote':{'bid':4181,'ask':4181.2,'at':self.now},'bars':[]})
         return response
+    def test_validated_exits_export_in_tga3(self):
+        from app import export_teacher_levels
+        import csv
+        text='4175做多，止损4168，首批4180，尾仓4190，保本4178'
+        self.seed(mid='entry-exit',text=text,age=0)
+        def response(targets,*args):
+            p=plan('BUY','4175',4175,'entry-exit','4175做多')
+            p['exits']={k:dict(message_id='entry-exit',token=str(n),price=n,evidence=text)
+                for k,n in [('sl',4168),('tp1',4180),('tp2',4190),('breakeven',4178)]}
+            scene=dict(as_of='entry-exit',action='UPDATE',regime='UNKNOWN',regime_ref=None,
+                plans=[p],inner_range=None,outer_range=None,summary='退出证据测试')
+            return dict(interpretations=[dict(result(kind='WATCH'),id=t['id']) for t in targets],scene=scene)
+        process_ai_batch(self.db,self.c,Mock(interpret=response),self.now)
+        export_teacher_levels(self.db,self.c,False,self.now)
+        with (self.home/'common/FeishuMT5SignalMonitor/tge_ai_setups.csv').open(encoding='utf-8',newline='') as file:
+            rows=list(csv.reader(file))
+        self.assertEqual(rows[0][1],'3')
+        self.assertEqual(list(map(float,rows[1][8:])),[4168,4180,4190,4178])
+        self.assertEqual(self.db.execute('SELECT count(*) FROM orders').fetchone()[0],0)
+
     def test_scene_is_execution_source_even_when_individual_classifications_are_watch(self):
         client=Mock(interpret=self.scene_case())
         self.assertEqual(process_ai_batch(self.db,self.c,client,self.now),3)
@@ -228,9 +304,9 @@ class SceneWorkerTests(DatabaseFixture):
         import csv
         with (self.home/'common/FeishuMT5SignalMonitor/tge_ai_setups.csv').open(encoding='utf-8',newline='') as file:
             lines=list(csv.reader(file))
-        self.assertEqual(lines[0][:2],['TGA','2'])
+        self.assertEqual(lines[0][:2],['TGA','3'])
         self.assertEqual([lines[1][5],lines[2][5]],['buy','sell'])
-        self.assertEqual(len(lines[1]),8)
+        self.assertEqual(len(lines[1]),12)
         self.assertEqual(self.db.execute('SELECT count(*) FROM orders').fetchone()[0],0)
         self.seed(mid='smalltalk',text='慢慢来',age=0)
         keep=dict(as_of='smalltalk',action='KEEP',regime='UNKNOWN',regime_ref=None,plans=[],inner_range=None,outer_range=None,summary='沿用')

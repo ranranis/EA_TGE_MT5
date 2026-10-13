@@ -1,5 +1,5 @@
 #property strict
-#property version "1.35"
+#property version "1.36"
 #property description "T哥点位地图 / M5 MA5 / M1收线 / 0.02手分批。独立Magic，仅管理本EA持仓。"
 #include <Trade/Trade.mqh>
 #include <Canvas/Canvas.mqh>
@@ -25,12 +25,14 @@ input double 冲击单向比例=0.85;
 input double 恢复回拉价格=0.35;
 input group "T哥点位节奏与退出"
 input bool   允许震荡点位反应=true;
+input bool   允许地图趋势过滤=true;       // 趋势明确时只做顺趋势方向；震荡时保留双向反应
+input bool   允许同机会重入=true;         // 离开同一机会后，允许在仍有其他仓位时再次进入
 input double 保险价格距离=10.0;
 input double 首批止盈价格距离=5.0;
 input double 尾仓目标价格距离=10.0;
 
 input group "手机点位 TP 标记"
-input bool   启用手机标记挂单=true;       // 真实0.01手Buy Limit，仅用TP显示老师点位
+input bool   启用手机标记挂单=false;      // 默认关闭；启用后会向服务器发送真实0.01手Buy Limit
 input double 手机标记挂单固定价格=100.0; // 仅黄金；接近挂单价20点时请求撤销
 
 // 以下参数只配置图表显示，不改变M5/M1交易规则。
@@ -98,7 +100,7 @@ struct Pending
    int kind;                 // 1开仓，2分批，3保护修改
    ulong order,position;
    datetime at,bar;
-   double volume,sl,tp,level;
+   double volume,sl,tp,level,exitSL,exitFirst,exitTP,exitBE;
    int direction;
    bool fast;
    uint originHash;
@@ -108,7 +110,7 @@ struct Candidate
 {
    bool valid,ai,follow;
    int direction;
-   double level;
+   double level,exitSL,exitFirst,exitTP,exitBE;
    datetime bar,followExpiry;
    string method,followKey,aiKey;
    uint originHash;
@@ -152,6 +154,7 @@ void SavePending()
    Store("volume",pending.volume); Store("sl",pending.sl); Store("tp",pending.tp);
    Store("level",pending.level); Store("direction",pending.direction);
    Store("fast",pending.fast ? 1 : 0); Store("originHash",(double)pending.originHash);
+   Store("exitSL",pending.exitSL); Store("exitFirst",pending.exitFirst); Store("exitBE",pending.exitBE); Store("exitTP",pending.exitTP);
    Store("kind",pending.kind); GlobalVariablesFlush();
 }
 void ClearPending()
@@ -164,6 +167,7 @@ void RestorePending()
    pending.position=(ulong)Load("position"); pending.at=(datetime)Load("at"); pending.bar=(datetime)Load("bar");
    pending.volume=Load("volume"); pending.sl=Load("sl"); pending.tp=Load("tp");
    pending.level=Load("level"); pending.direction=(int)Load("direction");
+   pending.exitSL=Load("exitSL"); pending.exitFirst=Load("exitFirst"); pending.exitBE=Load("exitBE"); pending.exitTP=Load("exitTP");
    pending.fast=Load("fast")==1; pending.originHash=(uint)Load("originHash");
 }
 bool CanExecute()
@@ -393,7 +397,7 @@ bool Target(const double entry,const int sign,double &tp,const bool mapOnly=fals
          double gap=sign*(aiPlans[i].level-entry);
          if(gap>TickSize()) distance=MathMin(distance,gap-MathMax(0.20,TickSize()*2));
       }
-      if(distance<=首批止盈价格距离+TickSize()) return false;
+      if(distance<=TickSize()*2) return false;
       tp=Align(entry+sign*distance,-sign); return true;
    }
    for(int i=0;i<ArraySize(levels);i++)
@@ -401,7 +405,7 @@ bool Target(const double entry,const int sign,double &tp,const bool mapOnly=fals
       double gap=sign*(levels[i]-entry);
       if(gap>TickSize()) distance=MathMin(distance,gap-MathMax(0.20,TickSize()*2));
    }
-   if(distance<=首批止盈价格距离+TickSize()) return false;
+   if(distance<=TickSize()*2) return false;
    tp=Align(entry+sign*distance,-sign); // 不把目标舍入到阻力之外
    return true;
 }
@@ -427,7 +431,7 @@ bool MapReaction(const MqlRates &bar,const MqlRates &previous,const MqlRates &m5
             if(MathAbs(aiPlans[j].level-level)<=TickSize()) explicitLevel=true;
       if(explicitLevel) continue; // 该价位保留老师指定方向，不偷偷反做。
       datetime consumed=(datetime)Load(VisitKey(level));
-      if(consumed>0 && bar.time>consumed && MathAbs(bar.close-level)>MathMax(atr,2.0))
+      if(允许同机会重入 && consumed>0 && bar.time>consumed && MathAbs(bar.close-level)>MathMax(atr,2.0))
          Store(VisitKey(level),0);
       for(int sign=-1;sign<=1;sign+=2)
       {
@@ -441,10 +445,11 @@ bool MapReaction(const MqlRates &bar,const MqlRates &previous,const MqlRates &m5
          bool reaction=Reaction(bar,previous,level,sign,tolerance,escape);
          double tp;
          string blocked=Load(VisitKey(level))>0 ? "本点位机会已消费，等待离开后再回踩" :
+                        (允许地图趋势过滤 && trend!=0 && sign!=trend) ? "M5趋势相反，地图反应等待顺势" :
                         gap>MathMin(atr*0.75,首批止盈价格距离*0.8) ? "距地图点位过远，不追单" :
                         !rejection ? "等待M5在地图点位收回确认" :
                         !reaction ? "等待M1在地图点位止跌/受阻" :
-                        !Target(entry,sign,tp,true) ? "下一地图点位前不足首批止盈空间" : "";
+                        !Target(entry,sign,tp,true) ? "下一地图点位前无有效止盈空间" : "";
          if(gap<nearest || blocked=="")
          {
             nearest=gap; reason=blocked;
@@ -471,7 +476,7 @@ bool Signal(Candidate &out)
    if(checkingMinute>0 && TimeTradeServer()-checkingMinute>90) { reason="本根M1评估窗口已结束"; return false; }
    MqlTick quote;
    if(!feedActive) { reason="点位地图未启用，等待有效来源"; return false; }
-   if(读取AI即时策略 && (!aiReady || TimeGMT()-aiGenerated>10))
+   if(读取AI即时策略 && !AIChannelReady())
    { reason="AI等待："+aiReason; return false; }
    if(!FreshQuote(quote)) { signalRetry=true; reason="报价过期/断线，等待新鲜报价"; return false; }
    if(quote.ask-quote.bid>最大点差价格) { reason="点差过大"; return false; }
@@ -539,7 +544,7 @@ bool Signal(Candidate &out)
       // 当前明确回踩价仍由AI分支处理；只拓展其方向前方的其他地图点位。
       if(continuation && continuationSign*(level-continuationAnchor)<=TickSize()) continue;
       datetime consumed=(datetime)Load(VisitKey(level));
-      if(consumed>0 && m1[0].time>consumed && MathAbs(m1[0].close-level)>MathMax(atr,2.0))
+      if(允许同机会重入 && consumed>0 && m1[0].time>consumed && MathAbs(m1[0].close-level)>MathMax(atr,2.0))
          Store(VisitKey(level),0); // 离开后才可重新回踩；消息重发不会重置
       bool consumedVisit=Load(VisitKey(level))>0;
       int flips=0;
@@ -644,6 +649,37 @@ bool FinalOrderConfirmed(const ulong order)
    // FILLED但Deal迟到不能先解锁。
    return (state!=ORDER_STATE_FILLED || actual>0) && actual+1e-8>=filled;
 }
+// 将请求的明确退出价绑定真实POSITION_IDENTIFIER；请求不等于成交，重启靠pending补写。
+string ExitKey(const ulong id) { return "exit"+IntegerToString((long)id)+"."; }
+bool SaveEntryExits()
+{
+   if(pending.exitSL==0 && pending.exitFirst==0 && pending.exitBE==0 && pending.exitTP==0) return true;
+   bool found=false;
+   for(int i=0;i<HistoryDealsTotal();i++)
+   {
+      ulong deal=HistoryDealGetTicket(i);
+      if((ulong)HistoryDealGetInteger(deal,DEAL_ORDER)!=pending.order ||
+         HistoryDealGetInteger(deal,DEAL_ENTRY)!=DEAL_ENTRY_IN ||
+         (ulong)HistoryDealGetInteger(deal,DEAL_MAGIC)!=EA魔法号 ||
+         HistoryDealGetString(deal,DEAL_SYMBOL)!=_Symbol) continue;
+      ulong id=(ulong)HistoryDealGetInteger(deal,DEAL_POSITION_ID);
+      if(id==0) return false;
+      string key=ExitKey(id);
+      if(!Store(key+"ready",0) || !Store(key+"sl",pending.exitSL) ||
+         !Store(key+"first",pending.exitFirst) || !Store(key+"be",pending.exitBE) || !Store(key+"tp",pending.exitTP) ||
+         !Store(key+"ready",1)) return false;
+      found=true;
+   }
+   GlobalVariablesFlush(); return found;
+}
+double FirstExit(const ulong id,const int sign,const double open,const double tp)
+{
+   string key=ExitKey(id);
+   double first=Load(key+"ready")==1 ? Load(key+"first") : 0;
+   if(first<=0) first=open+sign*首批止盈价格距离;
+   // 近目标小于首批距离时由服务器TP全量退出，不把TP改到障碍之后。
+   return tp>0 && sign*(first-tp)>=-TickSize() ? tp : Align(first,-sign);
+}
 void Reconcile()
 {
    if(pending.kind==0 || !TerminalInfoInteger(TERMINAL_CONNECTED)) return;
@@ -707,7 +743,11 @@ void Reconcile()
       {
          // 返回结果写回前重启，也由真实订单/Deal对账补齐同机会合并状态。
          double filled=HistoryOrderGetDouble(pending.order,ORDER_VOLUME_INITIAL)-HistoryOrderGetDouble(pending.order,ORDER_VOLUME_CURRENT);
-         if(filled>1e-8) MergeOpportunity(pending.direction,pending.level);
+         if(filled>1e-8)
+         {
+            if(!SaveEntryExits()) { reason="成交退出计划尚未保存，保留请求等待重试"; return; }
+            MergeOpportunity(pending.direction,pending.level);
+         }
          else if(pending.fast)
          {
             string key=AIKeyFromHash(pending.originHash,pending.level,pending.direction);
@@ -748,8 +788,13 @@ void Open(const Candidate &signal)
    // 成员跟随沿用现有10点尾仓/5点分批退出，不把老师地图障碍当成他的入场价。
    bool targetOK=true;
    if(signal.follow) tp=Align(entry+sign*尾仓目标价格距离,-sign);
+   else if(signal.ai && signal.exitTP>0) tp=Align(signal.exitTP,-sign);
    else targetOK=Target(entry,sign,tp,!signal.ai,signal.ai ? signal.level : 0);
-   if(!targetOK || !Stops(sign,sl,tp,q)) { reason="价格保护不符合券商规格"; return; }
+   if(signal.ai && signal.exitSL>0) sl=Align(signal.exitSL,sign);
+   if(!targetOK || sign*(entry-sl)<=0 || sign*(tp-entry)<=TickSize() ||
+      (signal.ai && signal.exitFirst>0 && (sign*(signal.exitFirst-entry)<=0 || sign*(tp-signal.exitFirst)<=TickSize())) ||
+      (signal.ai && signal.exitBE>0 && (sign*(signal.exitBE-entry)<=0 || sign*(tp-signal.exitBE)<0)) ||
+      !Stops(sign,sl,tp,q)) { reason="退出价已错过/顺序无效或不符合券商规格"; return; }
    ENUM_ORDER_TYPE type=sign>0 ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
    double margin=0;
    if(!OrderCalcMargin(type,_Symbol,每次开仓手数,entry,margin) || margin>AccountInfoDouble(ACCOUNT_MARGIN_FREE))
@@ -775,6 +820,9 @@ void Open(const Candidate &signal)
    ZeroMemory(pending); pending.kind=1; pending.at=TimeCurrent(); pending.bar=signal.bar;
    pending.volume=每次开仓手数; pending.sl=sl; pending.tp=tp; pending.level=signal.level; pending.direction=sign;
    pending.fast=signal.ai; pending.originHash=signal.originHash;
+   pending.exitSL=signal.ai ? signal.exitSL : 0;
+   pending.exitFirst=signal.ai ? signal.exitFirst : 0; pending.exitBE=signal.ai ? signal.exitBE : 0;
+   pending.exitTP=signal.ai ? signal.exitTP : 0;
    SavePending(); if(!CanExecute()) { reason="请求意图已保存，但执行条件失效，待核对"; return; }
    DecisionLog("REQUEST_INTENT",signal.method);
    execution.PositionOpen(_Symbol,type,每次开仓手数,entry,sl,tp,EntryTag());
@@ -826,7 +874,9 @@ string PositionProgress(const ulong id,const int sign,const double open,const do
    if(pending.kind==2 && pending.position==id) return reduced+"分批请求待确认";
    MqlTick q;
    if(!FreshQuote(q)) return reduced+"报价失效，首批距离不可用";
-   double distance=MathMax(0,首批止盈价格距离-sign*((sign>0 ? q.bid : q.ask)-open));
+   double tp=0;
+   ulong ticket=PositionById(id); if(ticket>0) tp=PositionGetDouble(POSITION_TP);
+   double distance=MathMax(0,sign*(FirstExit(id,sign,open,tp)-(sign>0 ? q.bid : q.ask)));
    return reduced+(distance>0 ? "首批还差 "+DoubleToString(distance,2)+"价差" : "已到首批价，等待执行");
 }
 void Modify(const ulong ticket,const ulong id,const int sign,const double sl,const double tp)
@@ -858,20 +908,26 @@ void Manage()
       double half=LotDown(initial*0.5),minimum=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MIN);
       bool split=half>=minimum && initial-half>=minimum;
       bool partialDone=split && closed+1e-8>=half; // 真实Deal确认，重启不重复分批
-      double required=Align(open-sign*保险价格距离,sign);
+      string exitKey=ExitKey(id); bool custom=Load(exitKey+"ready")==1;
+      double customSL=custom ? Load(exitKey+"sl") : 0,be=custom ? Load(exitKey+"be") : 0;
+      double required=Align(customSL>0 ? customSL : open-sign*保险价格距离,sign);
+      if(be>0 && sign*((sign>0 ? q.bid : q.ask)-be)>=0) required=Align(open,sign);
       if(partialDone) required=Align(open,sign); // 价格保本；不声称已覆盖佣金/隔夜费
       if(sl>0 && sign*(sl-required)>0) required=sl;
       double target=tp;
+      if(target<=0 && custom && Load(exitKey+"tp")>0) target=Align(Load(exitKey+"tp"),-sign);
       if(target<=0) target=Align(open+sign*(split ? 尾仓目标价格距离 : 首批止盈价格距离),-sign);
-      if(!split) target=Align(open+sign*首批止盈价格距离,-sign);
+      if(!split && !(custom && Load(exitKey+"tp")>0 && Load(exitKey+"first")==0))
+         target=FirstExit(id,sign,open,target);
       if(sl<=0 || sign*(required-sl)>TickSize()*0.5 || MathAbs(target-tp)>TickSize()*0.5)
       {
          Modify(ticket,id,sign,required,target);
          if(pending.kind!=0) return;
       }
-      double gain=sign*((sign>0 ? q.bid : q.ask)-open);
+      double first=FirstExit(id,sign,open,target);
       double closeVolume=PartialRemaining(initial,closed,volume);
-      if(gain<首批止盈价格距离 || closeVolume<=0) continue;
+      if((target>0 && sign*(target-first)<=TickSize()) ||
+         sign*((sign>0 ? q.bid : q.ask)-first)<0 || closeVolume<=0) continue;
       if(!PositionSelectByTicket(ticket) || !OwnSelected() ||
          MathAbs(PositionGetDouble(POSITION_VOLUME)-volume)>1e-8) continue;
       ZeroMemory(pending); pending.kind=2; pending.position=id; pending.at=TimeCurrent(); pending.volume=closeVolume;
@@ -1555,6 +1611,7 @@ void OnTick()
 {
    MqlTick q; if(!FreshQuote(q)) return;
    RememberFastTick(q);
+   UpdateTeacherVisits(q); UpdateSharedVisit(q);
    if(busy || pending.kind!=0 || !CanExecute() || !TeacherOwnsZone(q)) return;
    busy=true;
    Candidate immediate; ZeroMemory(immediate);
