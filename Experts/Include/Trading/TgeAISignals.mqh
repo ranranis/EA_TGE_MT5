@@ -1,7 +1,7 @@
 #ifndef TGE_AI_SIGNALS_MQH
 #define TGE_AI_SIGNALS_MQH
 // 这里只读经Python校验的参考快照；模型无权决定账号、手数或调用交易接口。
-struct AIPlan { int sign; double level,sl,first,tp,breakeven; bool market,near; string origin,status; datetime created,left; };
+struct AIPlan { int sign; double level,sl,first,tp,breakeven; bool market,near,derived; string origin,status; datetime created,left; };
 AIPlan aiPlans[];
 string aiMode="WAIT",aiReason="等待AI策略桥接",aiSource="",aiIdentity="";
 datetime aiGenerated=0,aiSourceTime=0;
@@ -46,7 +46,7 @@ bool ReadAISetups()
    FileClose(h);
    string head[],foot[];
    if(!ok || ArraySize(lines)<2 || StringSplit(lines[0],',',head)!=11 ||
-      head[0]!="TGA" || (head[1]!="1" && head[1]!="2" && head[1]!="3") || head[4]!=_Symbol ||
+      head[0]!="TGA" || (head[1]!="1" && head[1]!="2" && head[1]!="3" && head[1]!="4") || head[4]!=_Symbol ||
       !Number(head[2]) || !Number(head[7]) || !Number(head[8]) || (head[3]!="0" && head[3]!="1"))
    { return InvalidAI("AI快照格式错误"); }
    int count=(int)StringToInteger(head[8]);
@@ -59,10 +59,13 @@ bool ReadAISetups()
    for(int i=0;i<count;i++)
    {
       string fields[];
-      if(StringSplit(lines[i+1],',',fields)!=(head[1]=="3" ? 12 : head[1]=="2" ? 8 : 5) || fields[0]!="SETUP" ||
+      if(StringSplit(lines[i+1],',',fields)!=(head[1]=="4" ? 13 : head[1]=="3" ? 12 : head[1]=="2" ? 8 : 5) || fields[0]!="SETUP" ||
          (fields[1]!="BUY" && fields[1]!="SELL") || !Number(fields[2],true) ||
          (fields[3]!="REACTION" && fields[3]!="MARKET") || (fields[4]!="POINT" && fields[4]!="NEAR"))
       { return InvalidAI("AI方向/价格字段无效"); }
+      incoming[i].derived=head[1]=="4" && fields[12]=="RANGE_EDGE";
+      if(head[1]=="4" && fields[12]!="DIRECT" && fields[12]!="RANGE_EDGE") return InvalidAI("AI入场依据类型无效");
+      if(incoming[i].derived && fields[3]!="REACTION") return InvalidAI("区间推导不能成为市价指令");
       incoming[i].left=0; incoming[i].status="等待靠近";
       incoming[i].sl=0; incoming[i].first=0; incoming[i].tp=0; incoming[i].breakeven=0;
       incoming[i].sign=fields[1]=="BUY" ? 1 : -1;
@@ -76,7 +79,7 @@ bool ReadAISetups()
          incoming[i].origin=fields[5]+"|"+fields[6]+"|SETUP";
          incoming[i].created=(datetime)StringToInteger(fields[7]);
       }
-      if(head[1]=="3")
+      if(head[1]=="3" || head[1]=="4")
       {
          for(int k=8;k<12;k++)
             if(!Number(fields[k],true) || !MathIsValidNumber(StringToDouble(fields[k]))) return InvalidAI("退出价格无效");
@@ -179,7 +182,7 @@ bool InTeacherBand(const double entry,const double level)
 }
 bool LiveTeacherPlan(const int i)
 {
-   return 读取AI即时策略 && AIChannelReady() && aiMode=="SETUP" &&
+   return 读取AI即时策略 && AIChannelReady() && aiMode=="SETUP" && (!aiPlans[i].derived || 启用点位试仓) &&
           (!aiPlans[i].market || (aiPlans[i].created>fastStarted && TimeGMT()>=aiPlans[i].created && TimeGMT()-aiPlans[i].created<180));
 }
 bool TeacherOwnsZone(const MqlTick &q)
@@ -234,14 +237,14 @@ bool AISignal(const MqlRates &bar,const MqlTick &q,Candidate &out)
       {
          nearest=gap; reason=aiPlans[i].status; entryView.ready=true;
          entryView.level=aiPlans[i].level; entryView.direction=aiPlans[i].sign;
-         entryView.distance=gap; entryView.bar=TimeCurrent(); entryView.reaction=allowed; entryView.method="T哥实时近价";
+         entryView.distance=gap; entryView.bar=TimeCurrent(); entryView.reaction=allowed; entryView.method=aiPlans[i].derived ? "AI区间试仓0.01" : "T哥实时近价";
       }
       if(!allowed) continue;
-      out.valid=true; out.ai=true; out.follow=false; out.probe=false; out.direction=aiPlans[i].sign; out.level=aiPlans[i].level;
+      out.valid=true; out.ai=true; out.follow=false; out.probe=aiPlans[i].derived; out.direction=aiPlans[i].sign; out.level=aiPlans[i].level;
       out.bar=TimeCurrent(); out.originHash=Hash(aiPlans[i].origin); out.aiKey=AIVisitKey(out.level,out.direction);
       out.exitSL=aiPlans[i].sl; out.exitFirst=aiPlans[i].first;
       out.exitTP=aiPlans[i].tp; out.exitBE=aiPlans[i].breakeven;
-      out.method=(aiPlans[i].market ? "T哥市价候选[" : "T哥近价候选[")+aiSource+"]";
+      out.method=(aiPlans[i].derived ? "AI区间推导试仓0.01[" : aiPlans[i].market ? "T哥市价候选[" : "T哥近价候选[")+aiSource+"]";
       reason=out.method; return true;
    }
    return false;

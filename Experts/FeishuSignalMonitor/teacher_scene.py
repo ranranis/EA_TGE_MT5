@@ -18,22 +18,26 @@ regime_ref有证据时为{"message_id":"真实来源ID","evidence":"原文连续
 {"side":"BUY|SELL","token":"价格原文数字","price":4175,"mode":"REACTION|MARKET",
 "price_ref":"价格所在原消息ID","price_evidence":"含该token的原文连续片段",
 "direction_ref":"方向依据所在原消息ID","direction_evidence":"表达买卖方向的原文连续片段",
-"exits":{"sl":null,"tp1":null,"tp2":null,"breakeven":null}}
+"exits":{"sl":null,"tp1":null,"tp2":null,"breakeven":null},"basis":null}
+basis省略或null表示老师明确方向或唯一前文承接；AI区间推导必须为{"kind":"RANGE_EDGE","range":"inner_range|outer_range"}，不得冒充老师直接喊单。
 range对象固定为{"low":价格证据对象,"high":价格证据对象}；
 价格证据对象固定为{"message_id":"来源","token":"数字","price":4175,"evidence":"原文连续片段"}。
+token必须逐字复制原文中的完整数字，不是价格尾数：原文4150--4220必须token="4150"、"4220"，绝对不能写"150"、"50"、"220"、"20"；只有原文真写“75”才用token="75"并补全price=4175。plans和range中引用同一端点时，token、price、price_ref/message_id必须一致。输出前逐项检查，否则整批拒绝。
+
 interpretations的plan只允许side/token/price/mode/evidence（或context_ref），不能复制context中的near/source_refs/origin等本地内部字段。scene.plan另可带exits，与逐条plan字段不同。
 exits各项为价格证据对象或null，sl是绝对止损价，tp1为首批减仓价，tp2为最终止盈价，breakeven为到达后推至开仓价的触发价。仅提取老师明确给出且与此入场计划唯一关联的价格，证据连续片段须包含对应价格及止损/止盈/保本角色；跨消息时须明确写出入场价和方向。缺失字段填null，不能把行情位置、点位列表或距离推算成退出价。只有一个明确止盈目标时填tp2；无tp1时由EA原有分批模板处理。退出信息更新用UPDATE保留完整计划。没有明确关联的“保本/出一半”只解释，不猜具体仓位。
 处理原则：
 1. 理解语义与数字角色。当前行情价、时间周期、入场价、目标价分开：例如“15分钟连绿，现在81了，多单等到75行动”明确表达等4175再做多，必须提取BUY4175（REACTION），81是行情位置、15是周期，不是入场价。
 2. “然后上去93可↓”是补充SELL4193，应保留此前BUY4175；多空计划分别维护。明确“改到/不做/取消/最新取代”等才移除或替换对应旧计划，完整地图更新后不能复活此前作废方向。
-3. “小区间4175-4200，大区间4150-4220”更新区间分析，不把区间两头自动生成为多空喊单；保留明确的双向入场计划。
-4. “来回跑/区间震荡”可标记RANGE；“压力有效”只是关键位说明，不自动SELL。“多单等到/空单等到/可以行动/可上”不需要箭头，也属于有条件入场。
-5. 含糊的“注意”可以承接唯一的前文方向，必须引用真实方向消息；没有唯一方向、方向冲突或真假含糊则REVIEW，禁止靠猜测填齐计划。
-6. 优先T哥本人。成员晒单、引用、历史回顾、假设、玩笑不能更新scene。source_role=follow_member仍由独立五分钟通道处理。
+3. 仅有“小区间4175-4200，大区间4150-4220”是中性区间，不能凭列表推断方向。但用户授权以下AI条件推导：同一老师明确当前区间震荡/来回跑，给出区间数值，并强调该区间两头重要，或明确该端支撑/压力重要时，生成下沿BUY、上沿SELL的REACTION计划，basis标记RANGE_EDGE并指定区间，price_ref引用端点价格，direction_ref引用边界角色/重要性原文，regime_ref引用震荡判断。summary写清“AI区间推导试仓”，不得说成老师已喊单。
+   例：老师说“行情在区间来回跑”“大区间参考4150--4220”“大区间的两头，为重要点位”，可生成BUY4150、SELL4220两条AI区间试仓计划，同时保留明确的BUY4175、SELL4193。不能把完整地图的第一个/最后一个数字当作已声明的大区间。早先“若冲不过去则区间震荡”是条件假设，后来已明确突破顺涨时不能沿用为当前RANGE。缺少任一证据不生成；仅“50好位置”、中性地图、趋势单边、突破后的旧边界，不能这样推导。相同价格已有明确计划时保留明确计划，不重复生成。最多4条，优先明确方向，其次被强调的大区间边界。
+4. “来回跑/区间震荡”可标记RANGE；孤立“压力有效”只是关键位说明；符合上述完整区间证据时，才可生成标注来源的AI条件计划。“多单等到/空单等到/可以行动/可上”不需要箭头，也属于有条件入场。
+5. “现在90可⬆️”之后同一老师说“86了 注意”，若中间没有取消或相反方向且可唯一承接，应更新为BUY4186，price_ref引用86消息，direction_ref引用90做多消息；不要因新句没写多字就丢弃。若只是行情报数、持仓盈亏或无法唯一关联，则不生成。较晚明确改价替换对应旧入场，不能让旧价和新价一起重复占位。
+6. 优先T哥本人。成员晒单、引用、历史回顾、假设、玩笑不能更新scene。source_role=follow_member仍由独立价格区间通道处理，沿用至本人更新/取消。
 7. 默认REACTION，持续有效条件计划由EA在目标上下2.00区内用实时tick检查逆向冲击，不等M1/M5收线。只有老师明确现价/市价/直接进且带数字，才能MARKET；前文的市价请求不能在新场景复活。
 8. previous_scene只帮助记忆，引用必须在context/targets有原文并未撤回。不凭时间自动废掉T哥参考；明确作废、来源失效、新方案覆盖才变。
 9. 普通闲聊且不改变场景用KEEP，plans=[]，regime=UNKNOWN，其他证据字段null。确有变更用UPDATE并返回完整仍有效场景；无法可靠确定新交易指令用REVIEW，不能静默继续旧方向。
-10. summary可以解释突破后观察回踩等，但不能制造没有原文的交易价格、SL、TP、手数。不要把“15分钟连绿”的颜色直接判成趋势方向。
+10. interpretations不能把“多单等到75行动”写成无方向WATCH，应为SETUP；但EA只使用通过校验的scene.plans，不能只在summary写建议而plans为空。summary可以解释突破后观察回踩等，但不能制造没有原文的交易价格、SL、TP、手数。不要把“15分钟连绿”的颜色直接判成趋势方向。
 11. 所有引用只用截至as_of的真实消息ID；价格尾数用该消息的market_anchor/previous_scene已验证同token价格复核，不按未来行情重新补全。
 12. previous_scene为空时，这是首次建立完整场景：必须结合context里的原文恢复截至as_of仍有效的计划，不能因为最后一句是补充说明就KEEP。没有可确认的计划返回UPDATE空计划；信息不足返回REVIEW。
 """
@@ -97,16 +101,56 @@ def validate_scene(value, targets, context, anchor, previous=None):
         if re.search(r'(?:EMA|MA|ATR|RSI|ADX|MACD)\s*'+re.escape(token),proof['evidence'],re.I):
             raise AIError('指标周期不是入场价')
         return number
+    for name in ('inner_range','outer_range'):
+        band=value[name]
+        if band is not None:
+            if not isinstance(band,dict) or set(band)!={'low','high'} or price(band['low'])>=price(band['high']):
+                raise AIError('AI场景区间无效')
+    if value['inner_range'] and value['outer_range']:
+        if not (value['outer_range']['low']['price']<=value['inner_range']['low']['price']<
+                value['inner_range']['high']['price']<=value['outer_range']['high']['price']):
+            raise AIError('AI场景大小区间顺序冲突')
+    regime=value['regime_ref']
+    if value['regime']!='UNKNOWN':
+        if not isinstance(regime,dict) or set(regime)!={'message_id','evidence'}:
+            raise AIError('AI场景节奏缺少原文')
+        evidence(regime['message_id'],regime['evidence'])
+    elif regime is not None:
+        raise AIError('未知节奏不能带判断证据')
     clean=[]
     for plan in value['plans']:
         required={'side','token','price','mode','price_ref','price_evidence','direction_ref','direction_evidence'}
-        if not isinstance(plan,dict) or set(plan) not in (required,required|{'exits'}) or plan['side'] not in ('BUY','SELL') or plan['mode'] not in ('REACTION','MARKET'):
+        if not isinstance(plan,dict) or not required<=set(plan) or set(plan)-required-{'exits','basis'} or plan['side'] not in ('BUY','SELL') or plan['mode'] not in ('REACTION','MARKET'):
             raise AIError('AI场景计划字段无效')
         price(dict(message_id=plan['price_ref'],token=plan['token'],price=plan['price'],evidence=plan['price_evidence']))
         direction=evidence(plan['direction_ref'],plan['direction_evidence'])
         buy=bool(re.search(r'↑|⬆|做多|买入|多单|(?<![太很许更])多(?!拿|少)',plan['direction_evidence']))
         sell=bool(re.search(r'↓|⬇|做空|卖出|空单|空(?!间)',plan['direction_evidence']))
-        if buy==sell or plan['side']!=('BUY' if buy else 'SELL'):
+        basis=plan.get('basis')
+        if basis is not None:
+            if not isinstance(basis,dict) or set(basis)!={'kind','range'} or basis['kind']!='RANGE_EDGE' or basis['range'] not in ('inner_range','outer_range'):
+                raise AIError('AI区间推导依据字段无效')
+            band=value[basis['range']]
+            if value['regime']!='RANGE' or not band or plan['mode']!='REACTION' or plan.get('exits') is not None and (not isinstance(plan['exits'],dict) or any(plan['exits'].values())):
+                raise AIError('AI区间推导仅支持有依据的震荡条件计划，不推算退出价')
+            rhythm=value['regime_ref']['evidence']
+            if not re.search(r'震荡|来回|区间',rhythm) or re.search(r'单边|不再|不是|不做|取消|突破|跌破|若|如果|假设',rhythm):
+                raise AIError('AI区间推导缺少当前震荡语义')
+            edge=band['low' if plan['side']=='BUY' else 'high']
+            if plan['price']!=edge['price'] or plan['price_ref']!=edge['message_id'] or plan['token']!=edge['token']:
+                raise AIError('AI区间推导必须使用所引用区间的对应端点')
+            if not all(re.search(r'区间|上沿|下沿|上限|下限',items[edge_proof['message_id']]['text']) for edge_proof in band.values()):
+                raise AIError('中性地图首尾不能冒充老师给出的区间')
+            quote=plan['direction_evidence']
+            label='小区间' if basis['range']=='inner_range' else '大区间'
+            both=label in quote and bool(re.search(r'两(?:头|端)|上下沿',quote)) and bool(re.search(r'重要|关键|有效',quote))
+            role=r'支撑|下沿|下限|底部' if plan['side']=='BUY' else r'压力|阻力|上沿|上限|顶部'
+            linked=label in quote or bool(re.search(r'(?<![\d.])'+re.escape(plan['token'])+r'(?![\d.])',quote))
+            if not both and not (linked and re.search(role,quote)):
+                raise AIError('AI区间推导缺少对应边界角色/重要性证据')
+            if re.search(r'不是|无效|不重要|失效|跌破|突破|取消|不做|别做',quote):
+                raise AIError('失效边界不能成为区间试仓')
+        elif buy==sell or plan['side']!=('BUY' if buy else 'SELL'):
             raise AIError('AI场景方向缺少唯一原文依据')
         for mid in (plan['price_ref'],plan['direction_ref']):
             if re.search(r'历史|晒单|转发|假设|昨天|回顾|开玩笑|忽略.{0,10}(规则|指令)',items[mid]['text']):
@@ -174,26 +218,30 @@ def validate_scene(value, targets, context, anchor, previous=None):
                   origin_revision=prior.get('origin_revision',origin_revision) if prior else origin_revision,
                   origin_created=prior.get('origin_created',stamp(source['time'])) if prior else stamp(source['time']))
         clean.append(plan)
-    for name in ('inner_range','outer_range'):
-        band=value[name]
-        if band is not None:
-            if not isinstance(band,dict) or set(band)!={'low','high'} or price(band['low'])>=price(band['high']):
-                raise AIError('AI场景区间无效')
-    if value['inner_range'] and value['outer_range']:
-        if not (value['outer_range']['low']['price']<=value['inner_range']['low']['price']<
-                value['inner_range']['high']['price']<=value['outer_range']['high']['price']):
-            raise AIError('AI场景大小区间顺序冲突')
-    regime=value['regime_ref']
-    if value['regime']!='UNKNOWN':
-        if not isinstance(regime,dict) or set(regime)!={'message_id','evidence'}:
-            raise AIError('AI场景节奏缺少原文')
-        evidence(regime['message_id'],regime['evidence'])
-    elif regime is not None:
-        raise AIError('未知节奏不能带判断证据')
     refs[latest['message_id']]=dict(message_id=latest['message_id'],revision=latest['revision'])
     return dict(value,plans=clean,created=stamp(latest['time']),sequence=latest['sequence'],
                 revision=latest['revision'],sender=latest['sender_id'],source_refs=list(refs.values()),
                 map_only=not clean and (latest.get('interpretation') or {}).get('kind')=='MAP')
+
+
+def validate_execution_scene(value, targets, context, anchor, previous=None):
+    """无效的附加区间推导不能阻断独立、完整通过校验的明确计划。"""
+    from deepseek_ai import AIError
+    try:
+        return validate_scene(value,targets,context,anchor,previous)
+    except AIError as error:
+        plans=value.get('plans') if isinstance(value,dict) else None
+        if not isinstance(plans,list) or not plans or not all(isinstance(p,dict) for p in plans):
+            raise
+        direct=[p for p in plans if not p.get('basis')]
+        if not direct or len(direct)==len(plans):
+            raise
+        # 只去掉新增推导；明确计划、区间、来源、取消生命周期仍完整重验。
+        clean=validate_scene(dict(value,plans=direct),targets,context,anchor,previous)
+        clean['inference_rejection']=str(error)
+        clean['summary']='附加AI区间推导未通过校验，仅保留明确计划：'+', '.join(
+            p['side']+' '+format(p['price'],'g') for p in clean['plans'])
+        return clean
 
 
 def publish_scene(db, c, scene):

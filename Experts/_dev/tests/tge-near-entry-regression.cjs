@@ -303,6 +303,22 @@ test('TGA3 exits round trip with TGA2 compatibility and immediate cancel invalid
  pos=0;rows=[...v3];rows[1]=rows[1].replace('4168','4186');assert(!x.ReadAISetups());assert(!x.aiPlanCached);
  pos=0;rows=['TGA,2,1000,1,XAUUSD,entry,rev,990,1,SETUP,ready',v3[1].split(',').slice(0,8).join(','),'END,1'];
  assert(x.ReadAISetups());assert.equal(x.aiPlans[0].sl,0);assert.equal(x.aiPlans[0].tp,0);
+ pos=0;rows=['TGA,4,1000,1,XAUUSD,range,rev,990,1,SETUP,range',
+ 'SETUP,BUY,4150,REACTION,POINT,range,rev,990,0,0,0,0,RANGE_EDGE','END,1'];
+ assert(x.ReadAISetups());assert.equal(x.aiPlans[0].derived,true);
+ pos=0;rows[1]=rows[1].replace('RANGE_EDGE','UNKNOWN');assert(!x.ReadAISetups());assert(!x.aiPlanCached);
+ pos=0;rows[1]=rows[1].replace('UNKNOWN','RANGE_EDGE').replace('REACTION','MARKET');assert(!x.ReadAISetups());
+
+});
+test('AI range-edge plan uses tick entry and .01 with explicit attribution',()=>{
+ const {x,calls}=env({plans:[{sign:1,level:4150,market:false,derived:true,origin:'range-proof',created:990,status:'',left:0}]});
+ x.启用点位试仓=true;x.levels=[4150,4160,4175];
+ ticks(x,Array(4).fill(4151));
+ const c={};assert(x.AIMarketSignal(c));assert(c.probe&&c.ai);assert(c.method.includes('AI区间推导'));
+ x.Open(c);assert.equal(calls.length,1);assert.equal(calls[0][2],.01);
+ x.Open(c);assert.equal(calls.length,1);
+ const disabled=env({plans:[{sign:1,level:4150,market:false,derived:true,origin:'range-proof',created:990,status:'',left:0}]});
+ ticks(disabled.x,Array(4).fill(4151));assert(!disabled.x.AIMarketSignal({}));
 });
 test('pending exit fields survive interrupted execution restart and explicit clear',()=>{
  const {x,memory}=env();install(x,'SavePending');install(x,'RestorePending');

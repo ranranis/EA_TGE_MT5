@@ -1,5 +1,5 @@
 #property strict
-#property version "1.37"
+#property version "1.38"
 #property description "T哥点位地图 / M5 MA5 / M1收线 / 0.02手分批。独立Magic，仅管理本EA持仓。"
 #include <Trade/Trade.mqh>
 #include <Canvas/Canvas.mqh>
@@ -1455,7 +1455,7 @@ void Panel()
    panelCanvas.FillRectangle(0,0,UIPx(559),UIPx(39),UIInk(UI_HEADER));
    string pageTitle=uiStatistics ? "交易统计" : uiIndicators ? "看盘设置" : "T哥点位监控";
    UIText(_Symbol+" · "+pageTitle,16,10,222,11,UI_TEXT);
-   UIText("v1.37",242,13,40,8,UI_DIM);
+   UIText("v1.38",242,13,40,8,UI_DIM);
    UIText(TimeToString(TimeGMT()+8*3600,TIME_SECONDS),286,12,100,10,UI_MUTED,true);
    UIButton(uiCollapsed ? "+" : "−",396,7,30,1);
    UIText(启用真实交易 ? "交易模式" : "观察模式",434,13,110,9,启用真实交易 ? UI_ACCENT : UI_WARN,true);
@@ -1490,7 +1490,7 @@ void Panel()
 
    // 二级：即时方向独立于整日地图，优先显示方向、价格和来源时间。
    UICard(12,heroY,536,heroHeight,UI_ROW);
-   UIText("T哥即时参考",28,heroY+13,200,11,UI_TEXT);
+   UIText("T哥参考 / AI条件计划",28,heroY+13,200,11,UI_TEXT);
    string aiAt=读取AI即时策略 && aiSourceTime>0 ? TimeToString(aiSourceTime+8*3600,TIME_MINUTES)+" 北京时间" : "等待来源";
    UIText(aiAt,322,heroY+15,208,9,UI_DIM,true);
    if(planCount>0)
@@ -1502,7 +1502,7 @@ void Panel()
          UIRound(x,y,252,94,buy ? C'20,47,44' : C'36,32,53');
          UIText(buy ? "BUY / 多" : "SELL / 空",x+12,y+8,104,9,ink);
          UIText(DoubleToString(aiPlans[i].level,_Digits),x+12,y+27,148,18,UI_TEXT);
-         UIText(aiPlans[i].market ? "即时市价" : "实时近价",x+160,y+34,80,8,ink,true);
+         UIText(aiPlans[i].derived ? "AI试仓0.01" : aiPlans[i].market ? "即时市价" : "实时近价",x+160,y+34,80,8,ink,true);
           UIText(StringFormat("允许 %.2f—%.2f",aiPlans[i].level-TEACHER_BAND,aiPlans[i].level+TEACHER_BAND),x+12,y+58,228,8,UI_MUTED);
           UIText(aiPlans[i].status,x+12,y+76,228,7.5,UI_MUTED);
       }
@@ -1516,13 +1516,13 @@ void Panel()
    string trendText=!entryView.ready ? "等待数据" : trend>0 ? "M5偏多" : trend<0 ? "M5偏空" : "M5震荡";
    UIText("当前判断",16,decisionY+3,106,9,UI_DIM);
    UIText(trendText,132,decisionY+3,132,9,UI_MUTED);
-   UIText(entryView.method=="T哥实时近价" ? (entryView.reaction ? "tick检查已通过" : "实时tick观察") : entryView.ready ? (entryView.reaction ? "M1反应已确认" : "等待M1反应") : "等待数据",
+   UIText((entryView.method=="T哥实时近价" || entryView.method=="AI区间试仓0.01") ? (entryView.reaction ? "tick检查已通过" : "实时tick观察") : entryView.ready ? (entryView.reaction ? "M1反应已确认" : "等待M1反应") : "等待数据",
           336,decisionY+3,204,9,entryView.ready && entryView.reaction ? UI_ACCENT : UI_MUTED,true);
    UIText(reason,16,decisionY+25,526,12,UI_TEXT);
    string detail=entryView.ready ? StringFormat("%s参考 %.2f  ·  距点位 %.2f",
                  entryView.direction>0 ? "多" : "空",entryView.level,entryView.distance) : "有明确方向与价格后，按策略条件评估";
    UIText(detail,16,decisionY+52,372,9,UI_MUTED);
-   UIText(StringFormat("每次 %.2f手",每次开仓手数),390,decisionY+52,152,9,UI_DIM,true);
+   UIText(entryView.method=="AI区间试仓0.01" ? "AI试仓 0.01手" : StringFormat("每次 %.2f手",每次开仓手数),390,decisionY+52,152,9,UI_DIM,true);
 
    UIText("持仓明细",16,positionY,220,10,UI_TEXT);
    UIText(count>3 ? "仅显示最近3笔 / 共"+IntegerToString(count)+"笔" : "仅本EA持仓",324,positionY,216,8.5,UI_DIM,true);

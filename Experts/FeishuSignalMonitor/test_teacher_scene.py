@@ -259,6 +259,71 @@ class SceneTests(unittest.TestCase):
                 self.assertEqual(validate_scene(scene,[new],[old,cancel],4181)['plans'][0]['direction_ref'],'new')
 
 
+class RangeInferenceTests(unittest.TestCase):
+    def sample(self):
+        targets,context,scene=example()
+        targets.append(message('edges','大区间的两头，为重要点位',6))
+        scene['as_of']='edges'
+        for side,token in [('BUY','4150'),('SELL','4220')]:
+            item=plan(side,token,int(token),'large','大区间参考4150--4220')
+            item.update(direction_ref='edges',direction_evidence=targets[-1]['text'],
+                        basis=dict(kind='RANGE_EDGE',range='outer_range'))
+            scene['plans'].append(item)
+        return targets,context,scene
+
+    def test_emphasized_range_edges_add_typed_buy_and_sell(self):
+        targets,context,scene=self.sample()
+        clean=validate_scene(scene,targets,context,4181)
+        self.assertEqual([(p['side'],p['price']) for p in clean['plans']],
+                         [('BUY',4175),('SELL',4193),('BUY',4150),('SELL',4220)])
+        self.assertEqual(clean['plans'][2]['basis']['kind'],'RANGE_EDGE')
+        self.assertIn('edges',[r['message_id'] for r in clean['source_refs']])
+        self.assertIn('rhythm',[r['message_id'] for r in clean['source_refs']])
+
+    def test_range_inference_rejects_missing_or_false_evidence(self):
+        for case in ['bare_range','wrong_side','wrong_price','trend','member','market','invalid_role','exits']:
+            targets,context,scene=self.sample()
+            p=scene['plans'][2]
+            if case=='bare_range': p.update(direction_ref='large',direction_evidence=targets[-2]['text'])
+            if case=='wrong_side': p['side']='SELL'
+            if case=='wrong_price': p.update(token='4160',price=4160)
+            if case=='trend': scene['regime']='TREND_DOWN'
+            if case=='member': targets[-1]['source_role']='follow_member'
+            if case=='market': p['mode']='MARKET'
+            if case=='invalid_role':
+                targets[-1]['text']='大区间两头不重要，支撑失效'
+                p['direction_evidence']=targets[-1]['text']
+            if case=='exits': p['exits']={'sl':dict(price=4140)}
+            with self.subTest(case=case),self.assertRaises(AIError):
+                validate_scene(scene,targets,context,4181)
+
+    def test_invalid_added_inference_does_not_block_valid_explicit_plans(self):
+        from teacher_scene import validate_execution_scene
+        targets,context,scene=self.sample()
+        scene['plans'][2]['direction_evidence']='区间好位置'
+        clean=validate_execution_scene(scene,targets,context,4181)
+        self.assertEqual([(p['side'],p['price']) for p in clean['plans']],[('BUY',4175),('SELL',4193)])
+        self.assertIn('inference_rejection',clean)
+        self.assertNotIn('4150',clean['summary'])
+        scene['plans'][0]['price']=9999
+        with self.assertRaises(AIError):validate_execution_scene(scene,targets,context,4181)
+
+    def test_explicit_cancel_cannot_revive_range_buy(self):
+        targets,context,scene=self.sample()
+        targets.append(dict(message('cancel','取消多单',7),interpretation=dict(kind='CANCEL',cancel_side='BUY')))
+        scene['as_of']='cancel'
+        with self.assertRaises(AIError):validate_scene(scene,targets,context,4181)
+
+    def test_contextual_price_update_replaces_prior_buy(self):
+        old=message('old','现在90可⬆️',1)
+        new=message('new','86了 注意。。',2)
+        p=plan('BUY','86',4186,'new',new['text'])
+        p.update(direction_ref='old',direction_evidence=old['text'])
+        scene=dict(as_of='new',action='UPDATE',regime='UNKNOWN',regime_ref=None,
+                   plans=[p],inner_range=None,outer_range=None,summary='承接原方向，更新入场价')
+        self.assertEqual(validate_scene(scene,[new],[old],4188)['plans'][0]['price'],4186)
+
+
 class SceneWorkerTests(DatabaseFixture):
     # 继承既有隔离数据库夹具；只执行这里定义的场景集成用例。
     def scene_case(self):
@@ -274,6 +339,32 @@ class SceneWorkerTests(DatabaseFixture):
             return dict(interpretations=[dict(result(kind='WATCH'),id=t['id']) for t in targets],scene=scene)
         with self.db:set_state(self.db,'teacher_analysis',{'quote':{'bid':4181,'ask':4181.2,'at':self.now},'bars':[]})
         return response
+    def test_range_plans_export_tga4_type_without_creating_orders(self):
+        from app import export_teacher_levels
+        import csv
+        self.seed(mid='rhythm',text='区间来回跑',age=30)
+        self.seed(mid='range',text='大区间参考4150--4220',age=20)
+        self.seed(mid='edges',text='大区间的两头，为重要点位',age=10)
+        def response(targets,*args):
+            p=plan('BUY','4150',4150,'range','大区间参考4150--4220')
+            p.update(direction_ref='edges',direction_evidence='大区间的两头，为重要点位',
+                     basis=dict(kind='RANGE_EDGE',range='outer_range'))
+            band={role:dict(message_id='range',token=str(n),price=n,evidence='大区间参考4150--4220')
+                  for role,n in [('low',4150),('high',4220)]}
+            scene=dict(as_of='edges',action='UPDATE',regime='RANGE',
+                       regime_ref=dict(message_id='rhythm',evidence='区间来回跑'),
+                       plans=[p],inner_range=None,outer_range=band,summary='AI区间下沿BUY试仓')
+            return dict(interpretations=[dict(result(kind='WATCH'),id=t['id']) for t in targets],scene=scene)
+        self.assertEqual(process_ai_batch(self.db,self.c,Mock(interpret=response),self.now),3)
+        export_teacher_levels(self.db,self.c,False,self.now)
+        with (self.home/'common/FeishuMT5SignalMonitor/tge_ai_setups.csv').open(encoding='utf-8',newline='') as f:
+            rows=list(csv.reader(f))
+        self.assertEqual(rows[0][1],'4')
+        self.assertEqual(rows[1][1:3],['BUY','4150.0000000000'])
+        self.assertEqual(rows[1][12],'RANGE_EDGE')
+        self.assertEqual(len(rows[1]),13)
+        self.assertEqual(self.db.execute('SELECT count(*) FROM orders').fetchone()[0],0)
+
     def test_validated_exits_export_in_tga3(self):
         from app import export_teacher_levels
         import csv

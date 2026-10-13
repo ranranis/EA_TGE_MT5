@@ -12,7 +12,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from store import connect, state, set_state, iso, stamp
-from teacher_scene import SCENE_PROMPT, validate_scene, publish_scene
+from teacher_scene import SCENE_PROMPT, validate_scene, validate_execution_scene, publish_scene
 
 API = 'https://api.deepseek.com'
 FOLLOW_TTL = 0  # 成员参考沿用至更新/取消，由EA按价格区间过滤
@@ -23,10 +23,10 @@ follow_member的本人入场参考独立处理；完整地图由本地确定性�
 仅解释targets中的消息，按时间顺序输出，每个id恰好一次。source_role=member的个人已开仓/晒单归类MEMBER_TRADE且plans为空；只有teacher或group_map能更新T哥策略，follow_member的计划仅更新独立成员参考。context是更早的授权来源聊天，包含message_id、sender_id、time和已验证interpretation；targets也有这些来源信息。context可能包含本批不同target之间已处理的消息；对每个target只使用(time,sequence)严格更早的消息。不能把后来的发言回填为早先喊单。
 区分当前正式参考、观察提醒、持仓说明、取消参考、平仓/保护请求、历史晒单、引用、玩笑。转发、假设、历史回顾不是新入场。
 完整纯数字列表为MAP；明确价格+做多/做空或↑⬆️/↓⬇️为SETUP。不要只按孤立关键词解释，先理解同一老师连续发言。
-没有前文依据时“85了”“74了观察”为WATCH。若同一老师最近有效SETUP只有一个方向和价位，随后报出附近新价格并说注意/关注/准备/可以进，语义明确承接该计划时可作为上下文入场参考更新SETUP。
+“多单等到75行动”是BUY4175的SETUP，不能误标WATCH。没有前文依据时“85了”“74了观察”为WATCH。若同一老师最近有效SETUP只有一个方向和价位，随后报出附近新价格并说注意/关注/准备/可以进，语义明确承接该计划时可作为上下文入场参考更新SETUP。
 例：T哥先说“现在90可⬆️”，随后“86了 注意。。”，可以承接BUY方向、把观察参考更新为4186，mode必须REACTION，不能说成已下单或市价买入；context_ref填写前面SETUP的真实message_id。
 T哥SETUP的context_ref只能引用同一发送人更早的、已验证SETUP，或本批更早且你明确识别为SETUP的target。follow_member的context_ref另外允许引用direction_sender_id指定的T哥更早且唯一有效的SETUP：如T哥先说90可⬆️、成员随后说我是85，可以作为本人BUY4185的参考；没有取消/冲突时，不要求成员再次写多字。取消、平仓/修改、含糊交易指令会中断承接；中性地图不取消明确方向。最近计划含多空双向或多个入场价时，不可自行选一个。
-仅有“压力有效”“支撑有效”是WATCH，不能直接推断反向开仓。持仓盈亏、成交回报、历史回顾不能改成新参考。若不能可靠关联，输出UNKNOWN并说明歧义。
+逐条中的“压力有效”“支撑有效”可标WATCH；综合scene若有当前震荡、完整区间及边界角色证据，可按SCENE规则生成标注为AI推导的条件计划。持仓盈亏、成交回报、历史回顾不能改成新参考。若不能可靠关联，输出UNKNOWN并说明歧义。
 “最新68⬆️ 80⬇️”在价格4169附近可理解为BUY4168和SELL4180；“接近50↑ 72可↓”在4160附近是BUY4150和SELL4172。
 只在数量级由market_anchor与早先完整价格明确支持时补全尾数，不确定输出UNKNOWN。
 每个plan的token必须是当前原文中的数字，evidence必须是当前原文包含该token的连续片段。直接计划的evidence还必须含唯一方向，例如68⬆️；上下文承接计划可不含方向，但必须增加context_ref字段，方向来自被引用计划。无价格消息不能猜当前入场价。
@@ -631,7 +631,7 @@ def process_ai_batch(db, c, client, now, restore_scene=False):
         output=validate_interpretations(raw_result['interpretations'],targets,context,live_anchor,'scene' in raw_result) if targets else {}
         # 整批场景也必须通过本地核验；不因逐条WATCH而静默丢掉完整语义。
         # 成员批即使模型误带scene，也没有更新老师场景的权限，直接忽略该字段。
-        scene=validate_scene(raw_result['scene'],[dict(t,interpretation=output[t['id']]) for t in targets],context,live_anchor,previous_scene) if teacher_targets and 'scene' in raw_result else None
+        scene=validate_execution_scene(raw_result['scene'],[dict(t,interpretation=output[t['id']]) for t in targets],context,live_anchor,previous_scene) if teacher_targets and 'scene' in raw_result else None
         if restoring and scene:
             scene['plans']=[p for p in scene['plans'] if p['mode']!='MARKET']
         if restoring and (not scene or scene['action']=='KEEP'):
