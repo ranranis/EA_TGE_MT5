@@ -1,6 +1,6 @@
 #property strict
-#property version "1.38"
-#property description "T哥点位地图 / M5 MA5 / M1收线 / 0.02手分批。独立Magic，仅管理本EA持仓。"
+#property version "1.39"
+#property description "T哥点位地图 / M5 EMA20/50背景与MA5时机 / M1反应。独立Magic，仅管理本EA持仓。"
 #include <Trade/Trade.mqh>
 #include <Canvas/Canvas.mqh>
 // 看盘指标嵌入主EX5，用户仍只需挂载这一份EA。
@@ -26,7 +26,7 @@ input double 冲击单向比例=0.85;
 input double 恢复回拉价格=0.35;
 input group "T哥点位节奏与退出"
 input bool   允许震荡点位反应=true;
-input bool   启用点位试仓=true;           // M1初步收回但M5/趋势未确认时，近价先试0.01手
+input bool   启用点位试仓=true;           // 顺势近价试0.01；外沿反转须连续两根M1收回
 input bool   允许地图趋势过滤=true;       // 趋势明确时只做顺趋势方向；震荡时保留双向反应
 input bool   允许同机会重入=true;         // 离开同一机会后，允许在仍有其他仓位时再次进入
 input double 保险价格距离=10.0;
@@ -75,7 +75,9 @@ double levels[];
 string identity="",sourceKind="",sourceSender="",feedStatus="等待首次点位",reason="等待收线";
 datetime sourceTime=0,feedTime=0,readyFrom=0,lastMinute=0;
 bool feedActive=false,busy=false,stateOK=true;
-int maHandle=INVALID_HANDLE,atrHandle=INVALID_HANDLE,lockHandle=INVALID_HANDLE,trend=0;
+const int TREND_UNKNOWN=2;
+int maHandle=INVALID_HANDLE,atrHandle=INVALID_HANDLE,trendFastHandle=INVALID_HANDLE,trendSlowHandle=INVALID_HANDLE;
+int lockHandle=INVALID_HANDLE,trend=TREND_UNKNOWN;
 double atr=0;
 string prefix="";
 long accountLogin=0;
@@ -372,12 +374,45 @@ bool Reaction(const MqlRates &bar,const MqlRates &previous,const double level,
           bar.high<=previous.high+TickSize()*0.5 &&
           bar.close<level-escape && bar.close<bar.open && bar.close<=previous.close;
 }
-int Trend(const MqlRates &last,const MqlRates &previous,const double ma0,const double ma1)
+int Trend(const double fast0,const double fast1,const double slow0,const double slow1)
 {
-   // “完整脱离一根”：前一根整根K在MA同侧，最新收线仍守住且均线有斜率。
-   if(previous.low>ma1 && last.close>ma0 && ma0>ma1) return 1;
-   if(previous.high<ma1 && last.close<ma0 && ma0<ma1) return -1;
-   return 0;
+   // EMA20/50确定背景，MA5只管时机；确认不足独立于真正的窄幅震荡。
+   double separation=MathAbs(fast0-slow0),band=MathMax(atr*0.10,TickSize()*2);
+   if(separation>=band && fast0<slow0 && slow0<=slow1+TickSize()*0.5) return -1;
+   if(separation>=band && fast0>slow0 && slow0>=slow1-TickSize()*0.5) return 1;
+   if(separation<band && MathAbs(fast0-fast1)<=atr*0.05 && MathAbs(slow0-slow1)<=atr*0.05) return 0;
+   return TREND_UNKNOWN;
+}
+bool BoundaryRecovery(const MqlRates &bar,const MqlRates &previous,const double level,const int sign)
+{
+   if(ArraySize(levels)<2 || bar.time-previous.time!=60) return false;
+   if(level!=(sign>0 ? levels[0] : levels[ArraySize(levels)-1])) return false;
+   double escape=MathMax(atr*0.05,TickSize()),edge=sign>0 ? MathMin(bar.low,previous.low) : MathMax(bar.high,previous.high);
+   return MathAbs(edge-level)<=2.00 &&
+          sign*(previous.close-previous.open)>0 && sign*(bar.close-bar.open)>0 &&
+          sign*(previous.close-level)>escape && sign*(bar.close-level)>escape &&
+          sign*(bar.close-previous.close)>=0 &&
+          (sign>0 ? bar.low>=previous.low : bar.high<=previous.high);
+}
+bool OppositeMapPosition(const int sign,const double level)
+{
+   // EntryTag已持久化原点位哈希，兼容旧仓；不猜持仓归属、不主动平旧单。
+   string suffix="_"+IntegerToString((long)Hash(DoubleToString(level,_Digits)));
+   for(int i=PositionsTotal()-1;i>=0;i--)
+   {
+      if(PositionGetTicket(i)==0 || !OwnSelected()) continue;
+      int direction=PositionGetInteger(POSITION_TYPE)==POSITION_TYPE_BUY ? 1 : -1;
+      string comment=PositionGetString(POSITION_COMMENT);
+      int at=StringLen(comment)-StringLen(suffix);
+      if(direction!=sign && at>=0 && StringSubstr(comment,at)==suffix) return true;
+   }
+   return false;
+}
+double ProbeStop(const MqlRates &bar,const MqlRates &previous,const MqlTick &q,const int sign)
+{
+   double edge=sign>0 ? MathMin(bar.low,previous.low) : MathMax(bar.high,previous.high);
+   double buffer=MathMax(MathMax(atr*0.10,(q.ask-q.bid)*2),TickSize()*2);
+   return Align(edge-sign*buffer,-sign);
 }
 bool BreakRetest(const MqlRates &last,const MqlRates &breakbar,const MqlRates &before,
                  const double level,const int sign,const double tolerance,const double escape)
@@ -446,9 +481,11 @@ bool MapReaction(const MqlRates &bar,const MqlRates &previous,const MqlRates &m5
                                   m5.high<=level+tolerance && m5.high>=level-tolerance &&
                                   m5.close<level-escape;
          bool reaction=Reaction(bar,previous,level,sign,tolerance,escape);
+         bool aligned=!允许地图趋势过滤 || trend==0 || sign==trend;
+         bool boundary=允许地图趋势过滤 && !aligned && BoundaryRecovery(bar,previous,level,sign);
          double tp;
          string blocked=Load(VisitKey(level))>0 ? "本点位机会已消费，等待离开后再回踩" :
-                        (允许地图趋势过滤 && trend!=0 && sign!=trend) ? "M5趋势相反，地图反应等待顺势" :
+                        !aligned ? (trend==TREND_UNKNOWN ? "M5方向确认不足，普通地图等待" : "M5趋势相反，地图反应等待顺势") :
                         gap>MathMin(atr*0.75,首批止盈价格距离*0.8) ? "距地图点位过远，不追单" :
                         !rejection ? "等待M5在地图点位收回确认" :
                         !reaction ? "等待M1在地图点位止跌/受阻" :
@@ -472,12 +509,14 @@ bool MapReaction(const MqlRates &bar,const MqlRates &previous,const MqlRates &m5
             double edge=sign>0 ? MathMin(bar.low,previous.low) : MathMax(bar.high,previous.high);
             bool initial=sign*(bar.close-bar.open)>0 && sign*(bar.close-level)>0 &&
                          MathAbs(edge-level)<=2.00;
-            if(启用点位试仓 && gap<=2.00 && initial && Load(VisitKey(level))==0 &&
-               !SameOpportunity(sign,level) && Target(entry,sign,tp,true) && gap<probeDistance)
+            if(启用点位试仓 && (aligned || boundary) && gap<=2.00 && initial && Load(VisitKey(level))==0 &&
+               !OppositeMapPosition(sign,level) && !SameOpportunity(sign,level) &&
+               Target(entry,sign,tp,true) && gap<probeDistance)
             {
                probeDistance=gap; trial.valid=true; trial.probe=true;
                trial.direction=sign; trial.level=level; trial.bar=bar.time;
-               trial.method=(sign>0 ? "地图支撑" : "地图压力")+"试仓0.01（M1初步收回）";
+               trial.method=boundary ? (sign>0 ? "地图下沿" : "地图上沿")+"反转试仓0.01（连续M1回收）" :
+                                      (sign>0 ? "地图支撑" : "地图压力")+"顺势试仓0.01（M1初步收回）";
             }
             continue;
          }
@@ -485,7 +524,14 @@ bool MapReaction(const MqlRates &bar,const MqlRates &previous,const MqlRates &m5
          out.method=entryView.method+"（EA收线确认）"; reason=out.method; return true;
       }
    }
-   if(trial.valid) { out=trial; reason=trial.method; return true; }
+   if(trial.valid)
+   {
+      out=trial; reason=trial.method; entryView.ready=true; entryView.reaction=true;
+      entryView.level=trial.level; entryView.direction=trial.direction; entryView.bar=trial.bar;
+      entryView.distance=MathAbs((trial.direction>0 ? quote.ask : quote.bid)-trial.level);
+      entryView.method=trial.method;
+      return true;
+   }
    return false;
 }
 bool Signal(Candidate &out)
@@ -499,10 +545,12 @@ bool Signal(Candidate &out)
    { reason="AI等待："+aiReason; return false; }
    if(!FreshQuote(quote)) { signalRetry=true; reason="报价过期/断线，等待新鲜报价"; return false; }
    if(quote.ask-quote.bid>最大点差价格) { reason="点差过大"; return false; }
-   MqlRates m1[],m5[]; double ma[],vol[];
+   MqlRates m1[],m5[]; double ma[],vol[],backgroundFast[],backgroundSlow[];
    ArraySetAsSeries(m1,true); ArraySetAsSeries(m5,true); ArraySetAsSeries(ma,true);
+   ArraySetAsSeries(backgroundFast,true); ArraySetAsSeries(backgroundSlow,true);
    if(CopyRates(_Symbol,PERIOD_M1,1,2,m1)!=2 || CopyRates(_Symbol,PERIOD_M5,1,7,m5)!=7 ||
-      CopyBuffer(maHandle,0,1,7,ma)!=7 || CopyBuffer(atrHandle,0,1,1,vol)!=1)
+      CopyBuffer(maHandle,0,1,7,ma)!=7 || CopyBuffer(atrHandle,0,1,1,vol)!=1 ||
+      CopyBuffer(trendFastHandle,0,1,2,backgroundFast)!=2 || CopyBuffer(trendSlowHandle,0,1,2,backgroundSlow)!=2)
    { signalRetry=true; reason="等待M1/M5数据，窗口内重试"; return false; }
    if(checkingMinute>0 && m1[0].time!=checkingMinute) { signalRetry=true; reason="M1序列尚未对齐"; return false; }
    if((m1[0].time<readyFrom && !(读取AI即时策略 && aiMode=="SETUP" && m1[0].time+60>readyFrom)) ||
@@ -517,11 +565,15 @@ bool Signal(Candidate &out)
    atr=vol[0]; if(!MathIsValidNumber(atr) || atr<=TickSize()) { signalRetry=true; reason="ATR数据未就绪"; return false; }
    for(int i=0;i<7;i++) if(!MathIsValidNumber(ma[i]) || ma[i]==EMPTY_VALUE || ma[i]<=0)
    { signalRetry=true; reason="MA5数据未就绪"; return false; }
-   trend=Trend(m5[0],m5[1],ma[0],ma[1]);
+   for(int i=0;i<2;i++)
+      if(!MathIsValidNumber(backgroundFast[i]) || backgroundFast[i]==EMPTY_VALUE || backgroundFast[i]<=0 ||
+         !MathIsValidNumber(backgroundSlow[i]) || backgroundSlow[i]==EMPTY_VALUE || backgroundSlow[i]<=0)
+      { signalRetry=true; reason="EMA20/50背景未就绪"; return false; }
+   trend=Trend(backgroundFast[0],backgroundFast[1],backgroundSlow[0],backgroundSlow[1]);
    int maCrossings=0;
    for(int i=0;i<6;i++)
       if((m5[i].close-ma[i])*(m5[i+1].close-ma[i+1])<0) maCrossings++;
-   if(maCrossings>=3) trend=0;
+   // MA5交叉次数只作观测，不能将明确的EMA背景清成震荡。
    double tolerance=MathMax(0.20*atr,2*TickSize()),escape=MathMax(0.05*atr,TickSize());
    double nearest=DBL_MAX,probe=DBL_MAX;
    entryView.bar=m1[0].time; entryView.ma=ma[0]; entryView.m1close=m1[0].close; entryView.crossings=maCrossings;
@@ -784,6 +836,8 @@ void Open(const Candidate &signal)
 {
    string blocked=ExecutionBlock();
    if(!CanExecute() || blocked!="") { reason=blocked=="" ? "执行条件未就绪" : blocked; return; }
+   if(!signal.ai && !signal.follow && OppositeMapPosition(signal.direction,signal.level))
+   { reason="同点位反向旧仓仍在，地图等待旧仓结算"; return; }
    if(!signal.ai && !signal.follow && (datetime)Load("attemptBar")>=signal.bar) { reason="本根M1已发送过请求"; return; }
    string visit=signal.follow ? signal.followKey : signal.ai ? signal.aiKey : VisitKey(signal.level);
    if(Load(visit)>0) { reason="本点位机会已消费"; return; }
@@ -814,6 +868,19 @@ void Open(const Candidate &signal)
    else if(signal.ai && signal.exitTP>0) tp=Align(signal.exitTP,-sign);
    else targetOK=Target(entry,sign,tp,!signal.ai,signal.ai ? signal.level : 0);
    if(signal.ai && signal.exitSL>0) sl=Align(signal.exitSL,sign);
+   if(signal.probe && signal.exitSL<=0)
+   {
+      MqlRates recent[]; ArraySetAsSeries(recent,true);
+      if(CopyRates(_Symbol,PERIOD_M1,1,2,recent)!=2 || recent[0].time-recent[1].time!=60 ||
+         recent[0].time+60!=iTime(_Symbol,PERIOD_M1,0))
+      { reason="试仓等待最新完整M1结构，不能退回10点盲止损"; return; }
+      double structural=ProbeStop(recent[0],recent[1],q,sign);
+      if(sign*(entry-structural)<=TickSize()) { reason="试仓结构已失效，放弃本次候选"; return; }
+      if(sign*(structural-sl)>0) sl=structural;
+   }
+   // 0.01不能分半，首个可兑现目标至少覆盖结构风险；不靠高命中率掩盖10亏5赚。
+   if(targetOK && signal.probe && MathMin(sign*(tp-entry),首批止盈价格距离)+TickSize()*0.5<sign*(entry-sl))
+   { reason="试仓结构风险大于首个目标，等待更近入口"; return; }
    if(!targetOK || sign*(entry-sl)<=0 || sign*(tp-entry)<=TickSize() ||
       (signal.ai && signal.exitFirst>0 && (sign*(signal.exitFirst-entry)<=0 || sign*(tp-signal.exitFirst)<=TickSize())) ||
       (signal.ai && signal.exitBE>0 && (sign*(signal.exitBE-entry)<=0 || sign*(tp-signal.exitBE)<0)) ||
@@ -843,7 +910,7 @@ void Open(const Candidate &signal)
    ZeroMemory(pending); pending.kind=1; pending.at=TimeCurrent(); pending.bar=signal.bar;
    pending.volume=volume; pending.sl=sl; pending.tp=tp; pending.level=signal.level; pending.direction=sign;
    pending.fast=signal.ai; pending.originHash=signal.originHash;
-   pending.exitSL=signal.ai ? signal.exitSL : 0;
+   pending.exitSL=signal.probe ? sl : signal.ai ? signal.exitSL : 0;
    pending.exitFirst=signal.ai ? signal.exitFirst : 0; pending.exitBE=signal.ai ? signal.exitBE : 0;
    pending.exitTP=signal.ai ? signal.exitTP : 0;
    SavePending(); if(!CanExecute()) { reason="请求意图已保存，但执行条件失效，待核对"; return; }
@@ -1455,7 +1522,7 @@ void Panel()
    panelCanvas.FillRectangle(0,0,UIPx(559),UIPx(39),UIInk(UI_HEADER));
    string pageTitle=uiStatistics ? "交易统计" : uiIndicators ? "看盘设置" : "T哥点位监控";
    UIText(_Symbol+" · "+pageTitle,16,10,222,11,UI_TEXT);
-   UIText("v1.38",242,13,40,8,UI_DIM);
+   UIText("v1.39",242,13,40,8,UI_DIM);
    UIText(TimeToString(TimeGMT()+8*3600,TIME_SECONDS),286,12,100,10,UI_MUTED,true);
    UIButton(uiCollapsed ? "+" : "−",396,7,30,1);
    UIText(启用真实交易 ? "交易模式" : "观察模式",434,13,110,9,启用真实交易 ? UI_ACCENT : UI_WARN,true);
@@ -1513,7 +1580,8 @@ void Panel()
    }
    UIText(读取AI即时策略 ? AIPlanCaption() : "M5方向 · M1收线确认",28,heroY+heroHeight-19,502,8,UI_MUTED);
 
-   string trendText=!entryView.ready ? "等待数据" : trend>0 ? "M5偏多" : trend<0 ? "M5偏空" : "M5震荡";
+   string trendText=!entryView.ready ? "等待数据" : trend==TREND_UNKNOWN ? "M5方向待确认" :
+                    trend>0 ? "M5偏多" : trend<0 ? "M5偏空" : "M5震荡";
    UIText("当前判断",16,decisionY+3,106,9,UI_DIM);
    UIText(trendText,132,decisionY+3,132,9,UI_MUTED);
    UIText((entryView.method=="T哥实时近价" || entryView.method=="AI区间试仓0.01") ? (entryView.reaction ? "tick检查已通过" : "实时tick观察") : entryView.ready ? (entryView.reaction ? "M1反应已确认" : "等待M1反应") : "等待数据",
@@ -1522,7 +1590,7 @@ void Panel()
    string detail=entryView.ready ? StringFormat("%s参考 %.2f  ·  距点位 %.2f",
                  entryView.direction>0 ? "多" : "空",entryView.level,entryView.distance) : "有明确方向与价格后，按策略条件评估";
    UIText(detail,16,decisionY+52,372,9,UI_MUTED);
-   UIText(entryView.method=="AI区间试仓0.01" ? "AI试仓 0.01手" : StringFormat("每次 %.2f手",每次开仓手数),390,decisionY+52,152,9,UI_DIM,true);
+   UIText(StringFind(entryView.method,"试仓0.01")>=0 ? "试仓 0.01手" : StringFormat("每次 %.2f手",每次开仓手数),390,decisionY+52,152,9,UI_DIM,true);
 
    UIText("持仓明细",16,positionY,220,10,UI_TEXT);
    UIText(count>3 ? "仅显示最近3笔 / 共"+IntegerToString(count)+"笔" : "仅本EA持仓",324,positionY,216,8.5,UI_DIM,true);
@@ -1604,7 +1672,10 @@ int OnInit()
    execution.SetExpertMagicNumber(EA魔法号); execution.SetDeviationInPoints(30);
    execution.SetTypeFillingBySymbol(_Symbol); execution.SetAsyncMode(false);
    maHandle=iMA(_Symbol,PERIOD_M5,5,0,MODE_SMA,PRICE_CLOSE); atrHandle=iATR(_Symbol,PERIOD_M5,14);
-   if(maHandle==INVALID_HANDLE || atrHandle==INVALID_HANDLE) return INIT_FAILED;
+   trendFastHandle=iMA(_Symbol,PERIOD_M5,20,0,MODE_EMA,PRICE_CLOSE);
+   trendSlowHandle=iMA(_Symbol,PERIOD_M5,50,0,MODE_EMA,PRICE_CLOSE);
+   if(maHandle==INVALID_HANDLE || atrHandle==INVALID_HANDLE ||
+      trendFastHandle==INVALID_HANDLE || trendSlowHandle==INVALID_HANDLE) return INIT_FAILED;
    RestorePending(); RestoreSharedVisits();
    InitView(); InitTgeMobileMarkers();
    fastStarted=TimeGMT(); readyFrom=TimeCurrent(); ReadFeed(); ReadHealth(); ReadAISetups(); ReadMemberFollow(); EventSetTimer(1); Panel();
@@ -1702,6 +1773,8 @@ void OnDeinit(const int why)
    CloseViewIndicators();
    if(maHandle!=INVALID_HANDLE) IndicatorRelease(maHandle);
    if(atrHandle!=INVALID_HANDLE) IndicatorRelease(atrHandle);
+   if(trendFastHandle!=INVALID_HANDLE) IndicatorRelease(trendFastHandle);
+   if(trendSlowHandle!=INVALID_HANDLE) IndicatorRelease(trendSlowHandle);
    if(lockHandle!=INVALID_HANDLE) FileClose(lockHandle);
    if(panelReady) panelCanvas.Destroy();
    ObjectsDeleteAll(0,VIEW);

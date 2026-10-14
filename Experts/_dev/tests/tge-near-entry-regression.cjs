@@ -14,7 +14,7 @@ function translate(s){
  return s.replace(/\((?:uint|double|long|ulong|int|datetime|ENUM_ORDER_TYPE)\)/g,'')
   .replace(/\bstring (\w+)\[\],(\w+)\[\],(\w+)\[\];/g,'let $1=[], $2=[], $3=[];')
   .replace(/\bstring (\w+)\[\],(\w+)\[\];/g,'let $1=[], $2=[];')
-  .replace(/\b(?:string|AIPlan|FollowMember) (\w+)\[\];/g,'let $1=[];')
+  .replace(/\b(?:string|AIPlan|FollowMember|MqlRates) (\w+)\[\];/g,'let $1=[];')
   .replace(/\b(?:MqlTick|MqlRates|Candidate) (\w+);/g,'let $1={exitSL:0,exitFirst:0,exitTP:0,exitBE:0};')
   .replace(/\b(?:double|long|int|bool|datetime|string|uint|ulong|ENUM_ORDER_TYPE)\s+/g,'let ')
   .replace(/!TickImpact\(aiPlans\[i\].sign,q.time_msc,speed,oneway,pullback\)/g,
@@ -27,8 +27,9 @@ function translate(s){
 function install(x,name,args='',ref=false){
  let s=translate(body(name));
  if(ref)s=s.replace(/return false;/g,'return {ok:false,speed,oneway,pullback};').replace(/return true;/g,'return {ok:true,speed,oneway,pullback};');
+ if(name==='Open')s='signal={exitSL:0,exitFirst:0,exitTP:0,exitBE:0,...signal};'+s;
  if(name==='Manage')s=s.replace('PositionVolumes(id,initial,closed)','((r)=>{initial=r.initial;closed=r.closed;return r.ok;})(PositionVolumes(id))');
- if(name==='MapReaction')s=s.replaceAll('Target(entry,sign,tp,true)','Target(entry,sign,true).ok').replace('out=trial;','Object.assign(out,trial);');
+ if(name==='MapReaction')s=s.replace('ZeroMemory(trial);','ZeroMemory(trial);Object.assign(trial,{exitSL:0,exitFirst:0,exitTP:0,exitBE:0});').replaceAll('Target(entry,sign,tp,true)','Target(entry,sign,true).ok').replace('out=trial;','Object.assign(out,trial);');
  if(name==='Target')s='let tp=0;'+s.replace(/return false;/g,'return {ok:false,tp};').replace(/return true;/g,'return {ok:true,tp};');
  vm.runInContext('function '+name+'('+args+'){'+s+'}',x);
 }
@@ -36,16 +37,20 @@ let checks=0;function test(name,fn){fn();checks++;console.log('PASS '+name);}
 function env(options={}){
  const memory=options.memory||{},calls=[],now=options.now||1000;
  const x=vm.createContext({
-  TEACHER_BAND:2,REARM_DISTANCE:4,REARM_SECONDS:5,冲击短窗毫秒:3000,逆向冲击速度:.6,冲击单向比例:.85,恢复回拉价格:.35,
+  TREND_UNKNOWN:2,atr:2,trend:0,TEACHER_BAND:2,REARM_DISTANCE:4,REARM_SECONDS:5,冲击短窗毫秒:3000,逆向冲击速度:.6,冲击单向比例:.85,恢复回拉价格:.35,
   允许同机会重入:true,允许地图趋势过滤:true,启用真实交易:true,读取AI即时策略:true,启用起飞跟随:true,启用其他学生跟随:true,学员最大追价价格差:1,学员最大回落价格差:5,启用点位试仓:false,
   首批止盈价格距离:5,保险价格距离:10,尾仓目标价格距离:10,每次开仓手数:.02,最大点差价格:.5,
   aiReady:true,aiMode:'SETUP',aiIdentity:'teacher',aiSource:'teacher',aiGenerated:now,aiSourceTime:now-10,
-  aiPlans:options.plans||[{sign:1,level:4175,market:false,origin:'buy-source|rev|SETUP',created:now-10,status:'',left:0}],
+  aiPlans:(options.plans||[{sign:1,level:4175,market:false,origin:'buy-source|rev|SETUP',created:now-10,status:'',left:0}]).map(p=>({sl:0,first:0,tp:0,breakeven:0,...p})),
   aiReason:'',levels:[4105,4120,4170,4193],entryView:{},reason:'',_Digits:2,_Symbol:'XAUUSD',checkingMinute:0,
   pending:{kind:0},followMembers:[],followIndex:-1,followReady:true,followGenerated:now,followReason:'',sharedVisits:[],
   fastTicks:Array.from({length:256},()=>({})),fastCount:0,fastCursor:0,fastLast:0,fastStarted:0,DBL_MAX:Number.MAX_VALUE,
   Hash:s=>{let h=2166136261;for(const ch of s)h=Math.imul(h^ch.charCodeAt(0),16777619)>>>0;return h;},
-  TickSize:()=>.01,TimeGMT:()=>now,TimeCurrent:()=>now,OwnCount:()=>0,GlobalVariablesFlush:()=>{},
+  PositionsTotal:()=>0,POSITION_TYPE:1,POSITION_TYPE_BUY:0,POSITION_COMMENT:2,
+   StringLen:s=>s.length,StringSubstr:(s,n)=>s.slice(n),
+   PERIOD_M1:1,ArraySetAsSeries:()=>{},iTime:()=>940+60,
+   CopyRates:(_,tf,start,count,out)=>{const q={};x.FreshQuote(q);out.push({time:940,low:q.bid-.4,high:q.ask+.4},{time:880,low:q.bid-.6,high:q.ask+.6});return 2;},
+   TickSize:()=>.01,TimeGMT:()=>now,TimeCurrent:()=>now,OwnCount:()=>0,GlobalVariablesFlush:()=>{},
   MathMax:Math.max,MathMin:Math.min,MathAbs:Math.abs,IntegerToString:String,DoubleToString:(v,n)=>v.toFixed(n),
   MathIsValidNumber:Number.isFinite,ArraySize:a=>a.length,ArrayResize:(a,n)=>{while(a.length<n)a.push({});a.length=n;},
   Load:k=>memory[k]||0,Store:(k,v)=>{memory[k]=v;return true;},ZeroMemory:p=>{for(const k of Object.keys(p))delete p[k];},
@@ -61,7 +66,7 @@ function env(options={}){
   ['AIChannelReady',''],['KeepCachedAI','why'],['InvalidAI','why'],['RememberFastTick','q'],['TickImpact','sign,now',true],['InTeacherBand','entry,level'],['LiveTeacherPlan','i'],
   ['TeacherOwnsZone','q'],['AIKeyFromHash','originHash,level,sign'],['AIVisitKey','level,sign'],
   ['TeacherEntryAllowed','i,q'],['UpdateTeacherVisits','q'],['AISignal','bar,q,out'],['AIMarketSignal','out'],
-  ['Target','entry,sign,mapOnly=false,reference=0'],['FollowVisitKey','index=-1'],['FollowMissKey','index=-1'],
+  ['Target','entry,sign,mapOnly=false,reference=0'],['VisitKey','level'],['BoundaryRecovery','bar,previous,level,sign'],['OppositeMapPosition','sign,level'],['ProbeStop','bar,previous,q,sign'],['FollowVisitKey','index=-1'],['FollowMissKey','index=-1'],
   ['FollowEnabled','i'],['FollowPriceAllowed','q,index=-1'],['SharedVisitKey','level,sign'],['SameOpportunity','sign,level'],['RememberSharedVisit','level,sign'],
   ['UpdateSharedVisit','q'],['MergeOpportunity','sign,level'],['MemberFollowSignal','out'],
   ['FollowMemberCaption','i'],['FollowCaption',''],['Open','signal']])install(x,name,args,ref);
@@ -245,7 +250,7 @@ test('4150 M1 recovery can probe .01 while M5 is unconfirmed, without topping up
  const c={};assert(x.MapReaction(bar,previous,m5,q,c));assert(c.probe);assert.equal(c.direction,1);
  x.FreshQuote=out=>Object.assign(out,q);x.Open(c);
  assert.equal(calls.length,1);assert.equal(calls[0][2],.01);assert.equal(x.pending.volume,.01);
- assert.equal(calls[0][4],4141.14);assert(calls[0][5]>q.ask);
+ assert(calls[0][4]>4146.14);assert.equal(x.pending.exitSL,calls[0][4]);assert(calls[0][5]>q.ask);
  x.Open(c);assert.equal(calls.length,1);assert(memory['map4150']>0);
 });
 test('probe rejects straight adverse candle, remote price, consumed and unavailable .01',()=>{
@@ -266,7 +271,8 @@ test('sell probe is symmetric and verified full entry remains .02',()=>{
   readyFrom:0,VisitKey:l=>'map'+l,Reaction:()=>true,entryView:{}});
  install(x,'MapReaction','bar,previous,m5,quote,out,probeOnly=false');
  const bar={time:1000,open:4150,close:4149,low:4148.8,high:4150.5};
- const c={};assert(x.MapReaction(bar,bar,{high:4153,low:4148,close:4152},{bid:4149,ask:4149.1},c));
+ const prior={time:940,open:4150.5,close:4149.5,low:4149.2,high:4150.8};
+ const c={};assert(x.MapReaction(bar,prior,{high:4153,low:4148,close:4152},{bid:4149,ask:4149.1},c));
  assert(c.probe&&c.direction===-1);
  x.trend=-1;const full={};assert(x.MapReaction(bar,bar,{high:4150.5,low:4148,close:4149},{bid:4149,ask:4149.1},full));assert.equal(full.probe,false);
 });
@@ -360,5 +366,69 @@ test('near final TP avoids premature half-close and unsplittable explicit final 
  const a=managed({}, {sl:4165,tp:4177.8,bid:4177.9});a.x.Manage();assert.equal(a.actions.length,0);
  const b=managed({'exit999.ready':1,'exit999.sl':4168,'exit999.tp':4190},{volume:.01,bid:4181});
  b.x.PositionVolumes=()=>({ok:true,initial:.01,closed:0});b.x.Manage();assert.equal(b.actions.length,0);
+});
+
+test('background separates downtrend, uptrend, real range and unknown',()=>{
+ const {x}=env();install(x,'Trend','fast0,fast1,slow0,slow1');x.atr=4;
+ assert.equal(x.Trend(4156.19,4156.4,4158.07,4158.3),-1);
+ assert.equal(x.Trend(4163,4162.5,4160,4159.9),1);
+ assert.equal(x.Trend(4160.1,4160.08,4160,4160.01),0);
+ assert.equal(x.Trend(4158.07,4157.6,4159.32,4159.2),x.TREND_UNKNOWN);
+});
+test('morning 4160 bounce cannot bypass unknown or adverse background at inner map point',()=>{
+ const {x}=env({plans:[]});Object.assign(x,{启用点位试仓:true,允许震荡点位反应:true,levels:[4150,4160,4175],atr:2.142,
+  readyFrom:0,VisitKey:l=>'map'+l,Reaction:()=>false});
+ install(x,'MapReaction','bar,previous,m5,quote,out,probeOnly=false');
+ const bar={time:1000,open:4160.97,close:4161.71,low:4160.97,high:4162.13};
+ const prior={time:940,open:4162.19,close:4160.93,low:4160.59,high:4162.2};
+ const m5={low:4156.56,high:4163.5,close:4162.21},q={ask:4161.96,bid:4161.74};
+ for(const t of [-1,x.TREND_UNKNOWN]){x.trend=t;assert(!x.MapReaction(bar,prior,m5,q,{}));}
+ x.trend=1;assert(x.MapReaction(bar,prior,m5,q,{}));
+});
+test('09:20 outer-edge countertrend recovery remains a distinct .01 opportunity',()=>{
+ const {x}=env({plans:[]});Object.assign(x,{启用点位试仓:true,允许震荡点位反应:true,levels:[4150,4160,4175],atr:3.97857,trend:-1,
+  readyFrom:0,VisitKey:l=>'map'+l,Reaction:()=>false});
+ install(x,'MapReaction','bar,previous,m5,quote,out,probeOnly=false');
+ const bar={time:1000,open:4150.28,close:4150.68,low:4149.86,high:4151};
+ const prior={time:940,open:4149.66,close:4150.3,low:4149.1,high:4150.92};
+ const m5={low:4147.54,high:4151.72,close:4150.68},q={ask:4151.01,bid:4150.79};
+ const c={};assert(x.MapReaction(bar,prior,m5,q,c));assert(c.probe);assert(c.method.includes('反转'));
+ assert(x.entryView.reaction);assert.equal(x.entryView.level,4150);
+ const onlyOne={...prior,close:4149.8};assert(!x.MapReaction(bar,onlyOne,m5,q,{}));
+});
+test('map order cannot hedge an existing opposite trade from the same level',()=>{
+ const {x,calls}=env({plans:[]});ticks(x,Array(4).fill(4175));
+ x.OppositeMapPosition=(sign,level)=>sign===-1&&level===4175;
+ x.Open({direction:-1,level:4175,bar:1000});assert.equal(calls.length,0);assert(x.reason.includes('反向旧仓'));
+});
+test('opposite position matching is exact level hash and own position only',()=>{
+ const {x}=env();Object.assign(x,{PositionsTotal:()=>1,PositionGetTicket:()=>1,OwnSelected:()=>true,
+ PositionGetInteger:()=>0,PositionGetString:()=> 'TG1000_'+x.Hash((4175).toFixed(2))});
+ assert(x.OppositeMapPosition(-1,4175));assert(!x.OppositeMapPosition(1,4175));assert(!x.OppositeMapPosition(-1,4176));
+ x.OwnSelected=()=>false;assert(!x.OppositeMapPosition(-1,4175));
+});
+test('probe stop uses local structure and persists without altering normal teacher exits',()=>{
+ const {x,calls}=env({plans:[]});ticks(x,Array(4).fill(4151));
+ x.CopyRates=(_,tf,start,n,a)=>{a.push({time:940,low:4149.86,high:4151},{time:880,low:4149.1,high:4150.92});return 2;};
+ x.Open({probe:true,direction:1,level:4150,bar:940});assert.equal(calls.length,1);
+ assert(Math.abs(calls[0][4]-4148.9)<1e-8);assert.equal(x.pending.exitSL,calls[0][4]);
+ const restored=managed({'exit999.ready':1,'exit999.sl':4148.9},{open:4151,sl:4148.9,tp:4156,bid:4152,volume:.01});
+ restored.x.PositionVolumes=()=>({ok:true,initial:.01,closed:0});restored.x.Manage();assert.equal(restored.actions.length,0);
+});
+test('missing, invalid or overly distant probe structure never falls back to blind ten-point SL',()=>{
+ for(const mode of ['missing','gap','wrongSide','far']){
+  const {x,calls}=env({plans:[]});ticks(x,Array(4).fill(4151));
+  x.CopyRates=(_,tf,start,n,a)=>{
+   if(mode==='missing')return 0;
+   a.push({time:940,low:mode==='wrongSide'?4152:mode==='far'?4140:4150,high:4152},
+          {time:mode==='gap'?820:880,low:mode==='wrongSide'?4152:mode==='far'?4140:4150,high:4152});return 2;};
+  x.Open({probe:true,direction:1,level:4150,bar:940});assert.equal(calls.length,0,mode);
+ }
+});
+test('sell structural stop is symmetric and explicit SL cannot be widened by manager',()=>{
+ const {x,calls}=env({plans:[]});ticks(x,Array(4).fill(4149),400,'SELL');
+ x.CopyRates=(_,tf,start,n,a)=>{a.push({time:940,low:4148,high:4150.5},{time:880,low:4149,high:4150.8});return 2;};
+ x.Open({probe:true,direction:-1,level:4150,bar:940});assert.equal(calls.length,1);
+ assert(Math.abs(calls[0][4]-4151)<1e-8);assert.equal(x.pending.exitSL,calls[0][4]);
 });
 console.log(checks+' production-source near-entry checks passed');
