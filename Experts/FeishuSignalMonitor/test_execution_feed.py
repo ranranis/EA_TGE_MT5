@@ -18,9 +18,9 @@ class ExecutionTests(unittest.TestCase):
     seed = fixture.WorkerTests.seed
     client = fixture.WorkerTests.client
 
-    def feed(self, paused=False, now=None):
+    def feed(self, paused=False, now=None, protocol=6):
         export_teacher_levels(self.db, self.c, paused, self.now if now is None else now)
-        p = self.home/'common/FeishuMT5SignalMonitor/tge_execution.csv'
+        p = self.home/('common/FeishuMT5SignalMonitor/tge_execution_v7.csv' if protocol==7 else 'common/FeishuMT5SignalMonitor/tge_execution.csv')
         return list(csv.reader(io.StringIO(p.read_text(encoding='utf-8'))))
 
     def scene(self):
@@ -106,6 +106,72 @@ class ExecutionTests(unittest.TestCase):
         self.seed(mid='history',text='4150--4160--4175',historical=True)
         refresh_levels(self.db,self.c,self.now)
         self.assertEqual(self.feed()[-1],['END','0'])
+
+    def test_v7_keeps_reference_when_paused_and_uses_original_range_time(self):
+        self.scene()
+        before=self.feed(protocol=7)
+        self.assertTrue(all(len(r)==16 for r in before[1:-1]))
+        self.assertEqual(before[0][:2],['TGA','7'])
+        with self.db:
+            scene=state(self.db,'teacher_scene')
+            scene['created']+=100
+            set_state(self.db,'teacher_scene',scene)
+        after=self.feed(paused=True,protocol=7)
+        self.assertEqual(after[0][3],'0')
+        self.assertEqual([r[8] for r in before[1:-1]],[r[8] for r in after[1:-1]])
+        self.assertEqual([r[14] for r in before[1:-1]],[r[14] for r in after[1:-1]])
+
+    def test_v7_idle_heartbeat_and_target_update_do_not_renew(self):
+        self.scene()
+        before=self.feed(protocol=7)
+        with self.db:
+            setup=state(self.db,'deepseek_setup')
+            setup['created']=self.now+1
+            setup['plans'][0].setdefault('exits',{})['tp2']={'price':4300}
+            set_state(self.db,'deepseek_setup',setup)
+        after=self.feed(now=self.now+2,protocol=7)
+        self.assertEqual([(r[1],r[8],r[14]) for r in before[1:-1]],[(r[1],r[8],r[14]) for r in after[1:-1]])
+
+    def test_v7_expired_market_plan_remains_visible_for_ea(self):
+        self.scene()
+        with self.db:
+            setup=state(self.db,'deepseek_setup')
+            setup['plans'][0]['mode']='MARKET'
+            setup['plans'][0]['origin_created']=self.now-90000
+            setup['plans'][0]['confirmed_at']=self.now-90000
+            set_state(self.db,'deepseek_setup',setup)
+        rows=self.feed(protocol=7)
+        market=next(r for r in rows[1:-1] if r[15]=='MARKET')
+        self.assertEqual(int(market[14]),int(self.now-90000))
+
+    def test_v7_map_not_hidden_by_pause_or_age(self):
+        with self.db:
+            set_state(self.db,'live_since',self.now-200000)
+        self.seed(mid='map',text='4150--4160--4175',age=90000)
+        refresh_levels(self.db,self.c,self.now)
+        rows=self.feed(paused=True,protocol=7)
+        self.assertEqual(rows[0][3],'0')
+        self.assertEqual(len([r for r in rows[1:-1] if r[2]=='MAP']),3)
+
+    def test_keep_explicit_confirmation_is_saved_and_revocation_disables(self):
+        from teacher_scene import publish_scene
+        self.scene()
+        before=state(self.db,'deepseek_setup')
+        original=self.seed(mid='confirm',text='75继续有效',age=0)
+        row=self.db.execute('SELECT rowid AS sequence,* FROM messages WHERE message_id=?',('confirm',)).fetchone()
+        keep=dict(action='KEEP',as_of='confirm',created=row['created'],sequence=row['sequence'],revision=row['revision'],
+                  sender=row['sender'],source_refs=[dict(message_id='confirm',revision=row['revision'])],summary='重申')
+        with self.db:
+            publish_scene(self.db,self.c,keep)
+        after=state(self.db,'deepseek_setup')
+        self.assertGreater(after['plans'][0]['confirmed_at'],before['plans'][0]['confirmed_at'])
+        self.assertEqual(after['plans'][1]['confirmed_at'],before['plans'][1]['confirmed_at'])
+        self.assertEqual(after['plans'][0]['origin_id'],before['plans'][0]['origin_id'])
+        with self.db:
+            publish_scene(self.db,self.c,keep)
+        self.assertEqual(state(self.db,'deepseek_setup'),after)
+        ingest(self.db,self.c['chat_id'],[dict(original,deleted=True)])
+        self.assertFalse(any(r[2]=='DIRECT' for r in self.feed(protocol=7)[1:-1]))
 
 
 if __name__=='__main__':

@@ -188,6 +188,8 @@ def export_teacher_levels(db,c,paused,now):
     ai=ai_snapshot(db,c,now,paused) if c.get('ai_enabled') else dict(active=False,mode='WAIT',plans=[],reason='AI未启用')
     # 新EA单独读取TGA6；保留旧快照，开发/监控重启不会改变尚未升级的EA行为。
     atomic_text(folder/'tge_execution.csv', execution_csv(db,c,now,paused,context,active,selected,ai))
+    # v1.43独立协议：保留参考展示；EA按原消息/明确重申时间判定执行资格。
+    atomic_text(folder/'tge_execution_v7.csv', execution_csv(db,c,now,paused,context,source_ok,levels or [],ai,protocol=7))
     bridge=io.StringIO(newline=''); aw=csv.writer(bridge,lineterminator='\r\n')
     note=str(ai['reason']).replace(',','，').replace('\r',' ').replace('\n',' ')[:160]
     # TGA5明确表示仅老师限价模式；旧市价EA拒绝该协议，避免升级期间误用旧入口。

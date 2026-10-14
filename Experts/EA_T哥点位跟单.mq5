@@ -1,5 +1,5 @@
 #property strict
-#property version "1.42"
+#property version "1.43"
 #property description "T哥点位触价 / 明确方向8·区间6·地图5 / 0.02手。独立Magic，仅管理本EA持仓。"
 #include <Trade/Trade.mqh>
 #include <Canvas/Canvas.mqh>
@@ -11,7 +11,7 @@ input group "执行与仓位"
 input bool   启用真实交易=true;        // 默认执行交易；手动关闭时仅观察，不发送交易请求
 const double 每次开仓手数=0.02; // 固定0.02手，不从旧set继承其他手数
 input int    最大同时持仓=3;
-input double 挂单最大离价=50.0;        // 保留旧参数名称；现用于离价暂停候选，不再新增策略挂单
+input double 挂单最大离价=50.0;        // 保留旧参数名称；现用于严重远离后停止新入场，等待老师新确认
 input double 最大点差价格=0.50;         // 黄金报价价格差，不是_Point倍数
 input ulong  EA魔法号=560056;
 input bool   读取AI即时策略=true;     // 读取本地DeepSeek语义桥；未就绪时等待，不猜方向
@@ -472,6 +472,7 @@ void Open(const Candidate &signal)
    string blocked=ExecutionBlock();
    if(!CanExecute() || blocked!="") { reason=blocked; return; }
    MqlTick q; if(!FreshQuote(q) || q.ask-q.bid>最大点差价格) return;
+   RefreshPlanValidity(q,true);
    bool allowed=false;
    for(int i=0;i<ArraySize(aiPlans);i++)
       if(Hash(aiPlans[i].id)==signal.originHash && PlanSign(i)==signal.direction && aiPlans[i].level==signal.level)
@@ -1166,7 +1167,7 @@ void Panel()
    int planCount=directRows;
    int planRows=MathMax((planCount+1)/2,1);
    int pointRows=MathMax((ArraySize(levels)+5)/6,1);
-   int heroY=180,heroHeight=66+planRows*92+rangeRows*26+pointRows*26;
+   int heroY=180,heroHeight=90+planRows*92+rangeRows*26+pointRows*26;
    int decisionY=heroY+heroHeight+12,positionY=decisionY+88;
    int mapY=positionY+24+MathMax(visible,1)*rowHeight+10;
    int mapHeight=62+pointRows*28;
@@ -1178,7 +1179,7 @@ void Panel()
    panelCanvas.FillRectangle(0,0,UIPx(559),UIPx(39),UIInk(UI_HEADER));
    string pageTitle=uiStatistics ? "交易统计" : uiIndicators ? "看盘设置" : "T哥点位监控";
    UIText(_Symbol+" · "+pageTitle,16,10,222,11,UI_TEXT);
-   UIText("v1.42",242,13,40,8,UI_DIM);
+   UIText("v1.43",242,13,40,8,UI_DIM);
    UIText(TimeToString(TimeGMT()+8*3600,TIME_SECONDS),286,12,100,10,UI_MUTED,true);
    UIButton(uiCollapsed ? "+" : "−",396,7,30,1);
    UIText(启用真实交易 ? "交易模式" : "观察模式",434,13,110,9,启用真实交易 ? UI_ACCENT : UI_WARN,true);
@@ -1221,11 +1222,11 @@ void Panel()
       if(aiPlans[i].priority!=8) continue;
       int x=24+(card%2)*260,y=heroY+38+(card/2)*92; card++;
       bool buy=aiPlans[i].sign>0; color ink=buy ? UI_ACCENT : UI_SELL;
-      UIRound(x,y,252,84,buy ? C'20,47,44' : C'36,32,53');
-      UIText(buy ? "8 · 明确 BUY / 多" : "8 · 明确 SELL / 空",x+12,y+8,224,9,ink);
-      UIText(TimeToString(aiPlans[i].created+8*3600,TIME_MINUTES),x+172,y+8,68,8,UI_DIM,true);
+      UIRound(x,y,252,84,!PlanExecutable(i) ? UI_CARD : buy ? C'20,47,44' : C'36,32,53');
+      UIText(buy ? "8 · 明确 BUY / 多" : "8 · 明确 SELL / 空",x+12,y+8,150,9,ink);
+      UIText(StringSubstr(TimeToString(aiPlans[i].confirmed+8*3600,TIME_DATE|TIME_MINUTES),5,11),x+158,y+8,82,8,UI_DIM,true);
       UIText(DoubleToString(aiPlans[i].level,_Digits),x+12,y+27,140,18,UI_TEXT);
-      UIText("±1.00 · 0.02手",x+144,y+34,96,8,ink,true);
+      UIText(PlanExecutable(i) ? "±1 · "+PlanAgeCaption(i) : "仅供参考",x+144,y+34,96,8,ink,true);
       UIText(aiPlans[i].status,x+12,y+61,228,8,UI_MUTED);
    }
    if(card==0) UIText("暂无明确方向计划 · 区间/地图仍可独立触发",28,heroY+62,500,11,UI_MUTED);
@@ -1235,7 +1236,7 @@ void Panel()
       if(aiPlans[i].priority!=6) continue;
       string label=aiPlans[i].kind=="INNER" ? "小区间" : "大区间";
       UIText("6 · "+label+(aiPlans[i].sign>0 ? "下沿 多 " : "上沿 空 ")+DoubleToString(aiPlans[i].level,_Digits),28,y,240,10,UI_TEXT);
-      UIText(aiPlans[i].status,278,y+2,250,8,UI_MUTED,true); y+=26;
+      UIText((PlanExecutable(i) ? PlanAgeCaption(i)+" · " : "")+aiPlans[i].status,278,y+2,250,8,UI_MUTED,true); y+=26;
    }
    for(int row=0;row<pointRows;row++)
    {
@@ -1247,12 +1248,13 @@ void Panel()
       }
       y+=26;
    }
+   UIText(MapLifeCaption(),28,y,500,8,feedActive ? UI_MUTED : UI_WARN);
    UIText(AIPlanCaption(),28,heroY+heroHeight-21,500,8,AIChannelReady() ? UI_MUTED : UI_WARN);
    UIText("当前执行",16,decisionY+3,106,9,UI_DIM);
    UIText("实时触价 · 0.02手",132,decisionY+3,198,9,UI_MUTED);
    UIText("离开4点5秒可重入",336,decisionY+3,204,9,UI_MUTED,true);
    UIText(reason,16,decisionY+25,526,12,UI_TEXT);
-   string detail=entryView.ready ? StringFormat("参考 %.2f · 距点位 %.2f",entryView.level,entryView.distance) : "等待新鲜tick，整组点位持续有效";
+   string detail=entryView.ready ? StringFormat("参考 %.2f · 距点位 %.2f",entryView.level,entryView.distance) : "等待新鲜报价；参考保留，有效性由EA检查";
    UIText(detail,16,decisionY+52,510,9,UI_MUTED);
 
    UIText("持仓明细",16,positionY,220,10,UI_TEXT);
@@ -1327,13 +1329,18 @@ int OnInit()
       trendFastHandle==INVALID_HANDLE || trendSlowHandle==INVALID_HANDLE) return INIT_FAILED;
    RestorePending(); RestoreSharedVisits(); RestoreTeacherLimits();
    InitView(); InitTgeMobileMarkers();
-   fastStarted=TimeGMT(); readyFrom=TimeCurrent(); ReadHealth(); ReadAISetups(); EventSetTimer(1); Panel();
+   fastStarted=TimeGMT(); readyFrom=TimeCurrent(); ReadHealth(); ReadAISetups();
+   MqlTick q; bool fresh=FreshQuote(q); RefreshPlanValidity(q,fresh);
+   EventSetTimer(1); Panel();
    return INIT_SUCCEEDED;
 }
 void OnTimer()
 {
    if(busy) return; busy=true;
-   ReadHealth(); ReadAISetups(); Reconcile();
+   ReadHealth(); ReadAISetups();
+   MqlTick q; bool fresh=FreshQuote(q); RefreshPlanValidity(q,fresh);
+   if(fresh) for(int i=0;i<ArraySize(aiPlans);i++) TeacherEntryAllowed(i,q);
+   Reconcile();
    SyncTeacherLimits(); Manage();
    checkingMinute=iTime(_Symbol,PERIOD_M1,1);
    DecisionLog("EVALUATE",reason);

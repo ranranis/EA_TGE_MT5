@@ -1,19 +1,20 @@
 #ifndef TGE_AI_SIGNALS_MQH
 #define TGE_AI_SIGNALS_MQH
-// TGA6是完整替换快照；AI只翻译，触价方向、优先级和手数由EA规则决定。
+// TGA7携带原始时间/明确重申时间；有效性由EA计算，不由AI判断行情。
 struct AIPlan
 {
    int sign,priority,approach;
    double level,sl,first,tp,breakeven;
-   string id,kind,group,source,origin,status;
-   datetime created;
+   string id,kind,group,source,origin,status,mode,lifeReason;
+   datetime created,confirmed;
 };
 AIPlan aiPlans[];
-string aiMode="WAIT",aiReason="等待TGA6执行快照",aiSource="",aiIdentity="";
+string aiMode="WAIT",aiReason="等待TGA7执行快照",aiSource="",aiIdentity="";
 datetime aiGenerated=0,aiSourceTime=0;
 bool aiReady=false;
 const double TEACHER_BAND=1.00,REARM_DISTANCE=4.00;
 const int REARM_SECONDS=5;
+const int DIRECT_MAX_AGE=86400,MARKET_MAX_AGE=180;
 bool AIChannelReady()
 {
    long now=(long)TimeGMT();
@@ -24,8 +25,8 @@ bool AIChannelReady()
 bool InvalidAI(const string why) { aiReady=false; aiReason=why; return false; }
 bool ReadAISetups()
 {
-   int h=FileOpen("FeishuMT5SignalMonitor\\tge_execution.csv",FILE_READ|FILE_TXT|FILE_ANSI|FILE_COMMON|FILE_SHARE_READ,0,CP_UTF8);
-   if(h==INVALID_HANDLE) return InvalidAI("等待监控输出TGA6，请更新并重启监控");
+   int h=FileOpen("FeishuMT5SignalMonitor\\tge_execution_v7.csv",FILE_READ|FILE_TXT|FILE_ANSI|FILE_COMMON|FILE_SHARE_READ,0,CP_UTF8);
+   if(h==INVALID_HANDLE) return InvalidAI("等待监控输出TGA7，请更新并重启监控");
    string lines[]; bool ok=FileSize(h)<=32768;
    while(ok && !FileIsEnding(h))
    {
@@ -33,18 +34,18 @@ bool ReadAISetups()
       ArrayResize(lines,n+1); lines[n]=FileReadString(h);
    }
    FileClose(h); string head[],foot[];
-   if(!ok || ArraySize(lines)<2 || StringSplit(lines[0],',',head)!=7 || head[0]!="TGA" || head[1]!="6" ||
-      head[4]!=_Symbol || !Number(head[2]) || !Number(head[5]) || (head[3]!="0" && head[3]!="1")) return InvalidAI("TGA6格式/品种不匹配");
+   if(!ok || ArraySize(lines)<2 || StringSplit(lines[0],',',head)!=7 || head[0]!="TGA" || head[1]!="7" ||
+      head[4]!=_Symbol || !Number(head[2]) || !Number(head[5]) || (head[3]!="0" && head[3]!="1")) return InvalidAI("TGA7格式/品种不匹配");
    int count=(int)StringToInteger(head[5]); datetime generated=(datetime)StringToInteger(head[2]);
    if(count>28 || ArraySize(lines)!=count+2 || StringSplit(lines[count+1],',',foot)!=2 || foot[0]!="END" || foot[1]!=head[5] ||
-      generated<=0 || generated>TimeGMT()+5 || generated<aiGenerated || TimeGMT()-generated>healthMaxAge) return InvalidAI("TGA6不完整或同步心跳失效");
+      generated<=0 || generated>TimeGMT()+5 || generated<aiGenerated || TimeGMT()-generated>healthMaxAge) return InvalidAI("TGA7不完整或同步心跳失效");
    AIPlan incoming[]; ArrayResize(incoming,count);
    double map[]; datetime mapAt=0; string signature="";
    for(int i=0;i<count;i++)
    {
       string f[];
-      if(StringSplit(lines[i+1],',',f)!=14 || f[0]!="PLAN" || f[1]=="" || f[6]=="" || f[7]=="" || f[9]=="" ||
-         !Number(f[3]) || !Number(f[5],true) || !Number(f[8])) return InvalidAI("计划字段/来源无效");
+      if(StringSplit(lines[i+1],',',f)!=16 || f[0]!="PLAN" || f[1]=="" || f[6]=="" || f[7]=="" || f[9]=="" ||
+         !Number(f[3]) || !Number(f[5],true) || !Number(f[8]) || !Number(f[14])) return InvalidAI("计划字段/来源无效");
       int priority=(int)StringToInteger(f[3]);
       bool isMap=f[2]=="MAP",direct=f[2]=="DIRECT",range=f[2]=="INNER" || f[2]=="OUTER";
       if((!isMap && !direct && !range) || priority!=(direct ? 8 : range ? 6 : 5) ||
@@ -54,6 +55,9 @@ bool ReadAISetups()
       incoming[i].sign=isMap ? 0 : f[4]=="BUY" ? 1 : -1; incoming[i].approach=0;
       incoming[i].level=StringToDouble(f[5]); incoming[i].source=f[6]; incoming[i].group=f[9]; incoming[i].origin=f[1];
       incoming[i].created=(datetime)StringToInteger(f[8]); incoming[i].status="等待触价";
+      incoming[i].confirmed=(datetime)StringToInteger(f[14]); incoming[i].mode=f[15]; incoming[i].lifeReason="";
+      if(incoming[i].confirmed<incoming[i].created || incoming[i].confirmed>generated+5 ||
+         (direct ? f[15]!="REACTION" && f[15]!="MARKET" : f[15]!="REFERENCE")) return InvalidAI("重申时间/参考类型无效");
       if(incoming[i].created<=0 || incoming[i].created>generated+5 || incoming[i].level<=0 || !MathIsValidNumber(incoming[i].level)) return InvalidAI("价格/来源时间无效");
       for(int k=10;k<14;k++)
          if(!Number(f[k],true) || !MathIsValidNumber(StringToDouble(f[k]))) return InvalidAI("退出价字段无效");
@@ -78,12 +82,90 @@ bool ReadAISetups()
    ArrayResize(aiPlans,count); aiSourceTime=0;
    for(int i=0;i<count;i++) { aiPlans[i]=incoming[i]; aiSourceTime=MathMax(aiSourceTime,incoming[i].created); }
    aiReady=head[3]=="1"; aiGenerated=generated; aiReason=head[6]; aiMode=count>0 ? "SETUP" : "WAIT";
-   identity="TGA6|"+IntegerToString((long)Hash(signature)); aiIdentity=identity;
+   identity="TGA7|"+IntegerToString((long)Hash(signature)); aiIdentity=identity;
    aiSource=count>0 ? incoming[0].source : "";
    ArraySort(map); ArrayCopy(levels,map); ArrayResize(levels,ArraySize(map));
    feedActive=aiReady && ArraySize(map)>0; sourceTime=mapAt; feedTime=generated;
    sourceKind="map"; sourceSender="点位来源见执行快照"; feedStatus=aiReason; DrawLevels();
    return true;
+}
+string PlanLifeKey(const int i)
+{
+   // 包含完整计划ID，避免目标价变化/心跳让失效记录丢失；新明确重申用时间恢复。
+   return "life_"+aiPlans[i].id;
+}
+string PlanLifeReason(const int i)
+{
+   string key=PlanLifeKey(i); datetime stopped=(datetime)Load(key+"at");
+   if(stopped>0 && aiPlans[i].confirmed<=stopped)
+      return Load(key+"why")==2 ? "仅参考：已触及明确止损价" : "仅参考：曾远离，等待新确认";
+   if(aiPlans[i].kind=="DIRECT")
+   {
+      int age=aiPlans[i].mode=="MARKET" ? MARKET_MAX_AGE : DIRECT_MAX_AGE;
+      if(TimeGMT()-aiPlans[i].confirmed>=age)
+         return aiPlans[i].mode=="MARKET" ? "仅参考：市价提示超过3分钟" : "仅参考：即时计划超过24小时";
+   }
+   return "";
+}
+bool PlanExecutable(const int i) { return PlanLifeReason(i)==""; }
+void StopPlanReference(const int i,const int why)
+{
+   string key=PlanLifeKey(i); datetime at=(datetime)Load(key+"at");
+   if(at>0 && aiPlans[i].confirmed<=at) return;
+   // 状态只表示停止新候选，不表示撤单/平仓已完成；请求仍走原交易对账链。
+   if(!Store(key+"why",why) || !Store(key+"at",(double)TimeGMT())) return;
+   GlobalVariablesFlush();
+   Print("点位停止新入场：",aiPlans[i].kind," ",DoubleToString(aiPlans[i].level,_Digits),
+         " 来源=",aiPlans[i].source," 原因=",why==2 ? "触及明确止损价" : "距离超过上限");
+}
+void RefreshPlanValidity(const MqlTick &q,const bool quoteOK)
+{
+   bool changed=false;
+   bool usable=quoteOK && AIChannelReady() && q.ask>=q.bid && q.bid>0 && q.ask-q.bid<=最大点差价格;
+   for(int i=0;i<ArraySize(aiPlans);i++)
+   {
+      if(usable && PlanExecutable(i))
+      {
+         bool far=false;
+         if(aiPlans[i].kind=="DIRECT")
+            far=MathAbs((aiPlans[i].sign>0 ? q.ask : q.bid)-aiPlans[i].level)>挂单最大离价;
+         else
+         {
+            double low=aiPlans[i].level,high=low;
+            for(int j=0;j<ArraySize(aiPlans);j++)
+               if(aiPlans[j].kind==aiPlans[i].kind && aiPlans[j].group==aiPlans[i].group)
+               { low=MathMin(low,aiPlans[j].level); high=MathMax(high,aiPlans[j].level); }
+            // 基础表/区间按整体范围判断；表内远端点位不会单独作废。
+            far=q.bid-high>挂单最大离价 || low-q.ask>挂单最大离价;
+         }
+         if(far) StopPlanReference(i,1);
+         else if(aiPlans[i].kind=="DIRECT" && aiPlans[i].sl>0 &&
+                 (aiPlans[i].sign>0 ? q.bid<=aiPlans[i].sl : q.ask>=aiPlans[i].sl)) StopPlanReference(i,2);
+      }
+      string life=PlanLifeReason(i);
+      if(life!=aiPlans[i].lifeReason) changed=true;
+      aiPlans[i].lifeReason=life;
+      if(life!="") aiPlans[i].status=life;
+   }
+   feedActive=false;
+   for(int i=0;i<ArraySize(aiPlans);i++)
+      if(aiPlans[i].kind=="MAP" && AIChannelReady() && PlanExecutable(i)) feedActive=true;
+   if(changed) DrawLevels();
+}
+string PlanAgeCaption(const int i)
+{
+   if(aiPlans[i].kind!="DIRECT")
+      return TimeGMT()-aiPlans[i].created>=86400 ? "旧参考" : "参考";
+   int age=aiPlans[i].mode=="MARKET" ? MARKET_MAX_AGE : DIRECT_MAX_AGE;
+   int left=(int)MathMax(0,aiPlans[i].confirmed+age-TimeGMT());
+   return left>=3600 ? "余"+IntegerToString(left/3600)+"小时" : "余"+IntegerToString(left/60)+"分钟";
+}
+string MapLifeCaption()
+{
+   for(int i=0;i<ArraySize(aiPlans);i++)
+      if(aiPlans[i].kind=="MAP")
+         return PlanExecutable(i) ? "地图"+PlanAgeCaption(i)+" · "+TimeToString(aiPlans[i].created+8*3600,TIME_DATE|TIME_MINUTES) : PlanLifeReason(i);
+   return "暂无完整点位地图";
 }
 string AIKeyFromHash(const uint originHash,const double level,const int sign)
 { return "av"+IntegerToString((long)originHash)+"_"+DoubleToString(level,_Digits)+"_"+IntegerToString(sign); }
@@ -205,11 +287,12 @@ int ZonePriority(const MqlTick &q)
 {
    int priority=0;
    for(int i=0;i<ArraySize(aiPlans);i++)
-      if((读取AI即时策略 || aiPlans[i].priority==5) && PlanNear(i,q)) priority=MathMax(priority,aiPlans[i].priority);
+      if(PlanExecutable(i) && (读取AI即时策略 || aiPlans[i].priority==5) && PlanNear(i,q)) priority=MathMax(priority,aiPlans[i].priority);
    return priority;
 }
 void UpdateTeacherVisits(const MqlTick &q)
 {
+   RefreshPlanValidity(q,true);
    UpdateSharedVisit(q);
    for(int i=0;i<ArraySize(aiPlans);i++)
    {
@@ -224,8 +307,8 @@ bool TeacherEntryAllowed(const int i,const MqlTick &q)
    int sign=PlanSign(i); double entry=sign>0 ? q.ask : q.bid;
    string status=""; double speed=0,oneway=0,pullback=0;
    if(!AIChannelReady() || (!读取AI即时策略 && aiPlans[i].priority>5)) status="来源未就绪";
+   else if(!PlanExecutable(i)) status=PlanLifeReason(i);
    else if(sign==0) status="等待从点位上方或下方接近";
-   else if(MathAbs(entry-aiPlans[i].level)>挂单最大离价) status="离价超过50，暂停候选";
    else if(!InTeacherBand(entry,aiPlans[i].level)) status="等待进入±1.00区域";
    else if(aiPlans[i].priority<ZonePriority(q)) status="本区域更高优先级计划优先";
    else if(SameOpportunity(sign,aiPlans[i].level) || SameOpportunity(-sign,aiPlans[i].level)) status="本次触及已消费，离开4点5秒后重入";
@@ -257,7 +340,7 @@ bool AIMarketSignal(Candidate &out)
    }
    if(best<0) return false;
    for(int i=0;i<ArraySize(aiPlans);i++)
-      if(i!=best && aiPlans[i].priority==aiPlans[best].priority && PlanNear(i,q) && PlanSign(i)==-PlanSign(best))
+      if(i!=best && PlanExecutable(i) && aiPlans[i].priority==aiPlans[best].priority && PlanNear(i,q) && PlanSign(i)==-PlanSign(best))
       { reason="同优先级方向冲突，等待更明确点位"; return false; }
    out.valid=true; out.ai=true; out.direction=PlanSign(best); out.level=aiPlans[best].level;
    out.bar=TimeCurrent(); out.originHash=Hash(aiPlans[best].id); out.aiKey=SharedVisitKey(out.level,out.direction);

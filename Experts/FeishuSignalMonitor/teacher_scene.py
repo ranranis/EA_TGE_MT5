@@ -46,6 +46,7 @@ exits各项为价格证据对象或null，sl是绝对止损价，tp1为首批减
 16. previous_scene返回的是完整快照，UPDATE时保留仍有效计划及已有exits；不能因新消息只补目标而清空其他已确认字段。改目标不换入场来源、不生成另一个机会；重复输入应得到同一组计划。计划identity由程序维护，不在JSON中新增内部字段。
 17. 所有price必须是JSON number；尾数缺数量级时可填null由本地复核，不猜百位。每个新入场数字必须确实承担入场角色：压力75、70可空中的75不是入场，止损/目标/突破阈值也不能借其他句方向变成新入场。破位预测保留说明，不填进无条件目标。加仓间距只解释，推算的后续档位不是原文token，不得伪造价格证据生成scene.plans；后续执行映射另行开发。
 18. “以后可以做空的位置”“以后再见可多”“等到/准备/可以/挂”只是在等待价格到达，只要价格和方向明确，就是当前发布的持续有效REACTION参考，不要求此刻已经开仓。多档明确位置各保留一条，不因尚未到价改成WATCH。复盘、假设分支和仅有压力支撑仍需区别。KEEP同样要填写最后老师target的as_of。
+19. 只翻译原文，不判断参考因时间/距离过期；EA负责这些判断。明确重申尽量引用新的点位与方向原文，普通闲聊、仅改目标不能刷新入场时间。取消只影响明确关联的计划；“86空取消”不代表所有空单取消，“挂的多取消”不代表整张地图取消。禁止因行情远离而自行从场景中删掉价格。
 """
 
 
@@ -77,6 +78,59 @@ def direction_side(text):
 def direction_fragment(text):
     """只接续尚无价格的方向短句，不把观点/保护/否定当缺价喊单。"""
     return direction_side(text) if re.fullmatch(r'[\s↑↓⬆⬇\ufe0f。.！!，,]*(?:(?:现在|准备|做多|做空|买入|卖出)[\s↑↓⬆⬇\ufe0f。.！!，,]*)*',text) else None
+
+
+def same_plan_price(token, plan):
+    # 仅匹配已验证计划的完整价/尾数，不用当前行情给旧消息重新补百位。
+    if token in (plan['token'], format(plan['price'], 'g')):
+        return True
+    return token.isdigit() and len(token) in (2,3) and abs(plan['price'] % (10**len(token))-int(token))<0.001
+
+
+def renew_confirmed_plans(plans, item):
+    """只给能唯一对应原价的明确重申续期；不让模型填写时间或用闲聊续期。"""
+    text = item.get('text', '')
+    if (item.get('historical') or item.get('deleted') or
+        not re.search(r'继续有效|依然有效|仍然有效|依旧有效|依然还是|仍然还是|还是刚才|再发一遍|重新确认', text) or
+        re.search(r'取消|作废|撤销|不做|别做|无效|不再|是否|吗|？|\?|假设|复盘|晒单|转发', text)):
+        return False
+    changed = False
+    for clause in re.split(r'[，,；;\n]', text):
+        if (not re.search(r'继续有效|依然有效|仍然有效|依旧有效|依然还是|仍然还是|还是刚才|再发一遍|重新确认',clause)
+            or re.search(r'止损|止盈|目标|保本|昨天|方才|曾经', clause)):
+            continue
+        numbers = re.findall(r'(?<![\d.])\d{1,5}(?:\.\d{1,2})?(?![\d.])', clause)
+        for token in numbers:
+            matches = [p for p in plans if not p.get('basis') and same_plan_price(token,p)]
+            # 同价双向或仅尾数无法唯一对应时不猜续期对象。
+            side = direction_side(clause)
+            if side:
+                matches = [p for p in matches if p['side'] == side]
+            if len(matches) != 1:
+                continue
+            plan = matches[0]
+            at = stamp(item['time'])
+            if at > plan.get('confirmed_at', plan.get('origin_created', 0)):
+                plan['confirmed_at'] = at
+                plan['confirmed_ref'] = dict(message_id=item['message_id'], revision=item['revision'])
+                changed = True
+    return changed
+
+
+def cancels_plan(item, plan):
+    """取消数字有范围：86空取消不能把另一价格的空单也判为已取消。"""
+    text=item.get('text','')
+    if item.get('historical') or item.get('deleted') or not re.search(r'取消|作废|撤销|不做|别做|暂停',text):
+        return False
+    interpretation=item.get('interpretation') or {}
+    all_sides=bool(re.search(r'^(?:取消|作废|撤销)(?:全部|所有|前面|之前|计划|参考)|^(?:全部|所有)(?:取消|作废|撤销)|^暂停(?:交易|计划|参考)',text.strip()))
+    word='多' if plan['side']=='BUY' else '空'
+    same_side=bool(re.search(r'(?:取消|作废|撤销|不做|别做)\s*(?:做)?'+word+r'|'+word+r'(?:单)?\s*(?:可以|先|都|全部)?\s*(?:取消|作废|撤销)',text))
+    matched=all_sides or same_side or interpretation.get('kind')=='CANCEL' and interpretation.get('cancel_side') in ('ALL',plan['side'])
+    if not matched:
+        return False
+    numbers=re.findall(r'(?<![\d.])\d{2,5}(?:\.\d{1,2})?(?![\d.])',text)
+    return not numbers or any(same_plan_price(t,plan) for t in numbers)
 
 
 def validate_scene(value, targets, context, anchor, previous=None):
@@ -269,13 +323,7 @@ def validate_scene(value, targets, context, anchor, previous=None):
         for item in items.values():
             if item.get('sender_id')!=latest['sender_id'] or (stamp(item['time']),item.get('sequence',0))<=start:
                 continue
-            interpretation=item.get('interpretation') or {}
-            kind=interpretation.get('kind')
-            text=item.get('text','')
-            raw_all=bool(re.search(r'^(?:取消|作废|撤销)(?:全部|所有|前面|之前|计划|参考)|^(?:全部|所有)(?:取消|作废|撤销)|^暂停(?:交易|计划|参考)',text.strip()))
-            raw_side=bool(re.search(r'(?:取消|作废|撤销|不做|别做)\s*(?:多单|做多)|(?:多单|做多)\s*(?:取消|作废|撤销)',text)) if plan['side']=='BUY' else bool(re.search(r'(?:取消|作废|撤销|不做|别做)\s*(?:空单|做空)|(?:空单|做空)\s*(?:取消|作废|撤销)',text))
-            if not item.get('deleted') and not item.get('historical') and (
-                kind=='CANCEL' and interpretation.get('cancel_side') in ('ALL',plan['side']) or raw_all or raw_side):
+            if cancels_plan(item,plan):
                 raise AIError('AI场景不得复活取消前的旧方向')
         source=items[plan['price_ref']]
         if basis is None and plan['price_ref']!=plan['direction_ref']:
@@ -306,7 +354,16 @@ def validate_scene(value, targets, context, anchor, previous=None):
         plan=dict(plan,near=False,origin_id=prior.get('origin_id',source['message_id']) if prior else source['message_id'],
                   origin_revision=prior.get('origin_revision',origin_revision) if prior else origin_revision,
                   origin_created=prior.get('origin_created',stamp(source['time'])) if prior else stamp(source['time']))
+        # 采用通过原文校验的入场/方向时间，退出价修改不属于入场重申。
+        proof_at=max(stamp(source['time']),stamp(direction['time']))
+        plan['confirmed_at']=max(proof_at,(prior or {}).get('confirmed_at',0))
+        if prior and prior.get('confirmed_ref') and prior.get('confirmed_at',0)>proof_at:
+            plan['confirmed_ref']=prior['confirmed_ref']
+            refs[prior['confirmed_ref']['message_id']]=prior['confirmed_ref']
         clean.append(plan)
+    for item in teacher:
+        if renew_confirmed_plans(clean,item):
+            refs[item['message_id']]=dict(message_id=item['message_id'],revision=item['revision'])
     refs[latest['message_id']]=dict(message_id=latest['message_id'],revision=latest['revision'])
     return dict(value,plans=clean,created=stamp(latest['time']),sequence=latest['sequence'],
                 revision=latest['revision'],sender=latest['sender_id'],source_refs=list(refs.values()),
@@ -358,13 +415,32 @@ def validate_execution_scene(value, targets, context, anchor, previous=None):
 
 def publish_scene(db, c, scene):
     from deepseek_ai import refs_current
-    if not scene or scene['action']=='KEEP':
+    if not scene:
         return
     previous=state(db,'teacher_scene',{})
     if (scene['created'],scene['sequence'])<(previous.get('created',0),previous.get('sequence',0)):
         return
     if not refs_current(db,c['chat_id'],scene['source_refs']):
         return
+    if scene['action']=='KEEP':
+        # KEEP可包含“75继续有效”，本地按唯一价格关联重申，不用AI编造续期。
+        if not previous or not refs_current(db,c['chat_id'],previous.get('source_refs',[])):
+            return
+        row=db.execute('SELECT * FROM messages WHERE chat_id=? AND message_id=?',
+                       (c['chat_id'],scene['as_of'])).fetchone()
+        if not row or row['sender']!=c['teacher_sender_id'] or row['deleted'] or row['historical']:
+            return
+        raw=json.loads(row['raw']); text=raw.get('content','')
+        if not isinstance(text,str):
+            return
+        retained=copy.deepcopy(previous)
+        item=dict(text=text,time=row['created'],message_id=row['message_id'],revision=row['revision'])
+        if not renew_confirmed_plans(retained.get('plans',[]),item):
+            return
+        refs={r['message_id']:r for r in previous['source_refs']+scene['source_refs']}
+        retained.update(as_of=scene['as_of'],created=scene['created'],sequence=scene['sequence'],
+                        revision=scene['revision'],source_refs=list(refs.values()),summary='老师明确重申对应点位')
+        scene=retained
     if scene['action']=='REVIEW':
         set_state(db,'deepseek_review',dict(message_id=scene['as_of'],created=scene['created'],reason=scene['summary']))
         return

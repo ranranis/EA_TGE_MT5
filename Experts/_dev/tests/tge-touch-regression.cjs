@@ -22,12 +22,12 @@ function install(x,name,args='',ref=false){
  if(ref)s=s.replace(/return false;/g,'return {ok:false,speed,oneway,pullback};').replace(/return true;/g,'return {ok:true,speed,oneway,pullback};');
  vm.runInContext(`function ${name}(${args}){${s}}`,x);
 }
-function plan(o={}){return {id:'direct-a',kind:'DIRECT',priority:8,sign:1,approach:0,level:4175,source:'teacher-a',created:990,sl:0,first:0,tp:0,breakeven:0,status:'',...o};}
+function plan(o={}){return {id:'direct-a',kind:'DIRECT',priority:8,sign:1,approach:0,level:4175,source:'teacher-a',created:990,confirmed:990,mode:'REACTION',group:'one',lifeReason:'',sl:0,first:0,tp:0,breakeven:0,status:'',...o};}
 function env(options={}){
  let now=1000;const memory=options.memory||{},calls=[];
  const x=vm.createContext({
   aiPlans:options.plans||[plan()],aiReady:true,aiGenerated:now,aiReason:'',aiMode:'SETUP',identity:'',aiIdentity:'TGA6',aiSource:'',aiSourceTime:990,
-  healthOK:true,healthPaused:false,healthBeat:now,healthSync:now,healthCheckpoint:now,healthMaxAge:120,读取AI即时策略:true,
+  DIRECT_MAX_AGE:86400,MARKET_MAX_AGE:180,healthOK:true,healthPaused:false,healthBeat:now,healthSync:now,healthCheckpoint:now,healthMaxAge:120,读取AI即时策略:true,
   每次开仓手数:.02,最大同时持仓:3,最大点差价格:.5,挂单最大离价:50,保险价格距离:10,首批止盈价格距离:5,尾仓目标价格距离:10,
   允许同机会重入:true,TEACHER_BAND:1,REARM_DISTANCE:4,REARM_SECONDS:5,冲击短窗毫秒:3000,逆向冲击速度:.6,冲击单向比例:.85,恢复回拉价格:.35,
   reason:'',entryView:{},pending:{kind:0},levels:[],sourceTime:0,sourceKind:'',sourceSender:'',feedStatus:'',feedTime:0,feedActive:false,
@@ -39,7 +39,7 @@ function env(options={}){
   StringToInteger:Number,StringToDouble:Number,StringSplit:(s,sep,out)=>{out.splice(0,out.length,...s.split(sep));return out.length;},
   StringFind:(s,t)=>s.indexOf(t),StringSubstr:(s,n)=>s.slice(n),ArraySize:a=>a.length,ArrayResize:(a,n)=>{while(a.length<n)a.push({});a.length=n;},
   ArrayCopy:(a,b)=>a.splice(0,a.length,...b),ArraySort:a=>a.sort((a,b)=>a-b),
-  Load:k=>memory[k]||0,Store:(k,v)=>{memory[k]=v;return true;},GlobalVariablesFlush:()=>{},DrawLevels:()=>{},
+  Load:k=>memory[k]||0,Store:(k,v)=>{memory[k]=v;return true;},GlobalVariablesFlush:()=>{},DrawLevels:()=>{},Print:()=>{},
   ZeroMemory:p=>{for(const k of Object.keys(p))delete p[k];Object.assign(p,{kind:0,exitSL:0,exitFirst:0,exitTP:0,exitBE:0,valid:false});},
   FreshQuote:q=>Object.assign(q,{bid:4174.9,ask:4175,time_msc:now*1000}),
   CanExecute:()=>true,ExecutionBlock:()=>'',ExactLot:()=>true,Align:v=>v,Stops:()=>true,
@@ -57,7 +57,7 @@ function env(options={}){
  ['Number','text,decimal=false'],['AIChannelReady',''],['InvalidAI','why'],['ReadAISetups',''],
  ['RememberFastTick','q'],['TickImpact','sign,now',true],['AIKeyFromHash','hash,level,sign'],
  ['SharedVisitKey','level,sign'],['SameOpportunity','sign,level'],['RememberSharedVisit','level,sign'],['UpdateSharedVisit','q'],['MergeOpportunity','sign,level'],
- ['InTeacherBand','entry,level'],['PlanSign','i'],['PlanNear','i,q'],['ZonePriority','q'],['UpdateTeacherVisits','q'],['TeacherEntryAllowed','i,q'],
+ ['PlanLifeKey','i'],['PlanLifeReason','i'],['PlanExecutable','i'],['StopPlanReference','i,why'],['RefreshPlanValidity','q,quoteOK'],['InTeacherBand','entry,level'],['PlanSign','i'],['PlanNear','i,q'],['ZonePriority','q'],['UpdateTeacherVisits','q'],['TeacherEntryAllowed','i,q'],
  ['AIMarketSignal','out'],['Open','signal'],['ExitCandles','bars,sign,opened,period,now'],['ExitRhythm','sign,opened'],
  ['ExitKey','id'],['FirstExit','id,sign,open,tp'],['PartialRemaining','initial,closed,remaining'],['RefreshEntryExits','key,sign'],['RequestExit','ticket,id,volume,full,why'],['Manage',''],['LegacyLimitsClear','']])install(x,name,args,ref);
  return {x,memory,calls,setNow:n=>now=n};
@@ -118,13 +118,76 @@ test('其他计划的目标不串到已有持仓',()=>{const e=env({plans:[plan(
 test('断流时离区计时清零，停机时间不算重新触价',()=>{const {x}=env();x.MergeOpportunity(1,4175);x.sharedVisits[0].left=990;x.fastLast=900000;x.RememberFastTick({time_msc:1000000,bid:4179,ask:4179.1});assert.equal(x.sharedVisits[0].left,0);});
 // 由真实Python导出函数构造合成快照，送入生产MQL读取函数。
 const csv=require('node:child_process').execFileSync('python',['-X','utf8','-c',
- 'from test_execution_feed import ExecutionTests; import csv,io; t=ExecutionTests(); t.setUp(); t.c["symbols"][t.c["teacher_symbol"]]="XAUUSD.c"; t.scene(); rows=t.feed(); s=io.StringIO(newline=""); w=csv.writer(s,lineterminator="\\n"); w.writerows(rows); print(s.getvalue(),end=""); t.tearDown()'],
+ 'from test_execution_feed import ExecutionTests; import csv,io; t=ExecutionTests(); t.setUp(); t.c["symbols"][t.c["teacher_symbol"]]="XAUUSD.c"; t.scene(); rows=t.feed(protocol=7); s=io.StringIO(newline=""); w=csv.writer(s,lineterminator="\\n"); w.writerows(rows); print(s.getvalue(),end=""); t.tearDown()'],
  {cwd:path.join(root,'FeishuSignalMonitor'),encoding:'utf8'}).trim().split(/\r?\n/);
 function file(x,lines){let at=0;x.FileOpen=()=>1;x.FileSize=()=>lines.join('\n').length;x.FileIsEnding=()=>at>=lines.length;x.FileReadString=()=>lines[at++];x.FileClose=()=>{};}
-test('Python TGA6 -> MQL读取真实字段与优先级',()=>{const {x,setNow}=env();setNow(Number(csv[0].split(',')[2]));file(x,csv);assert(x.ReadAISetups());assert.equal(x.aiPlans.length,6);assert.equal(x.aiPlans.filter(p=>p.priority===8).length,2);assert.equal(x.aiPlans.filter(p=>p.priority===6).length,4);});
+test('Python TGA7 -> MQL读取真实字段与优先级',()=>{const {x,setNow}=env();setNow(Number(csv[0].split(',')[2]));file(x,csv);assert(x.ReadAISetups());assert.equal(x.aiPlans.length,6);assert.equal(x.aiPlans.filter(p=>p.priority===8).length,2);assert.equal(x.aiPlans.filter(p=>p.priority===6).length,4);});
 test('截断、错品种、错优先级快照停用且不替换旧计划',()=>{
  for(const lines of [csv.slice(0,-1),csv.map((r,i)=>i===0?r.replace('XAUUSD','EURUSD'):r),csv.map((r,i)=>i===1?r.replace('DIRECT,8','DIRECT,6'):r)]){
  const {x,setNow}=env();setNow(Number(csv[0].split(',')[2]));file(x,lines);assert(!x.ReadAISetups());assert(!x.aiReady);assert.equal(x.aiPlans[0].id,'direct-a');}
 });
-test('完整空快照替换取消，不保留旧活动方向',()=>{const {x}=env();file(x,['TGA,6,1000,1,XAUUSD.c,0,已取消','END,0']);assert(x.ReadAISetups());assert.equal(x.aiPlans.length,0);});
+test('完整空快照替换取消，不保留旧活动方向',()=>{const {x}=env();file(x,['TGA,7,1000,1,XAUUSD.c,0,已取消','END,0']);assert(x.ReadAISetups());assert.equal(x.aiPlans.length,0);});
+
+test('即时计划24小时边界过期，引用仍保留且不抢低优先级',()=>{
+ const e=env({plans:[plan({created:1,confirmed:1}),plan({id:'map',kind:'MAP',priority:5,sign:0,approach:1,confirmed:1,created:1})]});
+ e.setNow(86401);for(const k of ['aiGenerated','healthBeat','healthSync','healthCheckpoint'])e.x[k]=86401;
+ ticks(e.x,[4175,4175,4175,4175]);const c={};assert(e.x.AIMarketSignal(c));assert.equal(c.originHash,e.x.Hash('map'));
+ assert.equal(e.x.aiPlans.length,2);assert.match(e.x.aiPlans[0].status,/24小时/);
+});
+test('时间正常但距离超过50持久失效，返回/重启/刷新心跳不复活',()=>{
+ const e=env();e.x.RefreshPlanValidity({bid:4226,ask:4226.1},true);assert(!e.x.PlanExecutable(0));
+ ticks(e.x,[4175,4175,4175,4175]);assert(!e.x.AIMarketSignal({}));
+ const r=env({memory:e.memory});ticks(r.x,[4175,4175,4175,4175]);assert(!r.x.AIMarketSignal({}));
+ r.x.aiPlans[0].confirmed=1001;r.setNow(1002);ticks(r.x,[4175,4175,4175,4175]);assert(r.x.AIMarketSignal({}));
+});
+test('距离恰好50不过期，51过期；SELL使用bid',()=>{
+ const e=env({plans:[plan({sign:-1})]});e.x.RefreshPlanValidity({bid:4225,ask:4225.1},true);assert(e.x.PlanExecutable(0));
+ e.x.RefreshPlanValidity({bid:4226,ask:4226.1},true);assert(!e.x.PlanExecutable(0));
+});
+test('整张地图内部远端点不失效，离开整体50才整组停止',()=>{
+ const e=env({plans:[4150,4160,4175,4190,4200,4220].map(p=>plan({id:'m'+p,kind:'MAP',priority:5,sign:0,level:p,group:'map',created:1,confirmed:1}))});
+ e.x.RefreshPlanValidity({bid:4210,ask:4210.1},true);assert(e.x.aiPlans.every((_,i)=>e.x.PlanExecutable(i)));
+ e.x.RefreshPlanValidity({bid:4271,ask:4271.1},true);assert(e.x.aiPlans.every((_,i)=>!e.x.PlanExecutable(i)));
+ e.x.RefreshPlanValidity({bid:4175,ask:4175.1},true);assert(e.x.aiPlans.every((_,i)=>!e.x.PlanExecutable(i)));
+});
+test('新区间独立恢复；旧地图与旧方向不能借别人的新消息续期',()=>{
+ const e=env({plans:[plan({id:'direct'}),plan({id:'range',kind:'INNER',priority:6,group:'r',level:4175}),plan({id:'range2',kind:'INNER',priority:6,group:'r',level:4200,sign:-1})]});
+ e.x.RefreshPlanValidity({bid:4251,ask:4251.1},true);assert(!e.x.PlanExecutable(0));assert(!e.x.PlanExecutable(1));
+ e.x.aiPlans[1].confirmed=1001;e.setNow(1002);e.x.RefreshPlanValidity({bid:4175,ask:4175.1},true);
+ assert(e.x.PlanExecutable(1));assert(!e.x.PlanExecutable(0));assert(!e.x.PlanExecutable(2));
+});
+test('坏报价/同步断开/异常点差不写永久失效记录',()=>{
+ for(const mode of ['quote','health','spread']){
+ const e=env();if(mode==='health')e.x.healthOK=false;
+ e.x.RefreshPlanValidity({bid:4300,ask:mode==='spread'?4400:4300.1},mode!=='quote');
+ assert.equal(Object.keys(e.memory).length,0);
+ }
+});
+test('明确止损被触及时停止新单，但不发平仓或改单请求',()=>{
+ const e=env({plans:[plan({sl:4165})]});e.x.RefreshPlanValidity({bid:4165,ask:4165.1},true);
+ assert.match(e.x.PlanLifeReason(0),/止损/);assert.equal(e.calls.length,0);
+ ticks(e.x,[4175,4175,4175,4175]);assert(!e.x.AIMarketSignal({}));
+});
+test('过期相反方向不造成同级冲突，近期同价计划正常',()=>{
+ const e=env({plans:[plan({sign:-1,created:1,confirmed:1}),plan({id:'new',created:99990,confirmed:99990})]});e.setNow(100000);
+ for(const k of ['aiGenerated','healthBeat','healthSync','healthCheckpoint'])e.x[k]=100000;
+ ticks(e.x,[4175,4175,4175,4175]);const c={};assert(e.x.AIMarketSignal(c));assert.equal(c.direction,1);
+});
+test('市价提示仍仅3分钟；不延长为24小时',()=>{
+ const e=env({plans:[plan({mode:'MARKET',created:820,confirmed:820})]});ticks(e.x,[4175,4175,4175,4175]);
+ assert(!e.x.AIMarketSignal({}));assert.match(e.x.PlanLifeReason(0),/3分钟/);
+});
+test('提交前恰好到期阻断；已有仓位继续原分批管理',()=>{
+ const e=env({plans:[plan({created:1,confirmed:1})]});ticks(e.x,[4175,4175,4175,4175]);const c={};assert(e.x.AIMarketSignal(c));
+ e.setNow(86401);for(const k of ['aiGenerated','healthBeat','healthSync','healthCheckpoint'])e.x[k]=86401;
+ ticks(e.x,[4175,4175,4175,4175]);e.x.Open(c);assert.equal(e.calls.length,0);
+ position(e);e.x.Manage();assert.equal(e.calls[0][0],'partial');
+});
+test('篡改重申为未来/早于原消息、旧协议都拒绝',()=>{
+ for(const lines of [csv.map((r,i)=>i===0?r.replace('TGA,7','TGA,6'):r),csv.map((r,i)=>{if(i!==1)return r;const a=r.split(',');a[14]=Number(csv[0].split(',')[2])+100;return a.join(',');}),
+ csv.map((r,i)=>{if(i!==1)return r;const a=r.split(',');a[14]=1;return a.join(',');})]){
+ const {x,setNow}=env();setNow(Number(csv[0].split(',')[2]));file(x,lines);assert(!x.ReadAISetups());
+ }
+});
+
 console.log(`${checks} checks passed (synthetic, no broker orders)`);

@@ -4,7 +4,7 @@ import json
 import unittest
 from unittest.mock import Mock
 from deepseek_ai import AIError, DeepSeek, process_ai_batch, ai_snapshot
-from teacher_scene import validate_scene, publish_scene
+from teacher_scene import validate_scene, publish_scene, renew_confirmed_plans, cancels_plan
 from store import state, set_state, ingest
 from test_deepseek_ai import WorkerTests as DatabaseFixture, result
 
@@ -34,6 +34,54 @@ def example():
                inner_range=dict(low=proof('small','4175'),high=proof('small','4200')),
                outer_range=dict(low=proof('large','4150'),high=proof('large','4220')),summary='区间内等待4175多、4193空的收线反应')
     return targets,context,scene
+
+
+class LifetimeTests(unittest.TestCase):
+    def test_target_change_does_not_renew_entry(self):
+        targets,context,scene=example()
+        first=validate_scene(scene,targets,context,4181)
+        later=message('later','多单4175目标4205',9)
+        scene['as_of']='later'
+        scene['plans'][0]['exits']=dict(sl=None,tp1=None,tp2=dict(message_id='later',token='4205',price=4205,evidence=later['text']),breakeven=None)
+        second=validate_scene(scene,targets+[later],context,4181,first)
+        self.assertEqual(first['plans'][0]['confirmed_at'],second['plans'][0]['confirmed_at'])
+        self.assertEqual(first['plans'][0]['origin_revision'],second['plans'][0]['origin_revision'])
+
+    def test_confirm_only_matching_plan_and_keep_original_identity(self):
+        targets,context,scene=example()
+        first=validate_scene(scene,targets,context,4181)
+        plans=copy.deepcopy(first['plans'])
+        later=message('later','75继续有效，93先等等',9)
+        self.assertTrue(renew_confirmed_plans(plans,later))
+        self.assertGreater(plans[0]['confirmed_at'],first['plans'][0]['confirmed_at'])
+        self.assertEqual(plans[1]['confirmed_at'],first['plans'][1]['confirmed_at'])
+        self.assertEqual(plans[0]['origin_id'],first['plans'][0]['origin_id'])
+        self.assertFalse(renew_confirmed_plans(plans,later))  # 重放同一条不续期
+
+    def test_chatter_exit_history_and_ambiguous_confirm_do_not_renew(self):
+        targets,context,scene=example()
+        plans=validate_scene(scene,targets,context,4181)['plans']
+        before=copy.deepcopy(plans)
+        for text in ['早，75了','昨天75继续有效','75目标继续有效','75继续有效吗','75不再继续有效','这些还有效','刚才75赚了5点']:
+            self.assertFalse(renew_confirmed_plans(plans,message('later',text,9)),text)
+        self.assertEqual(plans,before)
+
+    def test_scoped_cancel_does_not_cancel_other_price_or_map(self):
+        item=dict(message('cancel','86空取消',9),interpretation=dict(kind='CANCEL',cancel_side='SELL'))
+        self.assertTrue(cancels_plan(item,plan('SELL','86',4186,'x','86空')))
+        self.assertTrue(cancels_plan(item,plan('SELL','4186',4186,'x','4186空')))
+        self.assertFalse(cancels_plan(item,plan('SELL','93',4193,'y','93空')))
+
+        self.assertFalse(cancels_plan(item,plan('BUY','86',4186,'z','86多')))
+        item=dict(message('cancel','挂的多可以取消了',9),interpretation=dict(kind='CANCEL',cancel_side='BUY'))
+        self.assertTrue(cancels_plan(item,plan('BUY','75',4175,'x','75多')))
+        self.assertFalse(cancels_plan(item,plan('SELL','93',4193,'y','93空')))
+
+    def test_short_confirmation_requires_unique_verified_full_price(self):
+        plans=[dict(plan('BUY','4175',4175,'x','4175多'),confirmed_at=1),dict(plan('BUY','4275',4275,'y','4275多'),confirmed_at=1)]
+        self.assertFalse(renew_confirmed_plans(plans,message('new','75继续有效',9)))
+        self.assertTrue(renew_confirmed_plans(plans,message('new','4175继续有效',9)))
+        self.assertEqual(plans[1]['confirmed_at'],1)
 
 
 class ReferenceTransportTests(unittest.TestCase):
