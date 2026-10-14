@@ -23,6 +23,7 @@ from paper import PaperEngine
 from teacher_strategy import TeacherAnalysis, source_levels
 from dashboard import serve
 from deepseek_ai import member_follow_snapshots, ai_worker, ai_snapshot, member_follow_snapshot
+from execution_feed import execution_csv
 
 ROOT=Path(__file__).resolve().parent
 DEFAULT_HOME=Path(os.environ.get('LOCALAPPDATA',str(Path.home())))/'FeishuMT5SignalMonitor'
@@ -185,6 +186,8 @@ def export_teacher_levels(db,c,paused,now):
                  int(paused),int(c['sync_max_age_seconds']),'END'])
     atomic_text(folder/'tge_health.csv',health.getvalue())
     ai=ai_snapshot(db,c,now,paused) if c.get('ai_enabled') else dict(active=False,mode='WAIT',plans=[],reason='AI未启用')
+    # 新EA单独读取TGA6；保留旧快照，开发/监控重启不会改变尚未升级的EA行为。
+    atomic_text(folder/'tge_execution.csv', execution_csv(db,c,now,paused,context,active,selected,ai))
     bridge=io.StringIO(newline=''); aw=csv.writer(bridge,lineterminator='\r\n')
     note=str(ai['reason']).replace(',','，').replace('\r',' ').replace('\n',' ')[:160]
     # TGA5明确表示仅老师限价模式；旧市价EA拒绝该协议，避免升级期间误用旧入口。

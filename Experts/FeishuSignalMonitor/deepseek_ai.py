@@ -136,7 +136,7 @@ class DeepSeek:
                          {'role':'user','content':json.dumps(request_data,ensure_ascii=False)}],
             'response_format': {'type':'json_object'}, 'max_tokens': 4800}
         if self.config.get('teacher_only'):
-            payload['messages'][0]['content']+='\n当前执行规则仅T哥本人明确的价格与方向。只返回有原文依据的直接BUY/SELL条件计划，basis为null；区间/支撑压力说明只作展示，禁止RANGE_EDGE推导。执行端只挂0.02手限价单，不追市价。闲聊不改变计划：KEEP必须plans为空、regime为UNKNOWN、全部区间/证据字段为null。'
+            payload['messages'][0]['content']+='\n只翻译T哥本人原文的价格、方向、区间和明确退出目标。plans仅返回有方向证据的直接BUY/SELL条件计划，basis为null，禁止RANGE_EDGE推导；大小区间必须填写inner_range/outer_range，并保留仍有效的区间。EA自行将合法区间下沿映射为BUY、上沿SELL，并在±1.00价格差内判断触价，手数与执行方式由EA决定。不要为了让EA开仓而猜方向或价位。闲聊不改变计划：KEEP必须plans为空、regime为UNKNOWN、全部区间/证据字段为null。'
         if rebuild:
             payload['messages'][0]['content']+='\n本次是人工请求重读现有消息，仅生成预览。必须UPDATE完整当前场景或REVIEW，不得KEEP。核对截至最后老师消息的全部取消和改价；不重放MARKET市价指令；保留仍有效的条件计划。'
         data = self.request('/chat/completions', payload)

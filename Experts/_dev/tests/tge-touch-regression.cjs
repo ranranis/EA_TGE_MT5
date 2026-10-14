@@ -1,0 +1,130 @@
+// 执行生产MQL函数体；合成tick/历史/券商桩，不连接终端、不产生真实订单。
+const fs=require('node:fs'),path=require('node:path'),vm=require('node:vm'),assert=require('node:assert/strict');
+const root=path.resolve(__dirname,'../..');
+const sources=['EA_T哥点位跟单.mq5','Include/Trading/TgeAISignals.mqh','Include/Trading/TgeTeacherLimits.mqh'].map(p=>fs.readFileSync(path.join(root,p),'utf8'));
+function body(name){
+ const re=new RegExp('^(?:void|bool|int|uint|ulong|double|string) '+name+'\\(','m');
+ const src=sources.find(s=>re.test(s));assert(src,name);
+ const start=src.indexOf('{',src.search(re));let end=start+1,n=1;
+ for(;n;end++){if(src[end]==='{')n++;if(src[end]==='}')n--;}
+ return src.slice(start+1,end-1);
+}
+function install(x,name,args='',ref=false){
+ let s=body(name).replace(/\((?:int|long|uint|ulong|double|datetime|ENUM_ORDER_TYPE)\)/g,'')
+ .replace(/\b(?:string|double|AIPlan|MqlRates) (\w+)\[\],(\w+)\[\];/g,'let $1=[], $2=[];')
+ .replace(/\b(?:string|double|AIPlan|MqlRates) (\w+)\[\];/g,'let $1=[];')
+ .replace(/\b(?:MqlTick|Candidate) (\w+);/g,'let $1={};')
+ .replace(/\b(?:const )?(?:bool|int|uint|ulong|long|ushort|double|string|datetime|ENUM_ORDER_TYPE)\s+/g,'let ')
+ .replace('TickImpact(sign,q.time_msc,speed,oneway,pullback)',
+  '((v)=>{speed=v.speed;oneway=v.oneway;pullback=v.pullback;return v.ok;})(TickImpact(sign,q.time_msc))')
+ .replace('PositionVolumes(id,initial,closed)','((v)=>{initial=v.initial;closed=v.closed;return v.ok;})(PositionVolumes(id))');
+ if(name==='Number')s=s.replace(/c([<>=!]+)'(.)'/g,(_,op,c)=>'c'+op+c.charCodeAt(0));
+ if(ref)s=s.replace(/return false;/g,'return {ok:false,speed,oneway,pullback};').replace(/return true;/g,'return {ok:true,speed,oneway,pullback};');
+ vm.runInContext(`function ${name}(${args}){${s}}`,x);
+}
+function plan(o={}){return {id:'direct-a',kind:'DIRECT',priority:8,sign:1,approach:0,level:4175,source:'teacher-a',created:990,sl:0,first:0,tp:0,breakeven:0,status:'',...o};}
+function env(options={}){
+ let now=1000;const memory=options.memory||{},calls=[];
+ const x=vm.createContext({
+  aiPlans:options.plans||[plan()],aiReady:true,aiGenerated:now,aiReason:'',aiMode:'SETUP',identity:'',aiIdentity:'TGA6',aiSource:'',aiSourceTime:990,
+  healthOK:true,healthPaused:false,healthBeat:now,healthSync:now,healthCheckpoint:now,healthMaxAge:120,读取AI即时策略:true,
+  每次开仓手数:.02,最大同时持仓:3,最大点差价格:.5,挂单最大离价:50,保险价格距离:10,首批止盈价格距离:5,尾仓目标价格距离:10,
+  允许同机会重入:true,TEACHER_BAND:1,REARM_DISTANCE:4,REARM_SECONDS:5,冲击短窗毫秒:3000,逆向冲击速度:.6,冲击单向比例:.85,恢复回拉价格:.35,
+  reason:'',entryView:{},pending:{kind:0},levels:[],sourceTime:0,sourceKind:'',sourceSender:'',feedStatus:'',feedTime:0,feedActive:false,
+  fastTicks:Array.from({length:256},()=>({})),fastCount:0,fastCursor:0,fastLast:0,fastStarted:0,sharedVisits:[],teacherLimits:Array.from({length:4},()=>({state:0})),
+  TickSize:()=>.01,TimeCurrent:()=>now,TimeGMT:()=>now,MathMax:Math.max,MathMin:Math.min,MathAbs:Math.abs,MathIsValidNumber:Number.isFinite,
+  DBL_MAX:Number.MAX_VALUE,_Digits:2,_Symbol:'XAUUSD.c',EA魔法号:560056,
+  Hash:s=>{let h=2166136261;for(const c of s)h=Math.imul(h^c.charCodeAt(0),16777619)>>>0;return h;},
+  IntegerToString:String,DoubleToString:(n,d)=>n.toFixed(d),StringLen:s=>s.length,StringGetCharacter:(s,n)=>s.charCodeAt(n),
+  StringToInteger:Number,StringToDouble:Number,StringSplit:(s,sep,out)=>{out.splice(0,out.length,...s.split(sep));return out.length;},
+  StringFind:(s,t)=>s.indexOf(t),StringSubstr:(s,n)=>s.slice(n),ArraySize:a=>a.length,ArrayResize:(a,n)=>{while(a.length<n)a.push({});a.length=n;},
+  ArrayCopy:(a,b)=>a.splice(0,a.length,...b),ArraySort:a=>a.sort((a,b)=>a-b),
+  Load:k=>memory[k]||0,Store:(k,v)=>{memory[k]=v;return true;},GlobalVariablesFlush:()=>{},DrawLevels:()=>{},
+  ZeroMemory:p=>{for(const k of Object.keys(p))delete p[k];Object.assign(p,{kind:0,exitSL:0,exitFirst:0,exitTP:0,exitBE:0,valid:false});},
+  FreshQuote:q=>Object.assign(q,{bid:4174.9,ask:4175,time_msc:now*1000}),
+  CanExecute:()=>true,ExecutionBlock:()=>'',ExactLot:()=>true,Align:v=>v,Stops:()=>true,
+  OrderCalcMargin:()=>true,AccountInfoDouble:()=>1000,ACCOUNT_MARGIN_FREE:1,ORDER_TYPE_BUY:1,ORDER_TYPE_SELL:2,
+  SavePending:()=>{},DecisionLog:()=>{},EntryTag:()=>'TGsynthetic',RecordResult:()=>{},
+  PositionSelectByTicket:()=>true,OwnSelected:()=>true,LimitEntryPending:()=>false,OrdersTotal:()=>0,PositionsTotal:()=>0,
+  POSITION_VOLUME:'volume',POSITION_IDENTIFIER:'id',POSITION_TIME:'time',POSITION_TYPE:'type',POSITION_TYPE_BUY:0,
+  POSITION_PRICE_OPEN:'open',POSITION_SL:'sl',POSITION_TP:'tp',POSITION_COMMENT:'comment',
+  SymbolInfoDouble:()=>.01,SYMBOL_VOLUME_MIN:1,LotDown:v=>Math.floor(v*100+1e-7)/100,
+  PERIOD_M1:1,PERIOD_M5:5,ArraySetAsSeries:()=>{},
+  execution:{PositionOpen:(...a)=>calls.push(['open',...a]),PositionClose:(...a)=>calls.push(['close',...a]),PositionClosePartial:(...a)=>calls.push(['partial',...a])},
+  INVALID_HANDLE:-1,CP_UTF8:65001,FILE_READ:1,FILE_TXT:2,FILE_ANSI:4,FILE_COMMON:8,FILE_SHARE_READ:16,
+ });
+ for(const [name,args,ref] of [
+ ['Number','text,decimal=false'],['AIChannelReady',''],['InvalidAI','why'],['ReadAISetups',''],
+ ['RememberFastTick','q'],['TickImpact','sign,now',true],['AIKeyFromHash','hash,level,sign'],
+ ['SharedVisitKey','level,sign'],['SameOpportunity','sign,level'],['RememberSharedVisit','level,sign'],['UpdateSharedVisit','q'],['MergeOpportunity','sign,level'],
+ ['InTeacherBand','entry,level'],['PlanSign','i'],['PlanNear','i,q'],['ZonePriority','q'],['UpdateTeacherVisits','q'],['TeacherEntryAllowed','i,q'],
+ ['AIMarketSignal','out'],['Open','signal'],['ExitCandles','bars,sign,opened,period,now'],['ExitRhythm','sign,opened'],
+ ['ExitKey','id'],['FirstExit','id,sign,open,tp'],['PartialRemaining','initial,closed,remaining'],['RefreshEntryExits','key,sign'],['RequestExit','ticket,id,volume,full,why'],['Manage',''],['LegacyLimitsClear','']])install(x,name,args,ref);
+ return {x,memory,calls,setNow:n=>now=n};
+}
+function ticks(x,prices,sign=1){
+ const end=x.TimeGMT()*1000;
+ prices.forEach((p,i)=>x.RememberFastTick({time_msc:end-(prices.length-1-i)*400,bid:sign>0?p-.1:p,ask:sign>0?p:p+.1}));
+ const p=prices.at(-1);x.FreshQuote=q=>Object.assign(q,{bid:sign>0?p-.1:p,ask:sign>0?p:p+.1,time_msc:end});
+}
+let checks=0;function test(n,f){f();checks++;console.log('PASS '+n);}
+for(const sign of [1,-1])for(const gap of [-1,1,-1.001,1.001])test(`触价边界 ${sign}/${gap}`,()=>{
+ const {x}=env({plans:[plan({sign})]});ticks(x,Array(4).fill(4175+gap),sign);assert.equal(x.AIMarketSignal({}),Math.abs(gap)<=1);
+});
+test('地图从上方跌向下沿做多，不等M1',()=>{const {x}=env({plans:[plan({kind:'MAP',priority:5,sign:0})]});x.UpdateTeacherVisits({bid:4179,ask:4179.1});ticks(x,[4175.8,4175.8,4175.7,4175.7]);const c={};assert(x.AIMarketSignal(c));assert.equal(c.direction,1);});
+test('地图从下方涨向上沿做空',()=>{const {x}=env({plans:[plan({kind:'MAP',priority:5,sign:0})]});x.UpdateTeacherVisits({bid:4171,ask:4171.1});ticks(x,[4174.2,4174.3,4174.3,4174.4],-1);const c={};assert(x.AIMarketSignal(c));assert.equal(c.direction,-1);});
+test('启动已在地图带内，不猜接近方向',()=>{const {x}=env({plans:[plan({kind:'MAP',priority:5,sign:0})]});ticks(x,[4175,4175,4175,4175]);assert(!x.AIMarketSignal({}));});
+test('8优先于6和5；区间不覆盖老师相反明确方向',()=>{
+ const {x}=env({plans:[plan({id:'map',kind:'MAP',priority:5,sign:0,approach:1}),plan({id:'range',kind:'INNER',priority:6}),plan({id:'direct',sign:-1})]});
+ ticks(x,[4175,4175,4175,4175]);const c={};assert(x.AIMarketSignal(c));assert.equal(c.direction,-1);assert.equal(c.originHash,x.Hash('direct'));
+});
+test('远处8不阻塞附近6',()=>{const {x}=env({plans:[plan({level:4193}),plan({id:'range',kind:'INNER',priority:6})]});ticks(x,[4175,4175,4175,4175]);const c={};assert(x.AIMarketSignal(c));assert.equal(c.originHash,x.Hash('range'));});
+test('同级相反且重叠区域不发双向单',()=>{const {x}=env({plans:[plan(),plan({id:'other',sign:-1})]});ticks(x,[4175,4175,4175,4175]);assert(!x.AIMarketSignal({}));assert.match(x.reason,/冲突/);});
+test('逆向直线冲穿暂停，反弹恢复才可入场',()=>{const {x}=env();ticks(x,[4177,4176.5,4176,4175]);assert(!x.AIMarketSignal({}));x.fastCount=0;x.fastCursor=0;x.fastLast=0;ticks(x,[4176,4175,4174.5,4175]);assert(x.AIMarketSignal({}));});
+test('普通短暂波动不要求EMA或K线确认',()=>{const {x}=env();ticks(x,[4175.3,4175.1,4175.2,4175.1]);assert(x.AIMarketSignal({}));});
+test('一次触价只发0.02，重启复用消费不重单',()=>{const e=env();ticks(e.x,[4175,4175,4175,4175]);let c={};assert(e.x.AIMarketSignal(c));e.x.Open(c);assert.equal(e.calls.length,1);assert.equal(e.calls[0][3],.02);assert(!e.x.AIMarketSignal({}));const r=env({memory:e.memory});ticks(r.x,[4175,4175,4175,4175]);assert(!r.x.AIMarketSignal({}));});
+test('消费后离开4点不足5秒不能重入，满5秒才解除',()=>{
+ const {x,setNow}=env();x.MergeOpportunity(1,4175);x.UpdateSharedVisit({bid:4179,ask:4179.1});setNow(1004);x.UpdateSharedVisit({bid:4179,ask:4179.1});assert(x.SameOpportunity(1,4175));setNow(1005);x.UpdateSharedVisit({bid:4179,ask:4179.1});assert(!x.SameOpportunity(1,4175));
+});
+test('QUOTE断线、点差过大、陈旧健康状态均不入场',()=>{
+ for(const stop of [x=>x.FreshQuote=()=>false,x=>x.最大点差价格=.01,x=>x.healthSync=1,x=>x.healthPaused=true]){
+ const {x}=env();ticks(x,[4175,4175,4175,4175]);stop(x);assert(!x.AIMarketSignal({}));}
+});
+test('提交前价格离开±1则不发单',()=>{const {x,calls}=env();ticks(x,[4175,4175,4175,4175]);const c={};assert(x.AIMarketSignal(c));x.FreshQuote=q=>Object.assign(q,{bid:4178,ask:4178.1});x.Open(c);assert.equal(calls.length,0);});
+test('有旧挂单等待迁移，绝不混用旧限价和新触价',()=>{const {x}=env();assert(x.LegacyLimitsClear());x.teacherLimits[0].state=3;assert(!x.LegacyLimitsClear());});
+for(const sign of [1,-1])test(`M5干净与夹杂反向、十字 ${sign}`,()=>{
+ const {x}=env();const clean=[{time:300,open:100,close:100+sign},{time:600,open:101,close:101+sign}];
+ assert.equal(x.ExitCandles(clean,sign,300,300,900),1);
+ assert.equal(x.ExitCandles([...clean,{time:900,open:102,close:102-sign}],sign,300,300,1200),0);
+ assert.equal(x.ExitCandles([{time:300,open:100,close:100}],sign,300,300,600),0);
+ assert.equal(x.ExitCandles(clean,sign,800,300,900),-1);
+});
+function position(e,{mode=1,closed=0,profit=5,sl=4165,sign=1}={}){
+ const p={id:12,time:100,open:4175,sl,tp:4175+sign*10,volume:.02-closed,type:sign>0?0:1};
+ e.x.PositionsTotal=()=>1;e.x.PositionGetTicket=()=>123;e.x.PositionGetInteger=k=>p[k];e.x.PositionGetDouble=k=>p[k];e.x.PositionGetString=()=>'';
+ e.x.PositionVolumes=()=>({ok:true,initial:.02,closed});e.x.ExitRhythm=()=>mode;
+ e.x.FreshQuote=q=>Object.assign(q,{bid:sign>0?4175+profit:4175-profit-.1,ask:sign>0?4175+profit+.1:4175-profit});
+ e.x.Modify=(...a)=>{e.calls.push(['modify',...a]);e.x.pending.kind=3;};return p;
+}
+test('5点干净M5减半，提交阶段不标为已保护',()=>{const e=env();position(e);e.x.Manage();assert.equal(e.calls[0][0],'partial');assert.equal(e.calls[0][2],.01);assert.equal(e.x.pending.kind,2);assert(!e.calls.some(c=>c[0]=='modify'));});
+test('5点犹豫M5全平',()=>{const e=env();position(e,{mode:0});e.x.Manage();assert.equal(e.calls[0][0],'close');});
+test('快速盈利且M1顺畅继续持有，M1转犹豫即退出',()=>{const e=env();position(e,{mode:2});e.x.Manage();assert.equal(e.calls.length,0);position(e,{mode:0,profit:4});e.x.Manage();assert.equal(e.calls[0][0],'close');});
+test('减半实际Deal确认后余仓请求保本',()=>{const e=env();position(e,{closed:.01});e.x.Manage();assert.equal(e.calls[0][0],'modify');assert.equal(e.calls[0][4],4175);});
+test('保本距离不合法退出余仓，避免仍承担原10点风险',()=>{const e=env();position(e,{closed:.01,profit:.1});e.x.Stops=()=>false;e.x.Manage();assert.equal(e.calls[0][0],'close');});
+test('已减半已保本不重复分批',()=>{const e=env();position(e,{closed:.01,sl:4175});e.x.Manage();assert.equal(e.calls.length,0);});
+test('未到5点不减仓，断线不发管理请求',()=>{const e=env();position(e,{profit:4.9});e.x.Manage();assert.equal(e.calls.length,0);e.x.FreshQuote=()=>false;e.x.Manage();assert.equal(e.calls.length,0);});
+test('补充统一目标只修改原计划持仓，不生成新机会',()=>{const e=env({plans:[plan({tp:4190})]});position(e,{profit:3});e.memory['exit12.origin']=e.x.Hash('direct-a');e.memory['exit12.ready']=1;e.x.Manage();assert.equal(e.calls[0][0],'modify');assert.equal(e.calls[0][5],4190);assert(!e.calls.some(c=>c[0]==='open'));});
+test('其他计划的目标不串到已有持仓',()=>{const e=env({plans:[plan({id:'other',tp:4190})]});position(e,{profit:3});e.memory['exit12.origin']=e.x.Hash('direct-a');e.memory['exit12.ready']=1;e.x.Manage();assert.equal(e.calls.length,0);});
+test('断流时离区计时清零，停机时间不算重新触价',()=>{const {x}=env();x.MergeOpportunity(1,4175);x.sharedVisits[0].left=990;x.fastLast=900000;x.RememberFastTick({time_msc:1000000,bid:4179,ask:4179.1});assert.equal(x.sharedVisits[0].left,0);});
+// 由真实Python导出函数构造合成快照，送入生产MQL读取函数。
+const csv=require('node:child_process').execFileSync('python',['-X','utf8','-c',
+ 'from test_execution_feed import ExecutionTests; import csv,io; t=ExecutionTests(); t.setUp(); t.c["symbols"][t.c["teacher_symbol"]]="XAUUSD.c"; t.scene(); rows=t.feed(); s=io.StringIO(newline=""); w=csv.writer(s,lineterminator="\\n"); w.writerows(rows); print(s.getvalue(),end=""); t.tearDown()'],
+ {cwd:path.join(root,'FeishuSignalMonitor'),encoding:'utf8'}).trim().split(/\r?\n/);
+function file(x,lines){let at=0;x.FileOpen=()=>1;x.FileSize=()=>lines.join('\n').length;x.FileIsEnding=()=>at>=lines.length;x.FileReadString=()=>lines[at++];x.FileClose=()=>{};}
+test('Python TGA6 -> MQL读取真实字段与优先级',()=>{const {x,setNow}=env();setNow(Number(csv[0].split(',')[2]));file(x,csv);assert(x.ReadAISetups());assert.equal(x.aiPlans.length,6);assert.equal(x.aiPlans.filter(p=>p.priority===8).length,2);assert.equal(x.aiPlans.filter(p=>p.priority===6).length,4);});
+test('截断、错品种、错优先级快照停用且不替换旧计划',()=>{
+ for(const lines of [csv.slice(0,-1),csv.map((r,i)=>i===0?r.replace('XAUUSD','EURUSD'):r),csv.map((r,i)=>i===1?r.replace('DIRECT,8','DIRECT,6'):r)]){
+ const {x,setNow}=env();setNow(Number(csv[0].split(',')[2]));file(x,lines);assert(!x.ReadAISetups());assert(!x.aiReady);assert.equal(x.aiPlans[0].id,'direct-a');}
+});
+test('完整空快照替换取消，不保留旧活动方向',()=>{const {x}=env();file(x,['TGA,6,1000,1,XAUUSD.c,0,已取消','END,0']);assert(x.ReadAISetups());assert.equal(x.aiPlans.length,0);});
+console.log(`${checks} checks passed (synthetic, no broker orders)`);
