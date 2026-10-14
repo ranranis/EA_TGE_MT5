@@ -21,7 +21,7 @@ class ObserverTests(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory(); self.home=Path(self.temp.name)
         for folder in ('data','control','reports','logs'): (self.home/folder).mkdir()
-        self.c=config_load(self.home); self.c.update(chat_id='oc_test',teacher_sender_id='ou_teacher',common_files=str(self.home/'common'),teacher_symbol='SYNTHETIC',symbols={'SYNTHETIC':'XAUUSD'})
+        self.c=config_load(self.home);self.c['teacher_only']=False; self.c.update(chat_id='oc_test',teacher_sender_id='ou_teacher',common_files=str(self.home/'common'),teacher_symbol='SYNTHETIC',symbols={'SYNTHETIC':'XAUUSD'})
         self.db=connect(self.home/'data/monitor.sqlite'); self.now=int(time.time()/300)*300+10
         with self.db: set_state(self.db,'live_since',self.now-3600)
         self.bars=[]

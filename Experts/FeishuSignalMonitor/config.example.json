@@ -38,5 +38,6 @@
   "point_source_senders": [],
   "follow_sender_id": "",
   "ai_model": "deepseek-flash",
-  "follow_members": []
+  "follow_members": [],
+  "teacher_only": true
 }

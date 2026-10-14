@@ -150,7 +150,7 @@ class ContextTests(unittest.TestCase):
 class WorkerTests(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory();self.home=Path(self.temp.name)
-        self.c=config_load(self.home);self.c.update(chat_id='oc_test',teacher_sender_id='ou_teacher',ai_enabled=True,
+        self.c=config_load(self.home);self.c['teacher_only']=False;self.c.update(chat_id='oc_test',teacher_sender_id='ou_teacher',ai_enabled=True,
             common_files=str(self.home/'common'))
         (self.home/'data').mkdir();self.db=connect(self.home/'data/test.sqlite');initialize_ai(self.db)
         self.now=time.time()

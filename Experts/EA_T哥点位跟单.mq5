@@ -1,6 +1,6 @@
 #property strict
-#property version "1.39"
-#property description "T哥点位地图 / M5 EMA20/50背景与MA5时机 / M1反应。独立Magic，仅管理本EA持仓。"
+#property version "1.40"
+#property description "仅T哥直接价格方向 / 固定0.02手限价挂单 / 地图仅展示。独立Magic，仅管理本EA持仓。"
 #include <Trade/Trade.mqh>
 #include <Canvas/Canvas.mqh>
 // 看盘指标嵌入主EX5，用户仍只需挂载这一份EA。
@@ -9,26 +9,24 @@
 
 input group "执行与仓位"
 input bool   启用真实交易=true;        // 默认执行交易；手动关闭时仅观察，不发送交易请求
-input double 每次开仓手数=0.02;
+const double 每次开仓手数=0.02; // T哥限价固定手数，不从旧set继承其他手数
 input int    最大同时持仓=3;
 input double 最大点差价格=0.50;         // 黄金报价价格差，不是_Point倍数
 input ulong  EA魔法号=560056;
 input bool   读取AI即时策略=true;     // 读取本地DeepSeek语义桥；未就绪时等待，不猜方向
-input group "学员跟随 · 最新点位价格区间"
-input bool   启用起飞跟随=true;
-input double 学员最大追价价格差=1.00; // 做多最多高1；做空最多低1，含边界
-input double 学员最大回落价格差=5.00; // 做多最多低5；做空最多高5，含边界
-input bool   启用其他学生跟随=true; // 按监控端真实账号名单分别启用
-input group "T哥近价 · 实时冲击检查"
-input int    冲击短窗毫秒=3000;
-input double 逆向冲击速度=0.60;       // 黄金报价价格差/秒，只检查对当前方向不利的净速度
-input double 冲击单向比例=0.85;
-input double 恢复回拉价格=0.35;
-input group "T哥点位节奏与退出"
-input bool   允许震荡点位反应=true;
-input bool   启用点位试仓=true;           // 顺势近价试0.01；外沿反转须连续两根M1收回
-input bool   允许地图趋势过滤=true;       // 趋势明确时只做顺趋势方向；震荡时保留双向反应
-input bool   允许同机会重入=true;         // 离开同一机会后，允许在仍有其他仓位时再次进入
+const bool   启用起飞跟随=false;
+const double 学员最大追价价格差=1.00; // 做多最多高1；做空最多低1，含边界
+const double 学员最大回落价格差=5.00; // 做多最多低5；做空最多高5，含边界
+const bool   启用其他学生跟随=false; // 按监控端真实账号名单分别启用
+const int    冲击短窗毫秒=3000;
+const double 逆向冲击速度=0.60;       // 黄金报价价格差/秒，只检查对当前方向不利的净速度
+const double 冲击单向比例=0.85;
+const double 恢复回拉价格=0.35;
+input group "T哥限价与持仓退出"
+const bool   允许震荡点位反应=false;
+const bool   启用点位试仓=false;           // 顺势近价试0.01；外沿反转须连续两根M1收回
+const bool   允许地图趋势过滤=true;       // 趋势明确时只做顺趋势方向；震荡时保留双向反应
+const bool   允许同机会重入=false;         // 离开同一机会后，允许在仍有其他仓位时再次进入
 input double 保险价格距离=10.0;
 input double 首批止盈价格距离=5.0;
 input double 尾仓目标价格距离=10.0;
@@ -982,6 +980,8 @@ void Modify(const ulong ticket,const ulong id,const int sign,const double sl,con
    DecisionLog("REQUEST_INTENT","申请修改SL/TP，尚未确认");
    execution.PositionModify(ticket,sl,tp); RecordResult();
 }
+#include "Include/Trading/TgeTeacherLimits.mqh"
+
 void Manage()
 {
    if(!CanExecute() || pending.kind!=0) return;
@@ -990,6 +990,7 @@ void Manage()
    {
       ulong ticket=PositionGetTicket(i);
       if(ticket==0 || !OwnSelected()) continue;
+      if(LimitEntryPending(PositionGetString(POSITION_COMMENT))) continue;
       ulong id=(ulong)PositionGetInteger(POSITION_IDENTIFIER);
       int sign=PositionGetInteger(POSITION_TYPE)==POSITION_TYPE_BUY ? 1 : -1;
       double open=PositionGetDouble(POSITION_PRICE_OPEN),volume=PositionGetDouble(POSITION_VOLUME);
@@ -1522,7 +1523,7 @@ void Panel()
    panelCanvas.FillRectangle(0,0,UIPx(559),UIPx(39),UIInk(UI_HEADER));
    string pageTitle=uiStatistics ? "交易统计" : uiIndicators ? "看盘设置" : "T哥点位监控";
    UIText(_Symbol+" · "+pageTitle,16,10,222,11,UI_TEXT);
-   UIText("v1.39",242,13,40,8,UI_DIM);
+   UIText("v1.40",242,13,40,8,UI_DIM);
    UIText(TimeToString(TimeGMT()+8*3600,TIME_SECONDS),286,12,100,10,UI_MUTED,true);
    UIButton(uiCollapsed ? "+" : "−",396,7,30,1);
    UIText(启用真实交易 ? "交易模式" : "观察模式",434,13,110,9,启用真实交易 ? UI_ACCENT : UI_WARN,true);
@@ -1569,8 +1570,8 @@ void Panel()
          UIRound(x,y,252,94,buy ? C'20,47,44' : C'36,32,53');
          UIText(buy ? "BUY / 多" : "SELL / 空",x+12,y+8,104,9,ink);
          UIText(DoubleToString(aiPlans[i].level,_Digits),x+12,y+27,148,18,UI_TEXT);
-         UIText(aiPlans[i].derived ? "AI试仓0.01" : aiPlans[i].market ? "即时市价" : "实时近价",x+160,y+34,80,8,ink,true);
-          UIText(StringFormat("允许 %.2f—%.2f",aiPlans[i].level-TEACHER_BAND,aiPlans[i].level+TEACHER_BAND),x+12,y+58,228,8,UI_MUTED);
+         UIText(aiPlans[i].derived ? "AI试仓0.01" : "0.02手限价",x+160,y+34,80,8,ink,true);
+          UIText(StringFormat("挂单点位 %.2f",aiPlans[i].level),x+12,y+58,228,8,UI_MUTED);
           UIText(aiPlans[i].status,x+12,y+76,228,7.5,UI_MUTED);
       }
    else
@@ -1580,17 +1581,15 @@ void Panel()
    }
    UIText(读取AI即时策略 ? AIPlanCaption() : "M5方向 · M1收线确认",28,heroY+heroHeight-19,502,8,UI_MUTED);
 
-   string trendText=!entryView.ready ? "等待数据" : trend==TREND_UNKNOWN ? "M5方向待确认" :
-                    trend>0 ? "M5偏多" : trend<0 ? "M5偏空" : "M5震荡";
-   UIText("当前判断",16,decisionY+3,106,9,UI_DIM);
+   string trendText="固定0.02手限价";
+   UIText("执行方式",16,decisionY+3,106,9,UI_DIM);
    UIText(trendText,132,decisionY+3,132,9,UI_MUTED);
-   UIText((entryView.method=="T哥实时近价" || entryView.method=="AI区间试仓0.01") ? (entryView.reaction ? "tick检查已通过" : "实时tick观察") : entryView.ready ? (entryView.reaction ? "M1反应已确认" : "等待M1反应") : "等待数据",
-          336,decisionY+3,204,9,entryView.ready && entryView.reaction ? UI_ACCENT : UI_MUTED,true);
+   UIText("仅T哥本人 · 不追市价",336,decisionY+3,204,9,UI_MUTED,true);
    UIText(reason,16,decisionY+25,526,12,UI_TEXT);
    string detail=entryView.ready ? StringFormat("%s参考 %.2f  ·  距点位 %.2f",
-                 entryView.direction>0 ? "多" : "空",entryView.level,entryView.distance) : "有明确方向与价格后，按策略条件评估";
+                 entryView.direction>0 ? "多" : "空",entryView.level,entryView.distance) : "按上方T哥点位维护未成交限价单";
    UIText(detail,16,decisionY+52,372,9,UI_MUTED);
-   UIText(StringFind(entryView.method,"试仓0.01")>=0 ? "试仓 0.01手" : StringFormat("每次 %.2f手",每次开仓手数),390,decisionY+52,152,9,UI_DIM,true);
+   UIText("固定 0.02手",390,decisionY+52,152,9,UI_DIM,true);
 
    UIText("持仓明细",16,positionY,220,10,UI_TEXT);
    UIText(count>3 ? "仅显示最近3笔 / 共"+IntegerToString(count)+"笔" : "仅本EA持仓",324,positionY,216,8.5,UI_DIM,true);
@@ -1638,7 +1637,7 @@ void Panel()
    if(gate=="" && feedActive && !FreshQuote(displayQuote)) gate="报价过期/断线，暂停新请求";
    else if(gate=="" && feedActive && displayQuote.ask-displayQuote.bid>最大点差价格) gate="当前点差超过上限";
    if(gate=="") gate=feedActive ? "按策略条件等待机会" : "等待有效点位地图";
-   if(ArraySize(followMembers)==0) UIText(FollowCaption(),16,height-49,526,8,UI_DIM);
+   if(ArraySize(followMembers)==0) UIText("仅T哥本人 · 固定0.02手限价 · 地图只作展示",16,height-49,526,8,UI_DIM);
    else for(int i=0;i<ArraySize(followMembers);i++)
       UIText(FollowMemberCaption(i),16,mapY+mapHeight+15+i*16,526,8,UI_DIM);
    UIText("执行 · "+gate,16,height-29,526,9,pending.kind!=0 ? UI_WARN : UI_MUTED);
@@ -1676,42 +1675,23 @@ int OnInit()
    trendSlowHandle=iMA(_Symbol,PERIOD_M5,50,0,MODE_EMA,PRICE_CLOSE);
    if(maHandle==INVALID_HANDLE || atrHandle==INVALID_HANDLE ||
       trendFastHandle==INVALID_HANDLE || trendSlowHandle==INVALID_HANDLE) return INIT_FAILED;
-   RestorePending(); RestoreSharedVisits();
+   RestorePending(); RestoreSharedVisits(); RestoreTeacherLimits();
    InitView(); InitTgeMobileMarkers();
-   fastStarted=TimeGMT(); readyFrom=TimeCurrent(); ReadFeed(); ReadHealth(); ReadAISetups(); ReadMemberFollow(); EventSetTimer(1); Panel();
+   fastStarted=TimeGMT(); readyFrom=TimeCurrent(); ReadFeed(); ReadHealth(); ReadAISetups(); EventSetTimer(1); Panel();
    return INIT_SUCCEEDED;
 }
 void OnTimer()
 {
    if(busy) return; busy=true;
-   ReadFeed(); ReadHealth(); ReadAISetups(); ReadMemberFollow(); Reconcile(); Manage();
-   MqlTick sampled;
-   if(FreshQuote(sampled)) { RememberFastTick(sampled); UpdateTeacherVisits(sampled); UpdateSharedVisit(sampled); }
-   Candidate immediate; ZeroMemory(immediate);
-   if(AIMarketSignal(immediate) || MemberFollowSignal(immediate)) Open(immediate);
-   if(aiReady && FreshQuote(sampled))
-      for(int i=0;i<ArraySize(aiPlans);i++) TeacherEntryAllowed(i,sampled);
-   datetime minute=iTime(_Symbol,PERIOD_M1,1);
-   if(minute>0 && minute!=lastMinute)
-   {
-      checkingMinute=minute; Candidate candidate; ZeroMemory(candidate);
-      if(Signal(candidate)) Open(candidate);
-      string gate=ExecutionBlock();
-      DecisionLog("EVALUATE",(gate!="" ? gate+" · " : "")+reason);
-      if(!signalRetry) lastMinute=minute;
-   }
+   ReadFeed(); ReadHealth(); ReadAISetups(); Reconcile();
+   SyncTeacherLimits(); Manage();
+   checkingMinute=iTime(_Symbol,PERIOD_M1,1);
+   DecisionLog("EVALUATE","仅T哥0.02手限价 · "+reason);
    SyncTgeMobileMarkers(); Panel(); busy=false;
 }
 void OnTick()
 {
-   MqlTick q; if(!FreshQuote(q)) return;
-   RememberFastTick(q);
-   UpdateTeacherVisits(q); UpdateSharedVisit(q);
-   if(busy || pending.kind!=0 || !CanExecute() || !TeacherOwnsZone(q)) return;
-   busy=true;
-   Candidate immediate; ZeroMemory(immediate);
-   if(AIMarketSignal(immediate)) Open(immediate);
-   busy=false;
+   // 本版不从tick、学生或地图反应发市价单。挂单由券商撮合，OnTimer负责对账。
 }
 void OnTradeTransaction(const MqlTradeTransaction &trans,const MqlTradeRequest &request,const MqlTradeResult &result)
 {

@@ -46,7 +46,7 @@ bool ReadAISetups()
    FileClose(h);
    string head[],foot[];
    if(!ok || ArraySize(lines)<2 || StringSplit(lines[0],',',head)!=11 ||
-      head[0]!="TGA" || (head[1]!="1" && head[1]!="2" && head[1]!="3" && head[1]!="4") || head[4]!=_Symbol ||
+      head[0]!="TGA" || (head[1]!="1" && head[1]!="2" && head[1]!="3" && head[1]!="4" && head[1]!="5") || head[4]!=_Symbol ||
       !Number(head[2]) || !Number(head[7]) || !Number(head[8]) || (head[3]!="0" && head[3]!="1"))
    { return InvalidAI("AI快照格式错误"); }
    int count=(int)StringToInteger(head[8]);
@@ -59,12 +59,13 @@ bool ReadAISetups()
    for(int i=0;i<count;i++)
    {
       string fields[];
-      if(StringSplit(lines[i+1],',',fields)!=(head[1]=="4" ? 13 : head[1]=="3" ? 12 : head[1]=="2" ? 8 : 5) || fields[0]!="SETUP" ||
+      if(StringSplit(lines[i+1],',',fields)!=((head[1]=="4" || head[1]=="5") ? 13 : head[1]=="3" ? 12 : head[1]=="2" ? 8 : 5) || fields[0]!="SETUP" ||
          (fields[1]!="BUY" && fields[1]!="SELL") || !Number(fields[2],true) ||
          (fields[3]!="REACTION" && fields[3]!="MARKET") || (fields[4]!="POINT" && fields[4]!="NEAR"))
       { return InvalidAI("AI方向/价格字段无效"); }
-      incoming[i].derived=head[1]=="4" && fields[12]=="RANGE_EDGE";
-      if(head[1]=="4" && fields[12]!="DIRECT" && fields[12]!="RANGE_EDGE") return InvalidAI("AI入场依据类型无效");
+      incoming[i].derived=(head[1]=="4" || head[1]=="5") && fields[12]=="RANGE_EDGE";
+      if((head[1]=="4" || head[1]=="5") && fields[12]!="DIRECT" && fields[12]!="RANGE_EDGE") return InvalidAI("AI入场依据类型无效");
+      if(head[1]=="5" && fields[12]!="DIRECT") return InvalidAI("仅T哥模式不接受AI区间推导");
       if(incoming[i].derived && fields[3]!="REACTION") return InvalidAI("区间推导不能成为市价指令");
       incoming[i].left=0; incoming[i].status="等待靠近";
       incoming[i].sl=0; incoming[i].first=0; incoming[i].tp=0; incoming[i].breakeven=0;
@@ -79,7 +80,7 @@ bool ReadAISetups()
          incoming[i].origin=fields[5]+"|"+fields[6]+"|SETUP";
          incoming[i].created=(datetime)StringToInteger(fields[7]);
       }
-      if(head[1]=="3" || head[1]=="4")
+      if(head[1]=="3" || head[1]=="4" || head[1]=="5")
       {
          for(int k=8;k<12;k++)
             if(!Number(fields[k],true) || !MathIsValidNumber(StringToDouble(fields[k]))) return InvalidAI("退出价格无效");
@@ -264,7 +265,7 @@ string AIPlanCaption()
 {
    if(!AIChannelReady()) return "老师通道WAIT："+aiReason;
    if(aiMode=="MAP") return "中性地图已就绪 · 普通策略仍用M5/M1确认";
-   return "老师计划优先 · 实时±2.00 · 请求后等待券商Deal确认";
+   return "仅T哥 · 固定0.02手限价 · 等待券商撮合与Deal确认";
 }
 
 struct FollowMember

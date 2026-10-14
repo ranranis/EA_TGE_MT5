@@ -44,7 +44,7 @@ def snapshot(home,c):
                     value=json.loads(parsed['payload'])
                     message['status']=value['kind'];message['reason']=value['reason']
         count=db.execute('SELECT COUNT(*) FROM messages WHERE chat_id=?',(c['chat_id'],)).fetchone()[0]
-        return dict(at=iso(now),chat_name=c['chat_name'],status=status,messages=messages,message_count=count,
+        return dict(at=iso(now),chat_name=c['chat_name'],teacher_only=c.get('teacher_only',False),status=status,messages=messages,message_count=count,
                     follow=member_follow_snapshot(db,c,now,status.get('paused',False)),
                     follows=member_follow_snapshots(db,c,now,status.get('paused',False)),
                     execution_reference=ai_snapshot(db,c,now,status.get('paused',False)) if c.get('ai_enabled') else {},

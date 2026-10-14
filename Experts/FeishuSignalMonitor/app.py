@@ -47,6 +47,7 @@ def config_load(home):
     loaded=json.loads(path.read_text(encoding='utf-8'))
     if set(loaded)-set(defaults): raise ValueError('配置有未知字段：'+','.join(set(loaded)-set(defaults)))
     c=defaults|loaded
+    if type(c['teacher_only']) is not bool: raise ValueError('teacher_only须为布尔值')
     if c['mode'] not in ('monitor','paper') or type(c['ai_enabled']) is not bool: raise ValueError('只允许 monitor / paper 模式，AI开关须为布尔值')
     if c['ai_model'] not in ('deepseek-flash','deepseek-v4-pro'): raise ValueError('DeepSeek模型不支持')
     for key in ('poll_seconds','quote_seconds','overlap_seconds','window_seconds','max_pages','reconcile_batch','thread_batch','signal_ttl_seconds','pending_ttl_seconds','quote_max_age_seconds','sync_max_age_seconds','initial_equity','max_spread_points'):
@@ -186,7 +187,9 @@ def export_teacher_levels(db,c,paused,now):
     ai=ai_snapshot(db,c,now,paused) if c.get('ai_enabled') else dict(active=False,mode='WAIT',plans=[],reason='AI未启用')
     bridge=io.StringIO(newline=''); aw=csv.writer(bridge,lineterminator='\r\n')
     note=str(ai['reason']).replace(',','，').replace('\r',' ').replace('\n',' ')[:160]
-    protocol='4' if any(plan.get('basis') for plan in ai['plans']) else '3'
+    # TGA5明确表示仅老师限价模式；旧市价EA拒绝该协议，避免升级期间误用旧入口。
+    if c.get('teacher_only'): ai=dict(ai,plans=[p for p in ai['plans'] if not p.get('basis')])
+    protocol='5' if c.get('teacher_only') else '4' if any(plan.get('basis') for plan in ai['plans']) else '3'
     aw.writerow(['TGA',protocol,int(now),int(ai['active']),c['symbols'][c['teacher_symbol']],
                  ai.get('message_id',''),ai.get('revision',''),int(ai.get('created',0)),len(ai['plans']),ai['mode'],note])
     for plan in ai['plans']:
@@ -195,7 +198,7 @@ def export_teacher_levels(db,c,paused,now):
                      int(plan.get('origin_created',ai.get('created',0))),
                      *[format(((plan.get('exits') or {}).get(key) or {}).get('price',0),'.10f')
                        for key in ('sl','tp1','tp2','breakeven')],
-                     *(['RANGE_EDGE' if plan.get('basis') else 'DIRECT'] if protocol=='4' else [])])
+                     *(['RANGE_EDGE' if plan.get('basis') else 'DIRECT'] if protocol in ('4','5') else [])])
     aw.writerow(['END',len(ai['plans'])])
     atomic_text(folder/'tge_ai_setups.csv',bridge.getvalue())
 

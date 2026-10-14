@@ -132,6 +132,8 @@ class DeepSeek:
                           '\n所有消息引用字段必须原样使用本次输入的r001等短编号，不要编造、改写或沿用上次编号。interpretations.id仍使用对应target.id。'},
                          {'role':'user','content':json.dumps(request_data,ensure_ascii=False)}],
             'response_format': {'type':'json_object'}, 'max_tokens': 4800}
+        if self.config.get('teacher_only'):
+            payload['messages'][0]['content']+='\n当前执行规则仅T哥本人明确的价格与方向。只返回有原文依据的直接BUY/SELL条件计划，basis为null；区间/支撑压力说明只作展示，禁止RANGE_EDGE推导。执行端只挂0.02手限价单，不追市价。闲聊不改变计划：KEEP必须plans为空、regime为UNKNOWN、全部区间/证据字段为null。'
         if rebuild:
             payload['messages'][0]['content']+='\n本次是人工请求重读现有消息，仅生成预览。必须UPDATE完整当前场景或REVIEW，不得KEEP。核对截至最后老师消息的全部取消和改价；不重放MARKET市价指令；保留仍有效的条件计划。'
         data = self.request('/chat/completions', payload)
@@ -374,6 +376,7 @@ def initialize_ai(db):
 
 def follow_members(c):
     """账号白名单；空的新名单兼容旧单成员配置，已核实的起飞配置迁移为两位学生。"""
+    if c.get('teacher_only'): return []
     members=[dict(m) for m in c.get('follow_members',[]) if m.get('enabled',True)]
     legacy=c.get('follow_sender_id','')
     if legacy and not c.get('follow_members'):
@@ -421,6 +424,7 @@ def pending_rows(db, c, now):
         WHERE m.chat_id=?
         AND m.created>=? AND m.created<=? AND (a.status IS NULL OR (a.status='RETRY' AND a.retry_at<=?))
         ORDER BY m.created,m.rowid""",(c['chat_id'],start,now+5,now)).fetchall()
+    if c.get('teacher_only'): rows=[r for r in rows if r['sender']==c['teacher_sender_id']]
     # 分批隔离：成员格式错误不能把同批老师消息一起回滚；老师优先。
     config=dict(c,_map_message_id=state(db,'teacher_levels',{}).get('message_id'))
     for lane in ['teacher']+['follow:'+mid for mid in follow_ids(c)]+['member']:
@@ -436,6 +440,7 @@ def lane_readiness(db, c, now):
         WHERE m.chat_id=? AND m.historical=0 AND m.created>=? AND m.created<=?
         AND (a.status IS NULL OR a.status='RETRY')""",(c['chat_id'],pending_window_start(db,now),now+5)).fetchall()
     config=dict(c,_map_message_id=state(db,'teacher_levels',{}).get('message_id'))
+    if c.get('teacher_only'): rows=[r for r in rows if r['sender']==c['teacher_sender_id']]
     pending={message_lane(config,r) for r in rows}
     return dict(teacher_ready='teacher' not in pending,follow_ready=not any(x.startswith('follow:') for x in pending),
                 follow_readiness={mid:'follow:'+mid not in pending for mid in follow_ids(c)},backlog=len(rows))
@@ -636,7 +641,20 @@ def process_ai_batch(db, c, client, now, restore_scene=False, preview=False):
         output=validate_interpretations(raw_result['interpretations'],targets,context,live_anchor,'scene' in raw_result) if targets else {}
         # 整批场景也必须通过本地核验；不因逐条WATCH而静默丢掉完整语义。
         # 成员批即使模型误带scene，也没有更新老师场景的权限，直接忽略该字段。
-        scene=validate_execution_scene(raw_result['scene'],[dict(t,interpretation=output[t['id']]) for t in targets],context,live_anchor,previous_scene) if teacher_targets and 'scene' in raw_result else None
+        raw_scene=raw_result.get('scene')
+        teacher_items=[t for t in targets if t['source_role']=='teacher']
+        # 已验证为闲聊且正文无交易线索时，不能因模型夹带旧场景而无限重试。
+        # 取消/改价/含糊交易语句仍走完整场景校验；预览/首次恢复不走此捷径。
+        harmless=(not preview and not restoring and previous_scene and teacher_items and
+            all(output[t['id']]['kind']=='DISCUSSION' and not output[t['id']]['plans'] and
+                not re.search(r'\d|↑|↓|⬆|⬇|多|空|买|卖|单|仓|点位|支撑|压力|止|盈|损|保本|保护|进|出|撤|取消|作废|算了|停|改|换|放弃|不用|不要|别|失效|无效|上车|下车|行动|注意|关注|准备|观察',t['text'])
+                for t in teacher_items))
+        if harmless:
+            raw_scene=dict(as_of=teacher_items[-1]['message_id'],action='KEEP',regime='UNKNOWN',
+                           regime_ref=None,plans=[],inner_range=None,outer_range=None,summary='非交易闲聊，仅归档；保留已验证老师计划')
+        elif c.get('teacher_only') and isinstance(raw_scene,dict) and isinstance(raw_scene.get('plans'),list):
+            raw_scene=dict(raw_scene,plans=[p for p in raw_scene['plans'] if not isinstance(p,dict) or not p.get('basis')])
+        scene=validate_execution_scene(raw_scene,[dict(t,interpretation=output[t['id']]) for t in targets],context,live_anchor,previous_scene) if teacher_targets and raw_scene is not None else None
         if restoring and scene:
             scene['plans']=[p for p in scene['plans'] if p['mode']!='MARKET']
         if restoring and (not scene or scene['action']=='KEEP'):

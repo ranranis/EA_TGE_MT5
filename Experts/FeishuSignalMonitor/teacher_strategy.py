@@ -52,6 +52,7 @@ def order_key(row):
 
 
 def source_levels(raw,sender,c):
+    if c.get('teacher_only') and sender!=c['teacher_sender_id']: return None
     if sender==c['teacher_sender_id'] or sender in c.get('point_source_senders',[]):
         return parse_levels(raw,symbol=c.get('teacher_symbol'))
     return parse_levels(raw,symbol=c.get('teacher_symbol')) if c.get('allow_group_point_updates',False) else None

@@ -552,4 +552,93 @@ for name in list(vars(DatabaseFixture)):
 
 del DatabaseFixture
 
+
+class TeacherOnlyQueueTests(unittest.TestCase):
+    setUp=SceneWorkerTests.setUp
+    tearDown=SceneWorkerTests.tearDown
+    seed=SceneWorkerTests.seed
+
+    def baseline(self):
+        response=SceneWorkerTests.scene_case(self)
+        self.assertEqual(process_ai_batch(self.db,self.c,Mock(interpret=response),self.now),3)
+        return copy.deepcopy(state(self.db,'deepseek_setup'))
+
+    def test_old_discussion_with_malformed_scene_cannot_block_newer_valid_plan(self):
+        before=self.baseline()
+        self.seed(mid='old-chat',text='都还在睡？',age=3600)
+        raw=dict(interpretations=[result(kind='DISCUSSION')],scene=dict(
+            as_of='old-chat',action='KEEP',regime='RANGE',regime_ref=None,
+            plans=[{'price':9999}],inner_range=None,outer_range=None,summary='格式错误'))
+        self.assertEqual(process_ai_batch(self.db,self.c,Mock(interpret=Mock(return_value=raw)),self.now),1)
+        self.assertEqual(state(self.db,'deepseek_setup'),before)
+        self.assertEqual(self.db.execute("SELECT status FROM ai_messages WHERE message_id='old-chat'").fetchone()[0],'DONE')
+        self.assertTrue(ai_snapshot(self.db,self.c,self.now,False)['active'])
+        from app import export_teacher_levels
+        export_teacher_levels(self.db,self.c,False,self.now)
+        output=(self.home/'common/FeishuMT5SignalMonitor/tge_ai_setups.csv').read_text(encoding='utf-8')
+        self.assertIn(',1,XAUUSD',output)
+        self.assertNotIn('9999',output)
+        self.assertEqual(self.db.execute('SELECT count(*) FROM orders').fetchone()[0],0)
+
+    def test_cancel_reprice_and_ambiguous_instruction_cannot_use_chatter_shortcut(self):
+        before=self.baseline()
+        for n,text in enumerate(('取消全部','55可以上','改到55','先别做','算了','暂停')):
+            mid='instruction'+str(n)
+            self.seed(mid=mid,text=text,age=0)
+            raw=dict(interpretations=[result(kind='DISCUSSION')],scene=dict(
+                as_of=mid,action='KEEP',regime='UNKNOWN',regime_ref=None,
+                plans=[{'price':9999}],inner_range=None,outer_range=None,summary='错误'))
+            self.assertEqual(process_ai_batch(self.db,self.c,Mock(interpret=Mock(return_value=raw)),self.now),0)
+            self.assertFalse(ai_snapshot(self.db,self.c,self.now,False)['active'])
+        self.assertEqual(state(self.db,'deepseek_setup'),before)
+
+    def test_review_still_blocks_and_source_edit_still_blocks(self):
+        self.baseline()
+        self.seed(mid='unclear',text='多单先等等',age=0)
+        raw=dict(interpretations=[result(kind='UNKNOWN')],scene=dict(
+            as_of='unclear',action='REVIEW',regime='UNKNOWN',regime_ref=None,
+            plans=[],inner_range=None,outer_range=None,summary='是否取消不清楚'))
+        self.assertEqual(process_ai_batch(self.db,self.c,Mock(interpret=Mock(return_value=raw)),self.now),1)
+        self.assertFalse(ai_snapshot(self.db,self.c,self.now,False)['active'])
+        r=self.db.execute("SELECT raw FROM messages WHERE message_id='buy'").fetchone()
+        ingest(self.db,'oc_test',[dict(json.loads(r['raw']),deleted=True)])
+        with self.db:set_state(self.db,'deepseek_review',{})
+        self.assertFalse(ai_snapshot(self.db,self.c,self.now,False)['active'])
+
+    def test_teacher_only_never_analyzes_members_or_uses_member_map(self):
+        from deepseek_ai import follow_ids,lane_readiness
+        from teacher_strategy import source_levels
+        self.c.update(teacher_only=True,follow_sender_id='ou_student',
+                      follow_members=[dict(sender_id='ou_student',enabled=True,ttl_seconds=300)])
+        self.seed(mid='student',text='4155多上了',sender='ou_student')
+        other=self.seed(mid='other-map',text='4150--4160--4175',sender='ou_other')
+        client=Mock()
+        self.assertEqual(process_ai_batch(self.db,self.c,client,self.now),0)
+        client.interpret.assert_not_called()
+        self.assertEqual(follow_ids(self.c),[])
+        self.assertEqual(lane_readiness(self.db,self.c,self.now)['backlog'],0)
+        self.assertIsNone(source_levels(other,'ou_other',self.c))
+
+    def test_teacher_only_exports_explicit_tga5_without_member_channel(self):
+        from app import export_teacher_levels
+        import csv
+        self.baseline()
+        self.c['teacher_only']=True
+        export_teacher_levels(self.db,self.c,False,self.now)
+        with (self.home/'common/FeishuMT5SignalMonitor/tge_ai_setups.csv').open(encoding='utf-8',newline='') as f:
+            rows=list(csv.reader(f))
+        self.assertEqual(rows[0][1],'5')
+        self.assertTrue(all(len(r)==13 and r[12]=='DIRECT' for r in rows[1:-1]))
+
+    def test_teacher_only_strips_inference_but_keeps_direct_teacher_plan(self):
+        self.c['teacher_only']=True
+        base=SceneWorkerTests.scene_case(self)
+        def response(*args):
+            value=base(*args)
+            value['scene']['plans'][0]['basis']={'kind':'RANGE_EDGE','range':'outer_range'}
+            return value
+        self.assertEqual(process_ai_batch(self.db,self.c,Mock(interpret=response),self.now),3)
+        plans=state(self.db,'deepseek_setup')['plans']
+        self.assertEqual([(p['side'],p['price']) for p in plans],[('SELL',4193)])
+
 if __name__=='__main__':unittest.main()

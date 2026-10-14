@@ -4,9 +4,10 @@ const fs=require('node:fs'),path=require('node:path'),vm=require('node:vm'),asse
 const root=path.resolve(__dirname,'../..');
 const main=fs.readFileSync(path.join(root,'EA_T哥点位跟单.mq5'),'utf8');
 const extra=fs.readFileSync(path.join(root,'Include/Trading/TgeAISignals.mqh'),'utf8');
+const limits=fs.readFileSync(path.join(root,'Include/Trading/TgeTeacherLimits.mqh'),'utf8');
 function body(name){
- const src=[main,extra].find(s=>new RegExp('^(?:bool|void|double|int|string|ulong) '+name+'\\(','m').test(s));assert(src,name);
- const at=src.search(new RegExp('^(?:bool|void|double|int|string|ulong) '+name+'\\(','m')),start=src.indexOf('{',at);
+ const src=[main,extra,limits].find(s=>new RegExp('^(?:bool|void|double|int|string|ulong|uint) '+name+'\\(','m').test(s));assert(src,name);
+ const at=src.search(new RegExp('^(?:bool|void|double|int|string|ulong|uint) '+name+'\\(','m')),start=src.indexOf('{',at);
  let end=start+1,depth=1;for(;depth;end++){if(src[end]==='{')depth++;if(src[end]==='}')depth--;}
  return src.slice(start+1,end-1);
 }
@@ -15,7 +16,7 @@ function translate(s){
   .replace(/\bstring (\w+)\[\],(\w+)\[\],(\w+)\[\];/g,'let $1=[], $2=[], $3=[];')
   .replace(/\bstring (\w+)\[\],(\w+)\[\];/g,'let $1=[], $2=[];')
   .replace(/\b(?:string|AIPlan|FollowMember|MqlRates) (\w+)\[\];/g,'let $1=[];')
-  .replace(/\b(?:MqlTick|MqlRates|Candidate) (\w+);/g,'let $1={exitSL:0,exitFirst:0,exitTP:0,exitBE:0};')
+  .replace(/\b(?:MqlTick|MqlRates|Candidate|TeacherLimitSlot) (\w+);/g,'let $1={exitSL:0,exitFirst:0,exitTP:0,exitBE:0};')
   .replace(/\b(?:double|long|int|bool|datetime|string|uint|ulong|ENUM_ORDER_TYPE)\s+/g,'let ')
   .replace(/!TickImpact\(aiPlans\[i\].sign,q.time_msc,speed,oneway,pullback\)/g,
    '!((r)=>{speed=r.speed;oneway=r.oneway;pullback=r.pullback;return r.ok;})(TickImpact(aiPlans[i].sign,q.time_msc))')
@@ -30,6 +31,9 @@ function install(x,name,args='',ref=false){
  if(name==='Open')s='signal={exitSL:0,exitFirst:0,exitTP:0,exitBE:0,...signal};'+s;
  if(name==='Manage')s=s.replace('PositionVolumes(id,initial,closed)','((r)=>{initial=r.initial;closed=r.closed;return r.ok;})(PositionVolumes(id))');
  if(name==='MapReaction')s=s.replace('ZeroMemory(trial);','ZeroMemory(trial);Object.assign(trial,{exitSL:0,exitFirst:0,exitTP:0,exitBE:0});').replaceAll('Target(entry,sign,tp,true)','Target(entry,sign,true).ok').replace('out=trial;','Object.assign(out,trial);');
+ if(name==='LimitPrices')s='let sl=0,tp=0;'+s.replace('ok=Target(level,sign,tp,false,level)','ok=((r)=>{tp=r.tp;return r.ok;})(Target(level,sign,false,level))').replace('return ok &&','return {sl,tp,ok:ok &&').replace(/;\s*$/,'};');
+ if(name==='LimitParametersMatch')s=s.replace('LimitPrices(plan,sl,tp)','((r)=>{sl=r.sl;tp=r.tp;return r.ok;})(LimitPrices(plan))');
+ if(name==='SyncTeacherLimits')s=s.replace('LimitPrices(i,sl,tp)','((r)=>{sl=r.sl;tp=r.tp;return r.ok;})(LimitPrices(i))');
  if(name==='Target')s='let tp=0;'+s.replace(/return false;/g,'return {ok:false,tp};').replace(/return true;/g,'return {ok:true,tp};');
  vm.runInContext('function '+name+'('+args+'){'+s+'}',x);
 }
@@ -46,7 +50,7 @@ function env(options={}){
   pending:{kind:0},followMembers:[],followIndex:-1,followReady:true,followGenerated:now,followReason:'',sharedVisits:[],
   fastTicks:Array.from({length:256},()=>({})),fastCount:0,fastCursor:0,fastLast:0,fastStarted:0,DBL_MAX:Number.MAX_VALUE,
   Hash:s=>{let h=2166136261;for(const ch of s)h=Math.imul(h^ch.charCodeAt(0),16777619)>>>0;return h;},
-  PositionsTotal:()=>0,POSITION_TYPE:1,POSITION_TYPE_BUY:0,POSITION_COMMENT:2,
+  PositionsTotal:()=>0,PositionGetString:()=>'',LimitEntryPending:()=>false,POSITION_TYPE:1,POSITION_TYPE_BUY:0,POSITION_COMMENT:2,
    StringLen:s=>s.length,StringSubstr:(s,n)=>s.slice(n),
    PERIOD_M1:1,ArraySetAsSeries:()=>{},iTime:()=>940+60,
    CopyRates:(_,tf,start,count,out)=>{const q={};x.FreshQuote(q);out.push({time:940,low:q.bid-.4,high:q.ask+.4},{time:880,low:q.bid-.6,high:q.ask+.6});return 2;},
@@ -170,7 +174,7 @@ test('TGF3 snapshot validates footer and heartbeat; old protocol is rejected',()
  pos=0;rows[2]=rows[2].replace(',0,0,2,',',1300,0,2,');assert(!x.ReadMemberFollow());assert(!x.followReady);
  x.FileOpen=name=>name.includes('follows')?-1:1;pos=0;rows=['TGF,1,1000,1,XAUUSD,receipt,rev,990,1290,first,1,ready','FOLLOW,BUY,4175','END,1'];assert(!x.ReadMemberFollow());assert(!x.followReady);
 });
-test('tick path never reads files, calls AI or scans history before entry',()=>{const s=body('OnTick');assert(!/ReadFeed|ReadAISetups|History|CopyRates|CopyBuffer|FileOpen/.test(s));assert(s.includes('AIMarketSignal'));});
+test('tick path never reads files, calls AI or scans history before entry',()=>{const s=body('OnTick');assert(!/ReadFeed|ReadAISetups|History|CopyRates|CopyBuffer|FileOpen/.test(s));assert(!s.includes('AIMarketSignal'));assert(!s.includes('Open('));});
 test('startup cannot replay a preexisting MARKET hint but keeps conditions',()=>{
  const {x}=env();ticks(x,Array(4).fill(4175));x.fastStarted=1000;x.aiPlans[0].market=true;assert(!x.AIMarketSignal({}));
  x.aiPlans[0].created=1000;assert(!x.AIMarketSignal({}));
@@ -312,6 +316,10 @@ test('TGA3 exits round trip with TGA2 compatibility and immediate cancel invalid
  pos=0;rows=['TGA,4,1000,1,XAUUSD,range,rev,990,1,SETUP,range',
  'SETUP,BUY,4150,REACTION,POINT,range,rev,990,0,0,0,0,RANGE_EDGE','END,1'];
  assert(x.ReadAISetups());assert.equal(x.aiPlans[0].derived,true);
+ pos=0;rows[0]=rows[0].replace('TGA,4,','TGA,5,');assert(!x.ReadAISetups());
+ pos=0;rows[1]=rows[1].replace('RANGE_EDGE','DIRECT');assert(x.ReadAISetups());assert.equal(x.aiPlans[0].derived,false);
+ pos=0;rows[0]=rows[0].replace('TGA,5,','TGA,4,');rows[1]=rows[1].replace('DIRECT','RANGE_EDGE');
+
  pos=0;rows[1]=rows[1].replace('RANGE_EDGE','UNKNOWN');assert(!x.ReadAISetups());assert(!x.aiPlanCached);
  pos=0;rows[1]=rows[1].replace('UNKNOWN','RANGE_EDGE').replace('REACTION','MARKET');assert(!x.ReadAISetups());
 
@@ -432,3 +440,4 @@ test('sell structural stop is symmetric and explicit SL cannot be widened by man
  assert(Math.abs(calls[0][4]-4151)<1e-8);assert.equal(x.pending.exitSL,calls[0][4]);
 });
 console.log(checks+' production-source near-entry checks passed');
+module.exports={env,install,body};
