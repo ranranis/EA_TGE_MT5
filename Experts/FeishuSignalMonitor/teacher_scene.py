@@ -1,5 +1,6 @@
 """DeepSeek完整交易场景：语义由模型判断，本地只校验结构、原文与来源版本。"""
 import hashlib
+import copy
 import json
 import math
 import re
@@ -25,12 +26,11 @@ range对象固定为{"low":价格证据对象,"high":价格证据对象}；
 token必须逐字复制原文中的完整数字，不是价格尾数：原文4150--4220必须token="4150"、"4220"，绝对不能写"150"、"50"、"220"、"20"；只有原文真写“75”才用token="75"并补全price=4175。plans和range中引用同一端点时，token、price、price_ref/message_id必须一致。输出前逐项检查，否则整批拒绝。
 
 interpretations的plan只允许side/token/price/mode/evidence（或context_ref），不能复制context中的near/source_refs/origin等本地内部字段。scene.plan另可带exits，与逐条plan字段不同。
-exits各项为价格证据对象或null，sl是绝对止损价，tp1为首批减仓价，tp2为最终止盈价，breakeven为到达后推至开仓价的触发价。仅提取老师明确给出且与此入场计划唯一关联的价格，证据连续片段须包含对应价格及止损/止盈/保本角色；跨消息时须明确写出入场价和方向。缺失字段填null，不能把行情位置、点位列表或距离推算成退出价。只有一个明确止盈目标时填tp2；无tp1时由EA原有分批模板处理。退出信息更新用UPDATE保留完整计划。没有明确关联的“保本/出一半”只解释，不猜具体仓位。
+exits各项为价格证据对象或null，sl是绝对止损价，tp1为首批减仓价，tp2为最终止盈价，breakeven为到达后推至开仓价的触发价。仅提取老师明确给出且与此入场计划唯一关联的价格，证据连续片段须包含对应价格及止损/止盈/保本角色；跨消息时须明确写出入场价和方向；唯一连续计划组的“目标统一”例外见第15条，必须由程序核验关联。缺失字段填null，不能把行情位置、点位列表或距离推算成退出价。只有一个明确止盈目标时填tp2；无tp1时由EA原有分批模板处理。退出信息更新用UPDATE保留完整计划。没有明确关联的“保本/出一半”只解释，不猜具体仓位。
 处理原则：
 1. 理解语义与数字角色。当前行情价、时间周期、入场价、目标价分开：例如“15分钟连绿，现在81了，多单等到75行动”明确表达等4175再做多，必须提取BUY4175（REACTION），81是行情位置、15是周期，不是入场价。
 2. “然后上去93可↓”是补充SELL4193，应保留此前BUY4175；多空计划分别维护。明确“改到/不做/取消/最新取代”等才移除或替换对应旧计划，完整地图更新后不能复活此前作废方向。
-3. 仅有“小区间4175-4200，大区间4150-4220”是中性区间，不能凭列表推断方向。但用户授权以下AI条件推导：同一老师明确当前区间震荡/来回跑，给出区间数值，并强调该区间两头重要，或明确该端支撑/压力重要时，生成下沿BUY、上沿SELL的REACTION计划，basis标记RANGE_EDGE并指定区间，price_ref引用端点价格，direction_ref引用边界角色/重要性原文，regime_ref引用震荡判断。summary写清“AI区间推导试仓”，不得说成老师已喊单。
-   例：老师说“行情在区间来回跑”“大区间参考4150--4220”“大区间的两头，为重要点位”，可生成BUY4150、SELL4220两条AI区间试仓计划，同时保留明确的BUY4175、SELL4193。不能把完整地图的第一个/最后一个数字当作已声明的大区间。早先“若冲不过去则区间震荡”是条件假设，后来已明确突破顺涨时不能沿用为当前RANGE。缺少任一证据不生成；仅“50好位置”、中性地图、趋势单边、突破后的旧边界，不能这样推导。相同价格已有明确计划时保留明确计划，不重复生成。最多4条，优先明确方向，其次被强调的大区间边界。
+3. 仅有“小区间4175-4200，大区间4150-4220”或“4520-4560区间来回跑”是中性区间，填区间对象用于展示；不能把下沿/上沿推断成老师明确说了BUY/SELL。没有方向原文时不得生成basis=null的plan。区间推导必须另有本次请求的明确授权规则。
 4. “来回跑/区间震荡”可标记RANGE；孤立“压力有效”只是关键位说明；符合上述完整区间证据时，才可生成标注来源的AI条件计划。“多单等到/空单等到/可以行动/可上”不需要箭头，也属于有条件入场。
 5. “现在90可⬆️”之后同一老师说“86了 注意”，若中间没有取消或相反方向且可唯一承接，应更新为BUY4186，price_ref引用86消息，direction_ref引用90做多消息；不要因新句没写多字就丢弃。若只是行情报数、持仓盈亏或无法唯一关联，则不生成。较晚明确改价替换对应旧入场，不能让旧价和新价一起重复占位。
 6. 优先T哥本人。成员晒单、引用、历史回顾、假设、玩笑不能更新scene。source_role=follow_member仍由独立价格区间通道处理，沿用至本人更新/取消。
@@ -40,7 +40,43 @@ exits各项为价格证据对象或null，sl是绝对止损价，tp1为首批减
 10. interpretations不能把“多单等到75行动”写成无方向WATCH，应为SETUP；但EA只使用通过校验的scene.plans，不能只在summary写建议而plans为空。summary可以解释突破后观察回踩等，但不能制造没有原文的交易价格、SL、TP、手数。不要把“15分钟连绿”的颜色直接判成趋势方向。
 11. 所有引用只用截至as_of的真实消息ID；价格尾数用该消息的market_anchor/previous_scene已验证同token价格复核，不按未来行情重新补全。
 12. previous_scene为空时，这是首次建立完整场景：必须结合context里的原文恢复截至as_of仍有效的计划，不能因为最后一句是补充说明就KEEP。没有可确认的计划返回UPDATE空计划；信息不足返回REVIEW。
+13. 先判断言语动作和时态，再分配数字角色。“方才最低68，反弹最高80”“方才5点到11点在4615—4625跑了十多个来回”是复盘，不能输出新地图、区间、入场或目标。summary说是复盘时，结构也必须没有由该复盘新增的活动价格。历史回顾不删除previous_scene中原有有效计划。
+14. 不得用概率、一般做法或目标高低来猜BUY/SELL。“按照文章计划，4120动手”但文章未提供、也没有明确同组方向依据时必须REVIEW、plans=[]；不能一边说方向不明一边填BUY。只有“↑”“现在”时先WATCH，无数字不造plan，保留原文供后续同组消息承接。
+15. 同一老师连续拆句可以组成一个计划：先给↑，随后给完整价格和入场/加仓提示，scene的price_ref引用后一句，direction_ref引用前一句；不要求单句同时含两者。仅缺数字的方向片段不取消原有效计划。下一批“目标统一XXXX”是当前唯一计划组的tp2更新，沿用原price_ref、direction_ref与入场价，不新增入场。不同方向/不同计划组并存又未指明对象则REVIEW。只能关联目标消息之前的计划，不能倒用后来的入场。
+16. previous_scene返回的是完整快照，UPDATE时保留仍有效计划及已有exits；不能因新消息只补目标而清空其他已确认字段。改目标不换入场来源、不生成另一个机会；重复输入应得到同一组计划。计划identity由程序维护，不在JSON中新增内部字段。
+17. 所有price必须是JSON number；尾数缺数量级时可填null由本地复核，不猜百位。每个新入场数字必须确实承担入场角色：压力75、70可空中的75不是入场，止损/目标/突破阈值也不能借其他句方向变成新入场。破位预测保留说明，不填进无条件目标。加仓间距只解释，推算的后续档位不是原文token，不得伪造价格证据生成scene.plans；后续执行映射另行开发。
+18. “以后可以做空的位置”“以后再见可多”“等到/准备/可以/挂”只是在等待价格到达，只要价格和方向明确，就是当前发布的持续有效REACTION参考，不要求此刻已经开仓。多档明确位置各保留一条，不因尚未到价改成WATCH。复盘、假设分支和仅有压力支撑仍需区别。KEEP同样要填写最后老师target的as_of。
 """
+
+
+RANGE_INFERENCE_PROMPT = """
+本次另行授权的AI区间推导：同一老师明确当前区间震荡/来回跑，给出区间数值，并强调该区间两头重要，或明确该端支撑/压力重要时，生成下沿BUY、上沿SELL的REACTION计划，basis标记RANGE_EDGE并指定区间。direction_ref引用边界角色/重要性，regime_ref引用震荡原文，summary写明AI推导，不能冒充明确喊单。
+例：“行情在区间来回跑”“大区间参考4150--4220”“大区间的两头为重要点位”，可生成BUY4150、SELL4220的RANGE_EDGE计划，同时保留明确的其他参考。完整地图首尾不能冒充已声明区间；假设震荡、趋势单边、突破后的旧边界不能推导。缺少证据不生成。最多4条，优先明确方向、其次被强调的边界；同价已有明确计划则不重复推导。
+"""
+
+
+def non_current_evidence(text, quote):
+    """检查证据所在语段，不能靠截掉“方才”把复盘变成现行计划。"""
+    if not isinstance(quote,str) or not quote or quote not in text:
+        return True
+    positions=[m.end() for m in re.finditer(re.escape(quote),text)]
+    for end in positions:
+        # 显式重新发布后的部分可成为新参考，早先的复盘不污染后半句。
+        segment=re.split(r'现在|当前|今日|今天|最新|重新|接下来',text[:end])[-1]
+        if re.search(r'方才|刚才|昨天|前天|历史|回顾|复盘|晒单|转发|引用|假设|开玩笑',segment):
+            return True
+    return False
+
+
+def direction_side(text):
+    buy=bool(re.search(r'↑|⬆|做多|买入|多单|(?<![太很许更])多(?!拿|少)',text))
+    sell=bool(re.search(r'↓|⬇|做空|卖出|空单|空(?!间)',text))
+    return ('BUY' if buy else 'SELL') if buy!=sell else None
+
+
+def direction_fragment(text):
+    """只接续尚无价格的方向短句，不把观点/保护/否定当缺价喊单。"""
+    return direction_side(text) if re.fullmatch(r'[\s↑↓⬆⬇\ufe0f。.！!，,]*(?:(?:现在|准备|做多|做空|买入|卖出)[\s↑↓⬆⬇\ufe0f。.！!，,]*)*',text) else None
 
 
 def validate_scene(value, targets, context, anchor, previous=None):
@@ -48,6 +84,7 @@ def validate_scene(value, targets, context, anchor, previous=None):
     keys={'as_of','action','regime','regime_ref','plans','inner_range','outer_range','summary'}
     if not isinstance(value,dict) or set(value)!=keys:
         raise AIError('AI场景字段不完整')
+    value=copy.deepcopy(value)
     if value['action'] not in ('KEEP','UPDATE','REVIEW') or value['regime'] not in ('UNKNOWN','RANGE','TREND_UP','TREND_DOWN'):
         raise AIError('AI场景状态无效')
     if not isinstance(value['summary'],str) or len(value['summary'])>400:
@@ -58,6 +95,9 @@ def validate_scene(value, targets, context, anchor, previous=None):
             raise AIError('无老师新消息不能更新场景')
         return None
     latest=teacher[-1]
+    # KEEP没有业务变更，处理到哪条消息由调用方确定，避免空as_of造成闲聊无限重试。
+    if value['action']=='KEEP' and value['as_of']=='':
+        value['as_of']=latest['message_id']
     if value['as_of']!=latest['message_id']:
         raise AIError('AI场景必须截至最新老师消息')
     if not isinstance(value['plans'],list) or len(value['plans'])>4:
@@ -79,6 +119,8 @@ def validate_scene(value, targets, context, anchor, previous=None):
             (stamp(item['time']),item.get('sequence',0))>(stamp(latest['time']),latest['sequence']) or
             not isinstance(quote,str) or not quote or quote not in item['text']):
             raise AIError('AI场景引用缺少有效老师原文')
+        if non_current_evidence(item['text'],quote):
+            raise AIError('复盘/假设语段不能成为当前场景证据')
         refs[mid]=dict(message_id=mid,revision=item['revision'])
         return item
     def price(proof):
@@ -86,21 +128,25 @@ def validate_scene(value, targets, context, anchor, previous=None):
             raise AIError('AI场景价格证据字段无效')
         item=evidence(proof['message_id'],proof['evidence'])
         token=proof['token'];number=proof['price']
-        if not isinstance(token,str) or not re.search(r'(?<![\d.])'+re.escape(token)+r'(?![\d.])',proof['evidence']):
+        if not isinstance(token,str) or not re.fullmatch(r'\d{1,5}(?:\.\d{1,2})?',token) or not re.search(r'(?<![\d.])'+re.escape(token)+r'(?![\d.])',proof['evidence']):
             raise AIError('AI场景价格不在原文或数字被截断')
-        if isinstance(number,bool) or not isinstance(number,(int,float)) or not math.isfinite(number):
-            raise AIError('AI场景价格不是有限数')
         item_anchor=item.get('market_anchor',0)
         if not item_anchor:
             # 保留旧场景的价格必须保持原来核验的数量级，不拿实时行情补旧尾数。
             old_plans=(previous or {}).get('plans',[])
             match=next((p for p in old_plans if p['token']==token and p['price_ref']==proof['message_id']),None)
             item_anchor=match['price'] if match else (float(token) if len(token.split('.')[0])>=4 else 0)
-        if abs(number-resolve_token(token,item_anchor))>0.001:
+        resolved=resolve_token(token,item_anchor)
+        if number is None or isinstance(number,str) and re.fullmatch(r'\d+(?:\.\d+)?',number) and abs(float(number)-resolved)<=0.001:
+            number=resolved
+        if isinstance(number,bool) or not isinstance(number,(int,float)) or not math.isfinite(number):
+            raise AIError('AI场景价格不是有限数')
+        if abs(number-resolved)>0.001:
             raise AIError('AI场景价格补全未通过原时点复核')
         if re.search(r'(?:EMA|MA|ATR|RSI|ADX|MACD)\s*'+re.escape(token),proof['evidence'],re.I):
             raise AIError('指标周期不是入场价')
-        return number
+        proof['price']=resolved
+        return resolved
     for name in ('inner_range','outer_range'):
         band=value[name]
         if band is not None:
@@ -122,7 +168,7 @@ def validate_scene(value, targets, context, anchor, previous=None):
         required={'side','token','price','mode','price_ref','price_evidence','direction_ref','direction_evidence'}
         if not isinstance(plan,dict) or not required<=set(plan) or set(plan)-required-{'exits','basis'} or plan['side'] not in ('BUY','SELL') or plan['mode'] not in ('REACTION','MARKET'):
             raise AIError('AI场景计划字段无效')
-        price(dict(message_id=plan['price_ref'],token=plan['token'],price=plan['price'],evidence=plan['price_evidence']))
+        plan['price']=price(dict(message_id=plan['price_ref'],token=plan['token'],price=plan['price'],evidence=plan['price_evidence']))
         direction=evidence(plan['direction_ref'],plan['direction_evidence'])
         buy=bool(re.search(r'↑|⬆|做多|买入|多单|(?<![太很许更])多(?!拿|少)',plan['direction_evidence']))
         sell=bool(re.search(r'↓|⬇|做空|卖出|空单|空(?!间)',plan['direction_evidence']))
@@ -152,6 +198,7 @@ def validate_scene(value, targets, context, anchor, previous=None):
                 raise AIError('失效边界不能成为区间试仓')
         elif buy==sell or plan['side']!=('BUY' if buy else 'SELL'):
             raise AIError('AI场景方向缺少唯一原文依据')
+        source=items[plan['price_ref']]
         for mid in (plan['price_ref'],plan['direction_ref']):
             if re.search(r'历史|晒单|转发|假设|昨天|回顾|开玩笑|忽略.{0,10}(规则|指令)',items[mid]['text']):
                 raise AIError('历史/指令文本不能成为场景入场')
@@ -170,8 +217,8 @@ def validate_scene(value, targets, context, anchor, previous=None):
             if not isinstance(exits,dict) or set(exits)!={'sl','tp1','tp2','breakeven'}:
                 raise AIError('退出计划字段无效')
             sign=1 if plan['side']=='BUY' else -1
-            roles={'sl':r'止损|SL','tp1':r'止盈|减仓|首批|第一目标|先看|TP1',
-                   'tp2':r'止盈|目标|尾仓|TP2|TP','breakeven':r'保本|推保护'}
+            roles={'sl':r'止损|保险|SL','tp1':r'止盈|减仓|首批|第一目标|先看|TP1',
+                   'tp2':r'止盈|目标|尾仓|利|TP2|TP','breakeven':r'保本|推保护'}
             prices={}
             for key,proof in exits.items():
                 if proof is None: continue
@@ -180,7 +227,7 @@ def validate_scene(value, targets, context, anchor, previous=None):
                     raise AIError('退出证据不是当前明确计划')
                 token=re.escape(proof['token'])
                 # 价格紧邻角色，避免一段话里把入场价/行情价错贴为止损。
-                if not re.search(r'(?:'+roles[key]+r')[\s:：]*(?:(?:设在|放在|放|到|在|看)\s*)?'+token+r'(?![\d.])|(?<![\d.])'+token+r'\s*(?:'+roles[key]+r')',quote,re.I):
+                if not re.search(r'(?:'+roles[key]+r')[\s:：]*(?:(?:统一|设在|放在|放|到|在|看)\s*)?'+token+r'(?![\d.])|(?<![\d.])'+token+r'\s*(?:'+roles[key]+r')',quote,re.I):
                     raise AIError('退出价格缺少明确角色')
                 same_source=proof['message_id']==plan['price_ref'] and sum(p['price_ref']==plan['price_ref'] for p in value['plans'])==1
                 source_buy=bool(re.search(r'做多|多单|买入|↑',item['text']))
@@ -189,7 +236,26 @@ def validate_scene(value, targets, context, anchor, previous=None):
                 entry_tokens=(plan['token'],format(plan['price'],'g'))
                 has_entry=any(re.search(r'(?<![\d.])'+re.escape(t)+r'(?![\d.])',quote) for t in entry_tokens)
                 has_buy=bool(re.search(r'做多|多单|买入|↑',quote));has_sell=bool(re.search(r'做空|空单|卖出|↓',quote))
-                if not same_source and not (has_entry and has_buy!=has_sell and has_buy==(sign==1)):
+                group={(p['side'],p['direction_ref']) for p in value['plans']}
+                uniform=(key=='tp2' and bool(re.search(r'目标\s*统一|统一\s*(?:目标|止盈)',quote)) and
+                         len(group)==1 and not any(p.get('basis') for p in value['plans']) and
+                         (stamp(item['time']),item.get('sequence',0))>=
+                         (stamp(source['time']),source.get('sequence',0)))
+                # 不允许通过漏掉另一侧来“制造唯一组”；明确关联仍走原有入场价+方向路径。
+                if uniform and previous:
+                    uniform=all((p['side'],p['direction_ref']) in group for p in previous.get('plans',[]))
+                if uniform:
+                    group_sources={p[k] for p in value['plans'] for k in ('price_ref','direction_ref')}
+                    for other in items.values():
+                        if (other['message_id'] not in group_sources and other.get('sender_id')==latest['sender_id'] and
+                            (stamp(source['time']),source.get('sequence',0))<
+                            (stamp(other['time']),other.get('sequence',0))<
+                            (stamp(item['time']),item.get('sequence',0)) and
+                            not other.get('historical') and not other.get('deleted') and
+                            direction_side(other['text']) and not non_current_evidence(other['text'],other['text']) and
+                            not re.search(r'止损|止盈|目标|保险|保本',other['text'])):
+                            uniform=False
+                if not same_source and not uniform and not (has_entry and has_buy!=has_sell and has_buy==(sign==1)):
                     raise AIError('退出计划无法唯一关联入场')
                 if sign*(number-plan['price'])*( -1 if key=='sl' else 1)<=0:
                     raise AIError('退出价格方向无效')
@@ -211,6 +277,29 @@ def validate_scene(value, targets, context, anchor, previous=None):
             if not item.get('deleted') and not item.get('historical') and (
                 kind=='CANCEL' and interpretation.get('cancel_side') in ('ALL',plan['side']) or raw_all or raw_side):
                 raise AIError('AI场景不得复活取消前的旧方向')
+        source=items[plan['price_ref']]
+        if basis is None and plan['price_ref']!=plan['direction_ref']:
+            if re.search(r'文章|图里|图中|会议|直播',source['text']) and not direction_side(plan['price_evidence']):
+                raise AIError('引用材料未提供明确方向，不能借旧方向猜入场')
+            if direction_fragment(direction['text']):
+                gap=stamp(source['time'])-stamp(direction['time'])
+                if not 0<=gap<=300:
+                    raise AIError('缺价方向短句不属于同一段连续发言')
+                for other in items.values():
+                    if (other.get('sender_id')==latest['sender_id'] and
+                        (stamp(direction['time']),direction.get('sequence',0))<
+                        (stamp(other['time']),other.get('sequence',0))<
+                        (stamp(source['time']),source.get('sequence',0)) and
+                        not other.get('historical') and not other.get('deleted') and
+                        direction_side(other['text']) not in (None,plan['side']) and
+                        not non_current_evidence(other['text'],other['text'])):
+                        raise AIError('连续短句出现相反方向，不能选择旧箭头')
+            if direction_side(plan['price_evidence']) not in (None,plan['side']):
+                raise AIError('当前入场方向与承接方向冲突')
+            if not re.search(r'注意|关注|准备|行动|可|进|上车|加|上货|改到|换到|移到|动手',source['text']) and not direction_side(plan['price_evidence']):
+                raise AIError('单纯行情报数不能借前文方向变成入场')
+            if re.search(r'(?:止损|止盈|目标|保险|保本|压力|支撑)\s*(?:统一|改到|到|在|是|为)?\s*'+re.escape(plan['token']),plan['price_evidence']) and not direction_side(plan['price_evidence']):
+                raise AIError('保护/目标/压力数字不能借方向变成入场')
         # 相同仍有效价位的形式编辑/重述继承机会身份，实际来源版本仍单独校验。
         prior=next((p for p in (previous or {}).get('plans',[]) if p['side']==plan['side'] and p['price']==plan['price'] and p['mode']==plan['mode']),None)
         origin_revision=hashlib.sha256(json.dumps([source['message_id'],direction['message_id'],plan['side'],plan['price'],plan['mode']],ensure_ascii=False).encode('utf-8')).hexdigest()
@@ -233,6 +322,29 @@ def validate_execution_scene(value, targets, context, anchor, previous=None):
         plans=value.get('plans') if isinstance(value,dict) else None
         if not isinstance(plans,list) or not plans or not all(isinstance(p,dict) for p in plans):
             raise
+        if str(error)=='AI场景方向缺少唯一原文依据':
+            # 模型把已声明区间的端点/破位预测误标为直接喊单时，仅纠正类型。
+            # 引用、时态、上下沿及其他计划随后全部重验；文章缺方向等错误不能走此路径。
+            edges=[proof for name in ('inner_range','outer_range')
+                   for proof in (value.get(name) or {}).values() if isinstance(proof,dict)]
+            unsupported=[p for p in plans if not p.get('basis') and
+                         isinstance(p.get('direction_evidence'),str) and not direction_side(p['direction_evidence']) and
+                         p.get('price_ref')==p.get('direction_ref') and
+                         (any(p.get('price_ref')==edge.get('message_id') and p.get('token')==edge.get('token')
+                              and p.get('price')==edge.get('price') for edge in edges) or
+                          any(p.get('price_ref')==edge.get('message_id') for edge in edges) and
+                          re.search(r'破|新高|新低',p['direction_evidence']) and
+                          re.search(r'若|如果|则|有望',p['direction_evidence']))]
+            if unsupported:
+                direct=[p for p in plans if p not in unsupported]
+                keys={'side','token','price','mode','price_ref','price_evidence','direction_ref','direction_evidence','exits','basis'}
+                for old in (previous or {}).get('plans',[]):
+                    if not any((p['side'],p['price'])==(old['side'],old['price']) for p in direct):
+                        direct.append({k:v for k,v in old.items() if k in keys})
+                clean=validate_scene(dict(value,plans=direct),targets,context,anchor,previous)
+                clean['semantic_correction']='无明确方向的区间端点/破位预测只保留参考，不生成直接计划'
+                clean['summary']=clean['semantic_correction']
+                return clean
         direct=[p for p in plans if not p.get('basis')]
         if not direct or len(direct)==len(plans):
             raise
@@ -253,10 +365,10 @@ def publish_scene(db, c, scene):
         return
     if not refs_current(db,c['chat_id'],scene['source_refs']):
         return
-    set_state(db,'teacher_scene',scene)
     if scene['action']=='REVIEW':
         set_state(db,'deepseek_review',dict(message_id=scene['as_of'],created=scene['created'],reason=scene['summary']))
         return
+    set_state(db,'teacher_scene',scene)
     set_state(db,'deepseek_review',{})
     set_state(db,'deepseek_setup',dict(message_id=scene['as_of'],revision=scene['revision'],created=scene['created'],
         sender=scene['sender'],mode='SETUP' if scene['plans'] else 'MAP' if scene.get('map_only') else 'WAIT',

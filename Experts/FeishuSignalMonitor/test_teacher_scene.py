@@ -641,4 +641,182 @@ class TeacherOnlyQueueTests(unittest.TestCase):
         plans=state(self.db,'deepseek_setup')['plans']
         self.assertEqual([(p['side'],p['price']) for p in plans],[('SELL',4193)])
 
+class SemanticRepairTests(unittest.TestCase):
+    def scene(self,mid,plans):
+        return dict(as_of=mid,action='UPDATE',regime='UNKNOWN',regime_ref=None,
+                    plans=plans,inner_range=None,outer_range=None,summary='合成语义场景')
+
+    def split_case(self):
+        direction=message('direction','↑。。',1)
+        entry=message('entry','注意，4200了，每距离20点可以加',2)
+        target=message('target','目标统一4250',3)
+        p=plan('BUY','4200',4200,'entry',entry['text'])
+        p.update(direction_ref='direction',direction_evidence=direction['text'])
+        before=validate_scene(self.scene('entry',[p]),[entry],[direction],4200)
+        p['exits']=dict(sl=None,tp1=None,tp2=dict(message_id='target',token='4250',price=4250,evidence=target['text']),breakeven=None)
+        return direction,entry,target,before,self.scene('target',[p])
+
+    def test_late_uniform_target_updates_same_identity_and_tracks_all_sources(self):
+        direction,entry,target,before,value=self.split_case()
+        clean=validate_scene(value,[target],[direction,entry],4200,before)
+        self.assertEqual(clean['plans'][0]['exits']['tp2']['price'],4250)
+        for key in ('origin_id','origin_revision','origin_created'):
+            self.assertEqual(clean['plans'][0][key],before['plans'][0][key])
+        self.assertEqual({r['message_id'] for r in clean['source_refs']},{'direction','entry','target'})
+        self.assertEqual(validate_scene(value,[target],[direction,entry],4300,clean)['plans'],clean['plans'])
+
+    def test_uniform_target_cannot_drop_another_group_to_claim_unique_association(self):
+        direction,entry,target,before,value=self.split_case()
+        before['plans'].append(dict(plan('SELL','4270',4270,'other','4270可空')))
+        with self.assertRaisesRegex(AIError,'唯一关联'):
+            validate_scene(value,[target],[direction,entry],4200,before)
+
+    def test_target_before_entry_cannot_be_applied_retroactively(self):
+        direction,entry,target,before,value=self.split_case()
+        target['time']=direction['time'];target['sequence']=0
+        value['as_of']='entry'
+        with self.assertRaisesRegex(AIError,'唯一关联'):
+            validate_scene(value,[entry],[direction,target],4200)
+
+    def test_recap_cannot_supply_range_entry_or_exit_even_when_quote_omits_recap_word(self):
+        for mode in ('range','entry','exit'):
+            with self.subTest(mode=mode),self.assertRaisesRegex(AIError,'复盘'):
+                old=message('old','方才4200多，目标4250，在4200--4260跑了几个来回',1)
+                value=self.scene('old',[])
+                proof=lambda token:dict(message_id='old',token=token,price=int(token),evidence=token)
+                if mode=='range':value['inner_range']=dict(low=proof('4200'),high=proof('4260'))
+                if mode=='entry':value['plans']=[plan('BUY','4200',4200,'old','4200多')]
+                if mode=='exit':
+                    new=message('new','4190多',0)
+                    p=plan('BUY','4190',4190,'new',new['text'])
+                    p['exits']=dict(sl=None,tp1=None,tp2=dict(proof('4250'),evidence='目标4250'),breakeven=None)
+                    value['plans']=[p]
+                    validate_scene(value,[old],[new],4200)
+                else:validate_scene(value,[old],[],4200)
+
+    def test_explicit_republication_after_recap_is_allowed(self):
+        new=message('new','方才4180做多赚了。现在4200可多',1)
+        value=self.scene('new',[plan('BUY','4200',4200,'new','现在4200可多')])
+        self.assertEqual(validate_scene(value,[new],[],4200)['plans'][0]['price'],4200)
+
+    def test_missing_article_and_bare_quote_cannot_borrow_a_direction(self):
+        for text in ('按照文章计划，4200开始动手','4200了','目标统一4200'):
+            old=message('old','4190做多',1);new=message('new',text,2)
+            p=plan('BUY','4200',4200,'new',text)
+            p.update(direction_ref='old',direction_evidence=old['text'])
+            with self.subTest(text=text),self.assertRaises(AIError):
+                validate_scene(self.scene('new',[p]),[new],[old],4200)
+
+    def test_no_direction_cannot_be_invented_and_no_price_cannot_be_invented(self):
+        for text,token in [('4200开始动手','4200'),('↑现在','现在')]:
+            new=message('new',text,1)
+            with self.subTest(text=text),self.assertRaises(AIError):
+                validate_scene(self.scene('new',[plan('BUY',token,4200,'new',text)]),[new],[],4200)
+
+    def test_null_and_numeric_string_prices_are_locally_resolved_without_input_mutation(self):
+        for number in (None,'4175'):
+            new=message('new','75多',1)
+            value=self.scene('new',[plan('BUY','75',number,'new',new['text'])])
+            clean=validate_scene(value,[new],[],4181)
+            self.assertEqual(clean['plans'][0]['price'],4175)
+            self.assertEqual(value['plans'][0]['price'],number)
+
+    def test_empty_keep_cursor_is_bound_but_wrong_cursor_and_payload_still_fail(self):
+        new=message('new','方才4200到4210来回震荡',1)
+        value=self.scene('',[]);value['action']='KEEP'
+        self.assertEqual(validate_scene(value,[new],[],4200)['as_of'],'new')
+        value['as_of']='other'
+        with self.assertRaises(AIError):validate_scene(value,[new],[],4200)
+        value['as_of']='';value['plans']=[plan('BUY','4200',4200,'new',new['text'])]
+        with self.assertRaises(AIError):validate_scene(value,[new],[],4200)
+
+    def test_teacher_only_request_does_not_include_range_inference_examples(self):
+        client=DeepSeek('.',dict(ai_model='deepseek-flash',teacher_only=True))
+        client.request=Mock(return_value={'choices':[{'finish_reason':'stop','message':{'content':'{"interpretations":[]}'}}]})
+        client.interpret([message('new','小区间4200--4250',1)],[],4200,[])
+        prompt=client.request.call_args.args[1]['messages'][0]['content']
+        self.assertNotIn('本次另行授权的AI区间推导',prompt)
+        self.assertIn('不得生成basis=null',prompt)
+
+    def test_mislabeled_range_edges_remain_display_only_and_retain_prior_plan(self):
+        from teacher_scene import validate_execution_scene
+        direction,entry,target,before,value=self.split_case()
+        band=message('range','区间4200--4260来回跑',4)
+        value=self.scene('range',[
+            plan('BUY','4200',4200,'range',band['text']),plan('SELL','4260',4260,'range',band['text'])])
+        value['inner_range']={key:dict(message_id='range',token=token,price=int(token),evidence=band['text'])
+                              for key,token in [('low','4200'),('high','4260')]}
+        clean=validate_execution_scene(value,[band],[direction,entry],4200,before)
+        self.assertEqual([(p['side'],p['price'],p['price_ref']) for p in clean['plans']],[('BUY',4200,'entry')])
+        self.assertEqual(clean['inner_range']['high']['price'],4260)
+        self.assertIn('semantic_correction',clean)
+        band['text']+='，往上破4270则有望去4300'
+        value['plans']=[plan('BUY','4270',4270,'range','往上破4270则有望去4300')]
+        clean=validate_execution_scene(value,[band],[direction,entry],4200,before)
+        self.assertEqual([(p['side'],p['price']) for p in clean['plans']],[('BUY',4200)])
+        band['text']='方才区间4200--4260来回跑'
+        with self.assertRaises(AIError):validate_execution_scene(value,[band],[direction,entry],4200,before)
+
+    def test_intervening_opposite_direction_prevents_fragment_link_and_uniform_target(self):
+        direction,entry,target,before,value=self.split_case()
+        other=message('other','↓。。',1);other['time']=entry['time'];other['sequence']=1
+        with self.assertRaisesRegex(AIError,'相反方向'):
+            validate_scene(value,[target],[direction,other,entry],4200,before)
+        other['time']=target['time'];other['sequence']=2
+        with self.assertRaisesRegex(AIError,'唯一关联'):
+            validate_scene(value,[target],[direction,entry,other],4200,before)
+
+
+class SplitMessageWorkerTests(unittest.TestCase):
+    setUp=SceneWorkerTests.setUp
+    tearDown=SceneWorkerTests.tearDown
+    seed=SceneWorkerTests.seed
+
+    def respond(self,targets,context,anchor,levels,previous):
+        all_items={m['message_id']:m for m in context+targets}
+        last=targets[-1]['message_id']
+        plans=[]
+        if 'entry' in all_items:
+            p=plan('BUY','4200',4200,'entry',all_items['entry']['text'])
+            p.update(direction_ref='direction',direction_evidence='↑。。')
+            if 'target' in all_items:
+                p['exits']=dict(sl=None,tp1=None,tp2=dict(message_id='target',token='4250',price=4250,evidence='目标统一4250'),breakeven=None)
+            plans=[p]
+        value=SemanticRepairTests().scene(last,plans)
+        return dict(interpretations=[dict(result(kind='WATCH'),id=t['id']) for t in targets],scene=value)
+
+    def test_split_messages_restart_dedupe_and_withdrawn_target(self):
+        from store import connect
+        self.seed(mid='direction',text='↑。。',age=30)
+        client=Mock(interpret=Mock(side_effect=self.respond))
+        self.assertEqual(process_ai_batch(self.db,self.c,client,self.now),1)
+        self.assertEqual(state(self.db,'deepseek_setup')['plans'],[])
+        self.seed(mid='entry',text='注意，4200了，每距离20点可以加',age=20)
+        self.assertEqual(process_ai_batch(self.db,self.c,client,self.now),1)
+        origin=state(self.db,'deepseek_setup')['plans'][0]['origin_revision']
+        self.db.close();self.db=connect(self.home/'data/test.sqlite')
+        target=self.seed(mid='target',text='目标统一4250',age=10)
+        self.assertEqual(process_ai_batch(self.db,self.c,client,self.now),1)
+        setup=state(self.db,'deepseek_setup');self.assertEqual(len(setup['plans']),1)
+        self.assertEqual(setup['plans'][0]['origin_revision'],origin)
+        self.assertEqual(setup['plans'][0]['exits']['tp2']['price'],4250)
+        self.assertEqual(process_ai_batch(self.db,self.c,client,self.now),0)
+        self.assertEqual(client.interpret.call_count,3)
+        self.assertEqual(self.db.execute('SELECT count(*) FROM orders').fetchone()[0],0)
+        ingest(self.db,'oc_test',[dict(target,deleted=True)])
+        self.assertFalse(ai_snapshot(self.db,self.c,self.now,False)['active'])
+
+    def test_review_preserves_last_valid_scene_for_next_message(self):
+        self.seed(mid='direction',text='↑。。',age=30)
+        self.seed(mid='entry',text='注意4200了，可以加',age=20)
+        process_ai_batch(self.db,self.c,Mock(interpret=self.respond),self.now)
+        before=copy.deepcopy(state(self.db,'teacher_scene'))
+        self.seed(mid='unclear',text='文章计划怎么说的',age=10)
+        review=SemanticRepairTests().scene('unclear',[]);review['action']='REVIEW'
+        client=Mock(interpret=Mock(return_value=dict(interpretations=[result(kind='UNKNOWN')],scene=review)))
+        self.assertEqual(process_ai_batch(self.db,self.c,client,self.now),1)
+        self.assertEqual(state(self.db,'teacher_scene'),before)
+        self.assertFalse(ai_snapshot(self.db,self.c,self.now,False)['active'])
+
+
 if __name__=='__main__':unittest.main()

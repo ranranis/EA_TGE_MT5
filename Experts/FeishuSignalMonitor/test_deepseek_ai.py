@@ -75,6 +75,16 @@ class ValidationTests(unittest.TestCase):
         with self.assertRaises(AIError):self.check_value(result(kind='MAP'))
         self.check_value(result(kind='MAP'),[dict(id='0',text='4175--4185--4200')])
 
+    def test_local_price_completion_accepts_null_but_not_fabricated_price(self):
+        for price in (None,'4168'):
+            self.assertEqual(self.check_value(result(price=price))['0']['plans'][0]['price'],4168)
+        for price in (True,'oops',4268):
+            with self.assertRaises(AIError):self.check_value(result(price=price))
+
+    def test_recap_cannot_be_entry_even_with_a_literal_arrow(self):
+        with self.assertRaisesRegex(AIError,'复盘'):
+            self.check_value(result(evidence='68↑'),[dict(id='0',text='方才68↑涨了一段',market_anchor=4170)])
+
 
 class ContextTests(unittest.TestCase):
     def setUp(self):
@@ -135,6 +145,14 @@ class ContextTests(unittest.TestCase):
         self.assertEqual(values['1']['source_refs'][0]['message_id'],'om_direction')
     def test_member_after_target_cannot_supply_missing_direction(self):
         with self.assertRaises(AIError):self.validate([])
+
+    def test_direction_fragment_can_join_later_price_across_batches(self):
+        self.origin.update(text='↑。。',interpretation=result(kind='WATCH'))
+        self.target.update(time='2026-10-13T14:01:00+08:00',text='注意，86了，可以加')
+        value=self.value();value['plans'][0]['evidence']=self.target['text']
+        self.assertEqual(self.validate(value=value)['plans'][0]['side'],'BUY')
+        self.target['time']='2026-10-13T14:30:00+08:00'
+        with self.assertRaises(AIError):self.validate(value=self.value())
 
 
     def test_follow_context_is_not_market_and_unapproved_member_has_no_plans(self):

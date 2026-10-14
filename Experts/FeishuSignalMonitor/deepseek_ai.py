@@ -12,7 +12,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from store import connect, state, set_state, iso, stamp
-from teacher_scene import SCENE_PROMPT, validate_scene, validate_execution_scene, publish_scene
+from teacher_scene import (SCENE_PROMPT, RANGE_INFERENCE_PROMPT, validate_scene, validate_execution_scene, publish_scene,
+                           non_current_evidence, direction_fragment)
 
 API = 'https://api.deepseek.com'
 FOLLOW_TTL = 0  # 成员参考沿用至更新/取消，由EA按价格区间过滤
@@ -36,7 +37,9 @@ CLOSE/MODIFY仅归类并说明，订单关联缺失时不猜该改哪笔；scene
 JSON格式：{"interpretations":[{"id":"0","kind":"SETUP","plans":[{"side":"BUY","token":"68","price":4168,"mode":"REACTION","evidence":"68⬆️"}],"cancel_side":"NONE","reason":"中文说明"}]}
 kind只能MAP/SETUP/WATCH/HOLD/CANCEL/CLOSE/MODIFY/DISCUSSION/MEMBER_TRADE/UNKNOWN。除follow_member的MEMBER_TRADE可有一个plan外，非SETUP的plans为空。
 CANCEL只在明确取消当前参考时使用，cancel_side=ALL/BUY/SELL；其余为NONE。
-除了上下文计划允许的context_ref字段，不得输出额外字段、Markdown、工具调用或程序代码。"""
+除了上下文计划允许的context_ref字段，不得输出额外字段、Markdown、工具调用或程序代码。
+连续拆句的“↑”“现在”先标WATCH、plans=[]；随后给出价格与行动提示时，可用context_ref引用同一老师紧邻的缺价方向短句，price仍取后一句的原文数字。场景中的direction_ref同样指向该原始方向消息。不能为了让单句完整填入“现在”作为token或猜现价。
+“方才最低/最高”“刚才某区间跑了多次”是DISCUSSION历史回顾，不是MAP/SETUP；证据必须保留原意，不能截掉方才/如果后激活价格。无方向的“按照文章计划4120动手”且没有文章内容时UNKNOWN，不得猜BUY。price使用JSON number；若短尾数数量级确实缺失可null，由本地证据校验决定是否能补全。"""
 
 
 class AIError(RuntimeError):
@@ -127,8 +130,8 @@ class DeepSeek:
             return value
         request_data=translate({'targets':targets,'context':context,'market_anchor':anchor,
                                'earlier_full_levels':levels,'previous_scene':previous_scene or {}},aliases)
-        payload = {'model': self.config['ai_model'], 'thinking': {'type':'disabled'},
-            'messages': [{'role':'system','content':SYSTEM+(SCENE_PROMPT if scene_requested else '\n本批没有老师新消息，只返回interpretations，不得输出或更新scene。')+
+        payload = {'model': self.config['ai_model'], 'thinking': {'type':'disabled'}, 'temperature':0,
+            'messages': [{'role':'system','content':SYSTEM+(SCENE_PROMPT+(RANGE_INFERENCE_PROMPT if not self.config.get('teacher_only') else '') if scene_requested else '\n本批没有老师新消息，只返回interpretations，不得输出或更新scene。')+
                           '\n所有消息引用字段必须原样使用本次输入的r001等短编号，不要编造、改写或沿用上次编号。interpretations.id仍使用对应target.id。'},
                          {'role':'user','content':json.dumps(request_data,ensure_ascii=False)}],
             'response_format': {'type':'json_object'}, 'max_tokens': 4800}
@@ -204,6 +207,9 @@ def context_basis(history, target):
             kind in ('CANCEL','CLOSE','MODIFY') or
             re.search(r'取消|作废|撤销|暂停|不做了|别做|不要做|不做多|不做空|先别|止损|止盈|平仓',text)):
             basis=None
+        elif (not follow and direction_fragment(text) and not item.get('deleted') and
+              0<=stamp(target.get('time',0))-stamp(item.get('time',0))<=300):
+            basis=dict(item,interpretation=dict(kind='WATCH',plans=[dict(side=direction_fragment(text))]))
         elif kind=='SETUP' or follow and same and kind=='MEMBER_TRADE' and value.get('plans'):
             plans=value.get('plans',[])
             basis=item if len(plans)==1 else None
@@ -272,6 +278,8 @@ def validate_output(result, targets, anchor, context=None):
             raise AIError('群友仅允许更新已授权的完整点位地图')
         if row['kind']=='SETUP' and re.search(r'历史|晒单|转发|假设|开玩笑|忽略.{0,10}(规则|指令)',text):
             raise AIError('历史/转发或程序指令不能变成新入场')
+        if row['kind'] in ('SETUP','MAP') and non_current_evidence(text,text):
+            raise AIError('复盘/假设不能更新当前入场或地图')
         if row['kind']=='CANCEL' and (row['cancel_side']=='NONE' or not re.search(r'取消|作废|撤销|不做了|不做多|不做空|别做多|别做空|暂停',text)):
             raise AIError('取消缺少原文证据')
         if row['kind']=='MAP':
@@ -315,10 +323,15 @@ def validate_output(result, targets, anchor, context=None):
                    for t in re.finditer(numeric,text)):
                 raise AIError('指标周期不能当作入场报价')
             price=plan['price']
+            resolved=resolve_token(token,expected[mid].get('market_anchor',anchor) or
+                                   (float(token) if re.fullmatch(r'\d{4,5}(?:\.\d{1,2})?',token) else 0))
+            if price is None or isinstance(price,str) and re.fullmatch(r'\d+(?:\.\d+)?',price) and abs(float(price)-resolved)<=0.001:
+                price=resolved
             if isinstance(price,bool) or not isinstance(price,(int,float)) or not math.isfinite(price):
                 raise AIError('AI价格不是有效数字')
-            if abs(price-resolve_token(token,expected[mid].get("market_anchor",anchor)))>0.001:
+            if abs(price-resolved)>0.001:
                 raise AIError('AI补全价格未通过本地复核')
+            plan['price']=resolved
             if plan['mode']=='MARKET' and not re.search(r'现价|市价|直接.{0,3}(进|买|卖|多|空)',text):
                 raise AIError('AI不得把参考点位变成市价喊单')
             pair=(plan['side'],price)
