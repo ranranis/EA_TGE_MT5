@@ -145,22 +145,33 @@ bool LimitParametersMatch(const int slot,const int plan)
           MathAbs(tp-teacherLimits[slot].tp)<TickSize()*0.5 &&
           aiPlans[plan].first==teacherLimits[slot].first && aiPlans[plan].breakeven==teacherLimits[slot].be;
 }
+bool LimitTooFar(const double level,const int sign,const MqlTick &q)
+{
+   // 使用当前可成交一侧报价；50表示黄金价格差50.00，不是50个_Point。
+   return MathAbs(level-(sign>0 ? q.ask : q.bid))>挂单最大离价+1e-8;
+}
 void SyncTeacherLimits()
 {
    bool settled=true;
    for(int i=0;i<4;i++) if(!ReconcileLimitSlot(i)) settled=false;
    if(!CanExecute() || pending.kind!=0) return;
    if(!settled) { reason="老师挂单尚在对账，暂停新增"; return; }
-   // 来源取消、编辑、改价或通道失效：先撤本模块的未成交单，确认后才补新计划。
+   MqlTick q;
+   bool quoteOK=FreshQuote(q);
+   // 超距以及来源取消、编辑、改价或通道失效：先撤本模块的未成交单，确认后才补新计划。
    for(int i=0;i<4;i++)
    {
       if(teacherLimits[i].state==0) continue;
       int plan=LimitPlanIndex(teacherLimits[i].source);
-      if(teacherLimits[i].state==3 || plan<0 || !LimitParametersMatch(i,plan))
+      bool tooFar=quoteOK && LimitTooFar(teacherLimits[i].level,teacherLimits[i].sign,q);
+      if(teacherLimits[i].state==3 || plan<0 || !LimitParametersMatch(i,plan) || tooFar)
       {
          if(TimeCurrent()<teacherLimits[i].retry) return;
          teacherLimits[i].state=3; teacherLimits[i].retry=TimeCurrent()+5;
          if(!SaveLimitSlot(i)) return;
+         reason=tooFar ? "老师挂单距现价超过"+DoubleToString(挂单最大离价,2)+"，撤单等待回近" : "老师挂单撤销待确认";
+         if(plan>=0) aiPlans[plan].status=reason;
+         DecisionLog("LIMIT_CANCEL",reason,0,teacherLimits[i].order);
          execution.OrderDelete(teacherLimits[i].order);
          PrintFormat("[T哥限价撤单] order=%I64u ret=%u 等待服务器确认",teacherLimits[i].order,execution.ResultRetcode());
          return;
@@ -169,8 +180,7 @@ void SyncTeacherLimits()
    }
    if(!AIChannelReady() || aiMode!="SETUP") { reason="等待T哥明确点位与方向："+aiReason; return; }
    reason="T哥限价计划在线，等待券商撮合；不追市价";
-   MqlTick q;
-   if(!FreshQuote(q) || q.ask-q.bid>最大点差价格) { reason="行情/点差异常，不新增挂单"; return; }
+   if(!quoteOK || q.ask-q.bid>最大点差价格) { reason="行情/点差异常，不新增挂单"; return; }
    if(!ExactLot(TEACHER_LIMIT_LOTS)) { reason="券商不支持固定0.02手"; return; }
    if((SymbolInfoInteger(_Symbol,SYMBOL_ORDER_MODE)&SYMBOL_ORDER_LIMIT)==0) { reason="品种不支持限价挂单"; return; }
    int active=0,empty=-1;
@@ -183,6 +193,11 @@ void SyncTeacherLimits()
       for(int j=0;j<4;j++) if(teacherLimits[j].state!=0 && teacherLimits[j].source==source) exists=true;
       if(exists || Load("tlRetry"+IntegerToString((long)source))>TimeCurrent()) continue;
       if(Load(LimitDoneKey(source))>0) { aiPlans[i].status="本计划已成交，不重复挂单"; continue; }
+      if(LimitTooFar(aiPlans[i].level,aiPlans[i].sign,q))
+      {
+         aiPlans[i].status="距现价超过"+DoubleToString(挂单最大离价,2)+"，暂不挂单";
+         reason=aiPlans[i].status; continue;
+      }
       double price=Align(aiPlans[i].level,aiPlans[i].sign),sl=0,tp=0;
       if(MathAbs(price-aiPlans[i].level)>TickSize()*0.1) { aiPlans[i].status="点位不符合报价精度，待核对"; continue; }
       double distance=MathMax((double)SymbolInfoInteger(_Symbol,SYMBOL_TRADE_STOPS_LEVEL),
@@ -194,6 +209,7 @@ void SyncTeacherLimits()
       if(!OrderCalcMargin(aiPlans[i].sign>0 ? ORDER_TYPE_BUY : ORDER_TYPE_SELL,_Symbol,TEACHER_LIMIT_LOTS,price,margin) ||
          margin>AccountInfoDouble(ACCOUNT_MARGIN_FREE)) { aiPlans[i].status="保证金不足"; continue; }
       if(!CanExecute() || !FreshQuote(q) || q.ask-q.bid>最大点差价格 ||
+         LimitTooFar(price,aiPlans[i].sign,q) ||
          (aiPlans[i].sign>0 ? q.ask-price : price-q.bid)<distance)
       { aiPlans[i].status="提交前报价/权限变化，等待"; return; }
       ZeroMemory(teacherLimits[empty]); teacherLimits[empty].state=1; teacherLimits[empty].source=source;

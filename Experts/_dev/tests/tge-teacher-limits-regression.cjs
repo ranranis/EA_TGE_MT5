@@ -11,7 +11,7 @@ function broker(options={}){
  const keys=['ORDER_MAGIC','ORDER_TYPE','ORDER_TIME_SETUP','ORDER_STATE','ORDER_VOLUME_INITIAL','ORDER_VOLUME_CURRENT',
  'ORDER_SYMBOL','ORDER_COMMENT','DEAL_ORDER','DEAL_ENTRY','DEAL_MAGIC','DEAL_POSITION_ID','DEAL_VOLUME','DEAL_SYMBOL'];
  const enums=Object.fromEntries(keys.map((k,i)=>[k,i+10]));
- Object.assign(x,enums,{TEACHER_LIMIT_LOTS:.02,teacherLimits:Array.from({length:4},zero),最大同时持仓:3,
+ Object.assign(x,enums,{挂单最大离价:50,TEACHER_LIMIT_LOTS:.02,teacherLimits:Array.from({length:4},zero),最大同时持仓:3,
   EA魔法号:560056,_Point:.01,SYMBOL_ORDER_MODE:1,SYMBOL_ORDER_LIMIT:2,SYMBOL_TRADE_STOPS_LEVEL:3,SYMBOL_TRADE_FREEZE_LEVEL:4,
   ORDER_TYPE_BUY_LIMIT:5,ORDER_TYPE_SELL_LIMIT:6,ORDER_TIME_GTC:0,ORDER_STATE_FILLED:7,ORDER_STATE_CANCELED:8,ORDER_STATE_REJECTED:9,ORDER_STATE_EXPIRED:10,
   DEAL_ENTRY_IN:0,SymbolInfoInteger:(_,k)=>k===1?2:0,
@@ -48,7 +48,7 @@ function broker(options={}){
   PositionOpen:()=>{throw Error('market trading forbidden');}};
  for(const [n,a] of [['ExitKey','id'],['LimitTag','source'],['LimitSource','i'],['LimitDoneKey','source'],['SaveLimitSlot','i'],
   ['RestoreTeacherLimits',''],['LimitPlanIndex','source'],['LimitEntryPending','comment'],['BindLimitDeals','i,expected'],
-  ['ReconcileLimitSlot','i'],['LimitPrices','i'],['LimitParametersMatch','slot,plan'],['SyncTeacherLimits','']])install(x,n,a);
+  ['ReconcileLimitSlot','i'],['LimitPrices','i'],['LimitParametersMatch','slot,plan'],['LimitTooFar','level,sign,q'],['SyncTeacherLimits','']])install(x,n,a);
  return {...base,orders,history,deals,calls,finish};
 }
 test('BUY plan places exactly .02 limit with protective SL/TP; awaiting order does not lock management',()=>{
@@ -133,5 +133,40 @@ test('event entry graph calls limit sync only; legacy signal methods cannot exec
  const timer=body('OnTimer'),tick=body('OnTick');
  assert(timer.includes('SyncTeacherLimits()'));for(const x of ['AIMarketSignal','MemberFollowSignal','Signal(candidate)','Open('])assert(!timer.includes(x));
  assert(!tick.includes('Open('));assert(!tick.includes('AIMarketSignal'));
+});
+test('distance boundary uses Ask for BUY and Bid for SELL; configurable ceiling',()=>{
+ for(const sign of [1,-1])for(const gap of [49.99,50,50.01]){
+  const b=broker({plans:[{sign,level:4175,origin:'distance',created:990}]});
+  b.x.FreshQuote=q=>Object.assign(q,sign>0?{ask:4175+gap,bid:4174.9+gap}:{bid:4175-gap,ask:4175.1-gap});
+  b.x.SyncTeacherLimits();assert.equal(b.calls.length,gap<=50?1:0);
+  if(gap>50)assert.match(b.x.aiPlans[0].status,/暂不挂单/);
+ }
+ const b=broker();b.x.挂单最大离价=1;b.x.SyncTeacherLimits();assert.equal(b.calls.length,0);
+});
+test('far pending is canceled, reconciled, and may rehang only after returning near',()=>{
+ for(const sign of [1,-1]){
+  const b=broker({plans:[{sign,level:4175,origin:'return',created:990}]});
+  const near=q=>Object.assign(q,sign>0?{ask:4176.1,bid:4176}:{ask:4174.1,bid:4174});
+  b.x.FreshQuote=near;b.x.SyncTeacherLimits();
+  b.x.FreshQuote=q=>Object.assign(q,sign>0?{ask:4225.1,bid:4225}:{ask:4125,bid:4124.9});
+  b.x.SyncTeacherLimits();assert.equal(b.calls[1].cancel,200);assert.equal(b.x.teacherLimits[0].state,3);
+  b.x.SyncTeacherLimits();assert.equal(b.calls.length,2);assert.equal(b.x.teacherLimits[0].state,0);
+  b.x.FreshQuote=near;b.x.SyncTeacherLimits();assert.equal(b.calls.length,3);
+ }
+});
+test('stale quote cannot cause distance cancellation or new orders',()=>{
+ const b=broker();b.x.SyncTeacherLimits();
+ b.x.FreshQuote=q=>{Object.assign(q,{ask:4300,bid:4299.9});return false;};
+ b.x.SyncTeacherLimits();assert.equal(b.calls.length,1);assert.equal(b.orders.size,1);
+});
+test('submit-time quote crossing distance ceiling prevents new request',()=>{
+ const b=broker();let n=0;
+ b.x.FreshQuote=q=>Object.assign(q,++n===1?{ask:4176.1,bid:4176}:{ask:4225.1,bid:4225});
+ b.x.SyncTeacherLimits();assert.equal(b.calls.length,0);
+});
+test('distance cancel racing a fill preserves position exit binding and consumed plan',()=>{
+ const b=broker({cancelRace:true});b.x.SyncTeacherLimits();
+ b.x.FreshQuote=q=>Object.assign(q,{ask:4225.1,bid:4225});b.x.SyncTeacherLimits();b.x.SyncTeacherLimits();
+ assert.equal(b.memory['exit1100.ready'],1);assert.equal(b.calls.filter(c=>c.volume).length,1);
 });
 console.log(checks+' teacher-only limit checks passed');

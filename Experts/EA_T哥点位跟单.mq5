@@ -1,5 +1,5 @@
 #property strict
-#property version "1.40"
+#property version "1.41"
 #property description "仅T哥直接价格方向 / 固定0.02手限价挂单 / 地图仅展示。独立Magic，仅管理本EA持仓。"
 #include <Trade/Trade.mqh>
 #include <Canvas/Canvas.mqh>
@@ -11,6 +11,7 @@ input group "执行与仓位"
 input bool   启用真实交易=true;        // 默认执行交易；手动关闭时仅观察，不发送交易请求
 const double 每次开仓手数=0.02; // T哥限价固定手数，不从旧set继承其他手数
 input int    最大同时持仓=3;
+input double 挂单最大离价=50.0;        // 与当前Ask/Buy、Bid/Sell的价格差；超出则撤挂并等待
 input double 最大点差价格=0.50;         // 黄金报价价格差，不是_Point倍数
 input ulong  EA魔法号=560056;
 input bool   读取AI即时策略=true;     // 读取本地DeepSeek语义桥；未就绪时等待，不猜方向
@@ -1523,7 +1524,7 @@ void Panel()
    panelCanvas.FillRectangle(0,0,UIPx(559),UIPx(39),UIInk(UI_HEADER));
    string pageTitle=uiStatistics ? "交易统计" : uiIndicators ? "看盘设置" : "T哥点位监控";
    UIText(_Symbol+" · "+pageTitle,16,10,222,11,UI_TEXT);
-   UIText("v1.40",242,13,40,8,UI_DIM);
+   UIText("v1.41",242,13,40,8,UI_DIM);
    UIText(TimeToString(TimeGMT()+8*3600,TIME_SECONDS),286,12,100,10,UI_MUTED,true);
    UIButton(uiCollapsed ? "+" : "−",396,7,30,1);
    UIText(启用真实交易 ? "交易模式" : "观察模式",434,13,110,9,启用真实交易 ? UI_ACCENT : UI_WARN,true);
@@ -1649,6 +1650,7 @@ int OnInit()
       冲击短窗毫秒<1000 || 冲击短窗毫秒>10000 || !MathIsValidNumber(逆向冲击速度) || 逆向冲击速度<=0 ||
        !MathIsValidNumber(冲击单向比例) || 冲击单向比例<=0.5 || 冲击单向比例>1 ||
        !MathIsValidNumber(恢复回拉价格) || 恢复回拉价格<=0 ||
+       !MathIsValidNumber(挂单最大离价) || 挂单最大离价<=0 ||
        最大点差价格<=0 || 学员最大追价价格差<=0 || !MathIsValidNumber(学员最大追价价格差) ||
        学员最大回落价格差<=0 || !MathIsValidNumber(学员最大回落价格差) ||
       保险价格距离<=0 || 首批止盈价格距离<=0 || 尾仓目标价格距离<=首批止盈价格距离 ||
