@@ -174,5 +174,62 @@ class ExecutionTests(unittest.TestCase):
         self.assertFalse(any(r[2]=='DIRECT' for r in self.feed(protocol=7)[1:-1]))
 
 
+    def test_v7_ai_outage_keeps_verified_plans_without_renewing(self):
+        self.scene()
+        before=self.feed(protocol=7)
+        self.seed(mid='pending',text='上去93可空',age=0)
+        with self.db:
+            set_state(self.db,'deepseek_status',dict(online=False,error='HTTP 503'))
+        after=self.feed(protocol=7)
+        self.assertEqual(after[0][3],'1')
+        self.assertIn('沿用已确认点位',after[0][6])
+        self.assertEqual(before[1:],after[1:])
+        self.assertEqual(self.feed(protocol=6)[0][3],'0')  # 旧协议保持旧行为。
+
+    def test_v7_pending_cancel_blocks_even_during_ai_outage(self):
+        self.scene()
+        for text in ('取消多单参考','暂停交易','这些点位作废'):
+            with self.subTest(text=text):
+                self.seed(mid='cancel',text=text,age=0)
+                rows=self.feed(protocol=7)
+                self.assertEqual(rows[0][3],'0')
+                self.assertIn('撤销',rows[0][6])
+
+    def test_v7_outage_cannot_bypass_manual_pause_sync_or_review(self):
+        self.scene()
+        self.seed(mid='pending',text='上去93可空',age=0)
+        self.assertEqual(self.feed(paused=True,protocol=7)[0][3],'0')
+        self.assertEqual(self.feed(now=self.now+500,protocol=7)[0][3],'0')
+        with self.db:
+            set_state(self.db,'deepseek_review',dict(message_id='pending',created=self.now))
+        self.assertEqual(self.feed(protocol=7)[0][3],'0')
+
+    def test_v7_no_confirmed_data_cannot_become_an_active_plan(self):
+        self.seed(mid='pending',text='上去93可空',age=0)
+        rows=self.feed(protocol=7)
+        self.assertEqual(rows[0][3],'0')
+        self.assertEqual(rows[-1],['END','0'])
+
+    def test_v7_ai_outage_still_removes_withdrawn_source(self):
+        self.scene()
+        self.seed(mid='pending',text='上去93可空',age=0)
+        mid=state(self.db,'teacher_scene')['inner_range']['low']['message_id']
+        raw=json.loads(self.db.execute('SELECT raw FROM messages WHERE message_id=?',(mid,)).fetchone()[0])
+        ingest(self.db,self.c['chat_id'],[dict(raw,deleted=True)])
+        rows=self.feed(protocol=7)
+        self.assertFalse(any(r[2] in ('INNER','OUTER') for r in rows[1:-1]))
+
+    def test_v7_map_survives_ai_outage_with_original_identity_and_time(self):
+        self.seed(mid='map',text='4150--4160--4175',age=100)
+        refresh_levels(self.db,self.c,self.now)
+        before=self.feed(protocol=7)
+        self.seed(mid='pending',text='上去93可空',age=0)
+        with self.db:
+            set_state(self.db,'deepseek_status',dict(online=False,error='TimeoutError'))
+        after=self.feed(protocol=7)
+        self.assertEqual(after[0][3],'1')
+        self.assertEqual(before[1:],after[1:])
+
+
 if __name__=='__main__':
     unittest.main()

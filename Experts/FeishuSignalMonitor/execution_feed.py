@@ -2,8 +2,10 @@
 import csv
 import hashlib
 import io
+import json
+import re
 from store import state
-from deepseek_ai import lane_readiness, refs_current
+from deepseek_ai import lane_readiness, refs_current, pending_window_start
 
 
 def execution_csv(db, c, now, paused, context, map_active, levels, ai, protocol=6):
@@ -16,8 +18,31 @@ def execution_csv(db, c, now, paused, context, map_active, levels, ai, protocol=
     setup = state(db, 'deepseek_setup', {})
     ready = not c.get('ai_enabled') or lane_readiness(db, c, now)['teacher_ready']
     reviewing = bool(review.get('message_id') and review.get('created', 0) >= setup.get('created', 0))
-    active = bool(healthy and ready and not reviewing)
-    note = '点位触价：明确方向8 / 区间6 / 地图5' if active else '暂停：同步、待解析或语义待确认'
+    # TGA7只让AI提供已校验数据，不让请求超时/排队冻结已有参考。
+    # 待解析的明确取消/暂停先阻断，不能在AI故障期间忽略老师撤销意图。
+    cancel_pending = False
+    if protocol == 7 and not ready:
+        pending = db.execute('''SELECT m.raw FROM messages m LEFT JOIN ai_messages a
+            ON a.chat_id=m.chat_id AND a.message_id=m.message_id AND a.revision=m.revision
+            WHERE m.chat_id=? AND m.sender=? AND m.historical=0 AND m.deleted=0
+            AND m.created>=? AND m.created<=? AND (a.status IS NULL OR a.status='RETRY')''',
+            (c['chat_id'], c['teacher_sender_id'], pending_window_start(db, now), now+5))
+        for row in pending:
+            text = json.loads(row['raw']).get('content', '')
+            if isinstance(text, str) and re.search(r'取消|作废|撤销|不做了|不做多|不做空|别做多|别做空|暂停|失效|无效', text):
+                cancel_pending = True
+                break
+    active = bool(healthy and not reviewing and (not cancel_pending if protocol == 7 else ready))
+    fallback = bool(protocol == 7 and c.get('ai_enabled') and
+                    (not ready or state(db, 'deepseek_status', {}).get('online') is False))
+    if not healthy:
+        note = '暂停：监控已暂停或飞书同步异常'
+    elif reviewing or cancel_pending:
+        note = '暂停：老师撤销/语义待确认'
+    elif active and fallback:
+        note = 'AI待解析或暂不可用；沿用已确认点位'
+    else:
+        note = '点位触价：明确方向8 / 区间6 / 地图5' if active else '暂停：等待AI解析'
     rows = []
 
     def add(kind, priority, side, price, source, revision, created, group, exits=None, confirmed=None, mode='REFERENCE'):
@@ -69,6 +94,9 @@ def execution_csv(db, c, now, paused, context, map_active, levels, ai, protocol=
         group = 'MAP|'+'|'.join(f'{v:g}' for v in levels)
         for price in levels:
             add('MAP', 5, 'AUTO', price, context['message_id'], context['revision'], context['created'], group)
+    if protocol == 7 and active and not rows:
+        active = False
+        note = '等待已确认点位'
     rows.sort(key=lambda row: (-row[3], -row[8], row[5], row[4]))
     output = io.StringIO(newline='')
     writer = csv.writer(output, lineterminator='\r\n')

@@ -1,5 +1,5 @@
 #property strict
-#property version "1.44"
+#property version "1.45"
 #property description "T哥点位触价 / 明确方向8·区间6·地图5 / 0.02手。独立Magic，仅管理本EA持仓。"
 #include <Trade/Trade.mqh>
 #include <Canvas/Canvas.mqh>
@@ -1179,7 +1179,7 @@ void Panel()
    panelCanvas.FillRectangle(0,0,UIPx(559),UIPx(39),UIInk(UI_HEADER));
    string pageTitle=uiStatistics ? "交易统计" : uiIndicators ? "看盘设置" : "T哥点位监控";
    UIText(_Symbol+" · "+pageTitle,16,10,222,11,UI_TEXT);
-   UIText("v1.44",242,13,40,8,UI_DIM);
+   UIText("v1.45",242,13,40,8,UI_DIM);
    UIText(TimeToString(TimeGMT()+8*3600,TIME_SECONDS),286,12,100,10,UI_MUTED,true);
    UIButton(uiCollapsed ? "+" : "−",396,7,30,1);
    UIText(启用真实交易 ? "交易模式" : "观察模式",434,13,110,9,启用真实交易 ? UI_ACCENT : UI_WARN,true);
@@ -1215,7 +1215,9 @@ void Panel()
    // 三类参考在同一块：明确方向卡片 -> 区间两端 -> 中性地图。
    UICard(12,heroY,536,heroHeight,UI_ROW);
    UIText("点位计划 · 明确8 / 区间6 / 地图5",28,heroY+12,380,11,UI_TEXT);
-   UIText(AIChannelReady() ? "同步正常" : "已暂停",424,heroY+14,104,9,AIChannelReady() ? UI_ACCENT : UI_WARN,true);
+   bool fallback=AIChannelReady() && StringFind(aiReason,"沿用已确认点位")>=0;
+   UIText(AIChannelReady() ? (fallback ? "沿用已确认" : "同步正常") : "已暂停",424,heroY+14,104,9,
+          AIChannelReady() && !fallback ? UI_ACCENT : UI_WARN,true);
    int card=0;
    for(int i=0;i<ArraySize(aiPlans);i++)
    {

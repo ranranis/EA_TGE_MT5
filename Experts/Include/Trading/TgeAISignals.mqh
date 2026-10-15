@@ -349,5 +349,10 @@ bool AIMarketSignal(Candidate &out)
    reason=out.method; entryView.level=out.level; entryView.direction=out.direction; entryView.method=out.method;
    return true;
 }
-string AIPlanCaption() { return AIChannelReady() ? "触价±1.00 · 每次0.02手 · 优先级8 / 6 / 5" : "暂停新单："+aiReason; }
+string AIPlanCaption()
+{
+   if(!AIChannelReady()) return "暂停新单："+aiReason;
+   if(StringFind(aiReason,"沿用已确认点位")>=0) return "AI暂未完成更新 · 沿用已确认点位 · 原失效规则仍生效";
+   return "触价±1.00 · 每次0.02手 · 优先级8 / 6 / 5";
+}
 #endif
