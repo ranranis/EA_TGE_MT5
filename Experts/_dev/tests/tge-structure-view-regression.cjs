@@ -6,6 +6,13 @@ base=base.replace('uiIndicatorHandles:Array(16)','uiIndicatorHandles:Array(20)')
 .replace('ENUM_TIMEFRAMES|ENUM_MA_METHOD','datetime|ENUM_LINE_STYLE|ENUM_TIMEFRAMES|ENUM_MA_METHOD')
 .replace('MODE_SMA:0,','STYLE_SOLID:0,STYLE_DASH:1,STYLE_DOT:2,看盘框体周期:5,看盘近期框根数:5,看盘震荡最少根数:12,看盘震荡ATR倍数:1.5,看盘收缩比较根数:100,看盘收缩低位百分比:20,EnumToString:()=> "PERIOD_M5",StringReplace:()=>0,MODE_SMA:0,');
 const cases=`
+// IndicatorRelease deliberately does not run OnDeinit: chart objects have an independent lifetime.
+const structureObjects=new Set(),redrawObjects=[];
+cx.ObjectsDeleteAll=(_,prefix)=>{
+ let count=0;for(const name of structureObjects)if(name.startsWith(prefix)){structureObjects.delete(name);count++;}
+ return count;
+};
+cx.ChartRedraw=()=>redrawObjects.push([...structureObjects]);
 check('four buttons attach distinct display resources; teacher bit is unchanged',()=>{
  cx.uiPointLines=true;
  for(let i=0;i<4;i++){
@@ -38,6 +45,43 @@ check('load failure retains existing views; removing structure releases handles'
  const h=cx.uiIndicatorHandles[17];cx.UIIndicatorSet(17,false);
  assert(released.includes(h));assert.equal(cx.UIIndicatorWindow(17),-1);
 });
+check('one click removes every owned structure object before redraw, preserving other drawings',()=>{
+ cx.CloseViewIndicators();structureObjects.clear();
+ const foreign=['user.box','TGUI.99.V16 近期K线框.S.box',cx.UIIndicatorName(16)+'.S-other'];
+ foreign.forEach(name=>structureObjects.add(name));
+ const suffixes=['box','mid','high','low','confirmed','readout','note0','note1','note2'];
+ for(let i=16;i<20;i++){
+  cx.ViewAction(i+84);assert(cx.UIIndicatorWindow(i)>=0);
+  suffixes.forEach(suffix=>structureObjects.add(cx.UIIndicatorName(i)+'.S.'+suffix));
+ }
+ for(let i=16;i<20;i++){
+  const prefix=cx.UIIndicatorName(i)+'.S.',handle=cx.uiIndicatorHandles[i];
+  redrawObjects.length=0;cx.ViewAction(i+84);
+  assert.equal(cx.UIIndicatorWindow(i),-1);assert.equal(cx.uiIndicatorHandles[i],-1);assert(released.includes(handle));
+  assert(![...structureObjects].some(name=>name.startsWith(prefix)),'first OFF must remove drawings');
+  assert(redrawObjects.length>0);assert(redrawObjects.every(frame=>!frame.some(name=>name.startsWith(prefix))),'no stale OFF frame');
+  for(let j=i+1;j<20;j++)assert(structureObjects.has(cx.UIIndicatorName(j)+'.S.box'));
+  foreign.forEach(name=>assert(structureObjects.has(name)));
+ }
+});
+check('failed detach preserves drawings; disabling an already detached helper cleans orphans',()=>{
+ cx.UIIndicatorSet(17,true);
+ const name=cx.UIIndicatorName(17)+'.S.box',handle=cx.uiIndicatorHandles[17];structureObjects.add(name);
+ failDelete=true;assert.equal(cx.UIIndicatorSet(17,false),false);failDelete=false;
+ assert(cx.UIIndicatorWindow(17)>=0);assert.equal(cx.uiIndicatorHandles[17],handle);
+ assert(structureObjects.has(name));assert(!released.includes(handle));
+ assert(cx.UIIndicatorSet(17,false));assert(!structureObjects.has(name));
+ structureObjects.add(name);assert(cx.UIIndicatorSet(17,false));assert(!structureObjects.has(name));
+});
+check('clear indicators uses the same synchronous structure cleanup',()=>{
+ for(let i=16;i<20;i++){cx.UIIndicatorSet(i,true);structureObjects.add(cx.UIIndicatorName(i)+'.S.note0');}
+ cx.ViewAction(93);
+ for(let i=16;i<20;i++){
+  assert.equal(cx.UIIndicatorWindow(i),-1);
+  assert(!structureObjects.has(cx.UIIndicatorName(i)+'.S.note0'));
+ }
+});
+
 check('moving average styles include named width and pattern parameters',()=>{
  for(const i of [0,6,1,7,8,9,10,11]){
   assert(cx.UIIndicatorSet(i,true));const p=indicatorHandles.get(cx.uiIndicatorHandles[i]).parameters;

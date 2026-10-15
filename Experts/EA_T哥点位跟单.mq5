@@ -1,5 +1,5 @@
 #property strict
-#property version "1.50"
+#property version "1.51"
 #property description "T哥点位触价 / 明确方向8·区间6·地图5 / 0.02手。独立Magic，仅管理本EA持仓。"
 #include <Trade/Trade.mqh>
 #include <Canvas/Canvas.mqh>
@@ -807,12 +807,18 @@ bool UIIndicatorSet(const int index,const bool enabled)
    {
       if(!ChartIndicatorDelete(0,window,UIIndicatorName(index)))
       { uiIndicatorNotice=UIIndicatorLabel(index)+"关闭失败："+IntegerToString(GetLastError()); Print(uiIndicatorNotice); return false; }
-      ChartRedraw(0);
       if(UIIndicatorWindow(index)>=0) return false;
    }
    if(uiIndicatorHandles[index]!=INVALID_HANDLE) IndicatorRelease(uiIndicatorHandles[index]);
    uiIndicatorHandles[index]=INVALID_HANDLE;
-   if(!enabled) return true;
+   if(!enabled)
+   {
+      // 结构框与文字是独立图表对象，关闭时立即清理，不等待指标的OnDeinit。
+      // 指标已被手动移除时也清理残留；删除失败则在上方返回，保留原显示。
+      if(index>=16) ObjectsDeleteAll(0,UIIndicatorName(index)+".S.");
+      ChartRedraw(0);
+      return true;
+   }
    bool overlay=!UIIsOscillator(index);
    int kind=overlay ? (index>=10 ? index-7 : index==2 ? 2 : index==0 ? 0 : 1) : index>=14 ? index-11 : index-3;
    ENUM_MA_METHOD method=index==0 ? 看盘主均线算法 : 看盘辅助均线算法;
@@ -1260,7 +1266,7 @@ void Panel()
    panelCanvas.FillRectangle(0,0,UIPx(559),UIPx(39),UIInk(UI_HEADER));
    string pageTitle=uiStatistics ? "交易统计" : uiIndicators ? "看盘设置" : "T哥点位监控";
    UIText(_Symbol+" · "+pageTitle,16,10,222,11,UI_TEXT);
-   UIText("v1.50",242,13,40,8,UI_DIM);
+   UIText("v1.51",242,13,40,8,UI_DIM);
    UIText(TimeToString(TimeGMT()+8*3600,TIME_SECONDS),286,12,100,10,UI_MUTED,true);
    UIButton(uiCollapsed ? "+" : "−",396,7,30,1);
    UIButton(tradeMode ? "交易模式" : "观察模式",434,7,110,29,tradeMode);
