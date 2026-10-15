@@ -155,17 +155,24 @@ void SyncTgeMobileMarkers()
    ulong ms=GetTickCount64();
    if(!markerDirty && markerLastMs>0 && ms-markerLastMs<5000) return;
    markerLastMs=ms; markerDirty=false;
-   if(!TgeMarkerCanRequest()) { markerStatus="等待交易权限/实例锁"; return; }
+   if(!TgeMarkerCanRequest())
+   {
+      markerStatus=!启用真实交易 ? "观察模式不挂单" : markerLock==INVALID_HANDLE ? "等待标记实例锁" :
+                   EA魔法号==(ulong)手机标记挂单Magic ? "标记Magic冲突" : "等待交易权限/状态";
+      return;
+   }
    bool createReady=ReconcileTgeMarkerCreation();
    double markerLevels[]; ArrayCopy(markerLevels,levels);
-   if(读取AI即时策略 && aiReady && aiMode=="SETUP")
+   // aiPlans/levels仅在完整快照校验成功后替换；执行暂停时仍展示最后一份已校验点位。
+   if(读取AI即时策略 && aiMode=="SETUP")
       for(int i=0;i<ArraySize(aiPlans);i++)
       {
          bool exists=false;
          for(int j=0;j<ArraySize(markerLevels);j++) if(MathAbs(markerLevels[j]-aiPlans[i].level)<TickSize()*0.5) exists=true;
          if(!exists) { int n=ArraySize(markerLevels); ArrayResize(markerLevels,n+1); markerLevels[n]=aiPlans[i].level; }
       }
-   bool enabled=启用手机标记挂单 && uiMobileMarkers && feedActive && ArraySize(markerLevels)>0;
+   // 手机标记属于展示，不使用策略入场的feedActive/有效期门槛。
+   bool enabled=启用手机标记挂单 && uiMobileMarkers && ArraySize(markerLevels)>0;
    bool otherTrade=TgeMarkerHasOtherTrade();
    MqlTick q; bool fresh=FreshQuote(q);
    double price=TickSize()>0 ? NormalizeDouble(MathRound(手机标记挂单固定价格/TickSize())*TickSize(),_Digits) : 0;
@@ -177,8 +184,9 @@ void SyncTgeMobileMarkers()
    {
       CancelTgeMobileMarkers();
       bool retired=ReconcileMobileMarkerDeletes();
-      markerStatus=markerUnexpectedPosition ? "标记意外成交，需人工核对" : !retired || !createReady ? "正在撤销/核对标记" : !enabled ? "手机TP标记已关闭/暂停" :
-                   otherTrade || pending.kind!=0 ? "已有交易，标记已撤" : "品种/价格/手数不适合标记";
+      markerStatus=markerUnexpectedPosition ? "标记意外成交，需人工核对" : !retired || !createReady ? "正在撤销/核对标记" : !启用手机标记挂单 || !uiMobileMarkers ? "手机TP开关已关闭" :
+                   ArraySize(markerLevels)==0 ? "等待已校验点位" :
+                   otherTrade ? "已有交易，标记已撤" : pending.kind!=0 ? "交易请求待确认" : "品种/价格/手数不适合标记";
       return;
    }
    if(!fresh) { markerStatus="等待新鲜报价，不创建标记"; return; }

@@ -1,7 +1,7 @@
 // 执行生产MQL函数体；合成tick/历史/券商桩，不连接终端、不产生真实订单。
 const fs=require('node:fs'),path=require('node:path'),vm=require('node:vm'),assert=require('node:assert/strict');
 const root=path.resolve(__dirname,'../..');
-const sources=['EA_T哥点位跟单.mq5','Include/Trading/TgeAISignals.mqh','Include/Trading/TgeTeacherLimits.mqh'].map(p=>fs.readFileSync(path.join(root,p),'utf8'));
+const sources=['EA_T哥点位跟单.mq5','Include/Trading/TgeAISignals.mqh','Include/Trading/TgeTeacherLimits.mqh','Include/Trading/TgeMobileMarkers.mqh'].map(p=>fs.readFileSync(path.join(root,p),'utf8'));
 function body(name){
  const re=new RegExp('^(?:void|bool|int|uint|ulong|double|string) '+name+'\\(','m');
  const src=sources.find(s=>re.test(s));assert(src,name);
@@ -11,8 +11,8 @@ function body(name){
 }
 function install(x,name,args='',ref=false){
  let s=body(name).replace(/\((?:int|long|uint|ulong|double|datetime|ENUM_ORDER_TYPE)\)/g,'')
- .replace(/\b(?:string|double|AIPlan|MqlRates) (\w+)\[\],(\w+)\[\];/g,'let $1=[], $2=[];')
- .replace(/\b(?:string|double|AIPlan|MqlRates) (\w+)\[\];/g,'let $1=[];')
+ .replace(/\b(?:string|double|bool|AIPlan|MqlRates) (\w+)\[\],(\w+)\[\];/g,'let $1=[], $2=[];')
+ .replace(/\b(?:string|double|bool|AIPlan|MqlRates) (\w+)\[\];/g,'let $1=[];')
  .replace(/\b(?:MqlTick|Candidate) (\w+);/g,'let $1={};')
  .replace(/\b(?:const )?(?:bool|int|uint|ulong|long|ushort|double|string|datetime|ENUM_ORDER_TYPE)\s+/g,'let ')
  .replace('TickImpact(sign,q.time_msc,speed,oneway,pullback)',
@@ -187,6 +187,61 @@ test('篡改重申为未来/早于原消息、旧协议都拒绝',()=>{
  for(const lines of [csv.map((r,i)=>i===0?r.replace('TGA,7','TGA,6'):r),csv.map((r,i)=>{if(i!==1)return r;const a=r.split(',');a[14]=Number(csv[0].split(',')[2])+100;return a.join(',');}),
  csv.map((r,i)=>{if(i!==1)return r;const a=r.split(',');a[14]=1;return a.join(',');})]){
  const {x,setNow}=env();setNow(Number(csv[0].split(',')[2]));file(x,lines);assert(!x.ReadAISetups());
+ }
+});
+
+
+// 手机TP：执行生产同步函数，所有券商动作均为本地桩。
+function markerEnv(){
+ const e=env(),x=e.x;
+ Object.assign(x,{
+  markerDirty:true,markerLastMs:0,markerStatus:'',markerUnexpectedPosition:false,
+  markerLock:1,启用真实交易:true,启用手机标记挂单:true,uiMobileMarkers:true,
+  手机标记挂单Magic:910406,手机标记挂单固定价格:100,TGE_MARKER_VOLUME:.01,TGE_MARKER_DANGER:20,
+  GetTickCount64:()=>10000,TgeMarkerCanRequest:()=>true,ReconcileTgeMarkerCreation:()=>true,
+  TgeMarkerHasOtherTrade:()=>false,ReconcileMobileMarkerDeletes:()=>true,
+  CancelTgeMobileMarkers:()=>e.calls.push(['cancel']),
+  SubmitTgeMobileMarker:(price,target)=>{e.calls.push(['marker',price,target]);return true;},
+  SymbolInfoInteger:()=>1,SYMBOL_TRADE_STOPS_LEVEL:0,_Point:.01,
+  SYMBOL_ORDER_MODE:1,SYMBOL_ORDER_LIMIT:1,SYMBOL_EXPIRATION_MODE:2,SYMBOL_EXPIRATION_GTC:1,
+  NormalizeDouble:v=>v,MathRound:Math.round,ArrayInitialize:(a,v)=>a.fill(v),
+  StringFormat:(s,...args)=>s.replace(/%d/g,()=>args.shift())
+ });
+ install(x,'SyncTgeMobileMarkers');return e;
+}
+test('执行暂停仍展示地图和方向点位，不发送策略开仓',()=>{
+ const e=markerEnv();e.x.aiReady=false;e.x.feedActive=false;e.x.healthPaused=true;
+ e.x.levels=[4150,4160];e.x.SyncTgeMobileMarkers();
+ assert.deepEqual(e.calls,[['marker',100,4150],['marker',100,4160],['marker',100,4175]]);
+});
+test('只有方向点位、没有地图，手机展示也可同步',()=>{
+ const e=markerEnv();e.x.aiReady=false;e.x.SyncTgeMobileMarkers();
+ assert.deepEqual(e.calls,[['marker',100,4175]]);
+});
+test('快照读取失败保留最后已校验展示点位；策略继续阻断',()=>{
+ const e=markerEnv();e.x.InvalidAI('坏快照');e.x.SyncTgeMobileMarkers();
+ assert.deepEqual(e.calls,[['marker',100,4175]]);assert(!e.x.AIChannelReady());
+});
+test('已校验空快照撤掉旧标记，报告等待点位',()=>{
+ const e=markerEnv();e.x.aiPlans=[];e.x.aiMode='WAIT';e.x.SyncTgeMobileMarkers();
+ assert.deepEqual(e.calls,[['cancel']]);assert.equal(e.x.markerStatus,'等待已校验点位');
+});
+test('手机开关关闭仍撤标记，不重新补发',()=>{
+ const e=markerEnv();e.x.uiMobileMarkers=false;e.x.SyncTgeMobileMarkers();
+ assert.deepEqual(e.calls,[['cancel']]);assert.equal(e.x.markerStatus,'手机TP开关已关闭');
+});
+test('真实持仓或交易请求期间仍不挂提示单',()=>{
+ for(const pending of [false,true]){
+  const e=markerEnv();if(pending)e.x.pending.kind=1;else e.x.TgeMarkerHasOtherTrade=()=>true;
+  e.x.SyncTgeMobileMarkers();assert.deepEqual(e.calls,[['cancel']]);
+  assert.equal(e.x.markerStatus,pending?'交易请求待确认':'已有交易，标记已撤');
+ }
+});
+test('交易权限关闭或报价失效时不发送标记请求',()=>{
+ for(const mode of ['permission','quote']){
+  const e=markerEnv();if(mode==='permission')e.x.TgeMarkerCanRequest=()=>false;else e.x.FreshQuote=()=>false;
+  e.x.SyncTgeMobileMarkers();assert.equal(e.calls.length,0);
+  assert.equal(e.x.markerStatus,mode==='permission'?'等待交易权限/状态':'等待新鲜报价，不创建标记');
  }
 });
 
