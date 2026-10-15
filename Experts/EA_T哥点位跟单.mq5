@@ -872,7 +872,8 @@ int UIViewMask()
 }
 int UIPresetMask(const int preset)
 {
-   if(preset==0) return (1<<10)|(1<<11)|(1<<12)|(1<<5)|(1<<16);
+   // 默认简洁看盘：点位、MA5、EMA20和前一交易日高低，避免辅助线互相覆盖。
+   if(preset==0) return (1<<0)|(1<<1)|(1<<13)|(1<<16);
    if(preset==1) return (1<<0)|(1<<6)|(1<<1)|(1<<3)|(1<<16);
    if(preset==2) return (1<<1)|(1<<7)|(1<<9)|(1<<14)|(1<<16);
    if(preset==3) return (1<<2)|(1<<13)|(1<<3)|(1<<16);
@@ -881,7 +882,7 @@ int UIPresetMask(const int preset)
 }
 string UIPresetLabel(const int preset)
 {
-   string names[6]={"T哥点位","短线节奏","趋势延续","区间震荡","动量确认","结构拐点"};
+   string names[6]={"简洁看盘","短线节奏","趋势延续","区间震荡","动量确认","结构拐点"};
    return names[preset];
 }
 string UICombinationText(const int mask)
