@@ -5,7 +5,7 @@ struct TgeStatsTrade
    ulong id,lastDeal;
    datetime openTime,closeTime;
    long magic;
-   int direction,entryDeals,exitDeals;
+   int direction,entryDeals,exitDeals,exitReason;
    bool mixed,reversed;
    double entryVolume,exitVolume,entryValue,exitValue;
    double gross,commission,swap,fee,net;
@@ -57,7 +57,7 @@ bool StatsPositionOpen(const ulong id)
 // 1=完整且范围匹配；0=尚未完整平仓/不属于筛选；-1=无法可靠分段；-2=查询失败。
 int StatsReadTrade(const ulong id,const datetime start,const datetime end,TgeStatsTrade &tr)
 {
-   ZeroMemory(tr); tr.id=id;
+   ZeroMemory(tr); tr.id=id; tr.exitReason=-1;
    if(StatsPositionOpen(id)) return 0;
    if(!HistorySelectByPosition(id)) return -2;
    for(int i=0;i<HistoryDealsTotal();i++)
@@ -88,7 +88,7 @@ int StatsReadTrade(const ulong id,const datetime start,const datetime end,TgeSta
       else if(entry==DEAL_ENTRY_OUT || entry==DEAL_ENTRY_OUT_BY)
       {
          tr.exitDeals++; tr.exitVolume+=volume; tr.exitValue+=volume*price;
-         if(at>tr.closeTime || (at==tr.closeTime && deal>tr.lastDeal)) { tr.closeTime=at; tr.lastDeal=deal; }
+         if(at>tr.closeTime || (at==tr.closeTime && deal>tr.lastDeal)) { tr.closeTime=at; tr.lastDeal=deal; tr.exitReason=(int)HistoryDealGetInteger(deal,DEAL_REASON); }
       }
       else if(entry==DEAL_ENTRY_INOUT) tr.reversed=true;
    }
@@ -181,89 +181,306 @@ void StatsRefresh()
    statsReview=MathMax(0,MathMin(statsReview,MathMax(included-1,0)));
    statsOK=true; statsDirty=false; statsStatus=included>0 ? "按完整平仓统计 · 含逐笔佣金/隔夜费/费用" : "此区间没有符合筛选的完整平仓记录";
 }
+
 string StatsMoney(const double value)
 {
-   return (value>0 ? "+" : "")+DoubleToString(value,2);
+   return (value>0.005 ? "+" : "")+DoubleToString(MathAbs(value)<0.005 ? 0 : value,2);
 }
 color StatsInk(const double value) { return value>0.005 ? UI_GAIN : value< -0.005 ? UI_LOSS : UI_MUTED; }
-// 只绘制缓存的完整平仓结果；图表不查询历史，也不参与交易决策。
-void StatsLine(const int row,const string left,const string right)
+
+// 选择只属于视图，以持仓ID跨刷新保持，不能让新增成交把索引指向另一笔。
+ulong statsSelectedId=0,statsPressedId=0;
+double statsCumulative[],statsDrawdowns[];
+int StatsSelectedIndex()
 {
-   int y=345+row*24;
-   string cells[2]={left,right};
-   for(int i=0;i<2;i++)
-   {
-      int x=24+i*270,split=StringFind(cells[i],"：");
-      string label=split>=0 ? StringSubstr(cells[i],0,split) : cells[i];
-      string value=split>=0 ? StringSubstr(cells[i],split+1) : "";
-      UIText(label,x,y,124,8.5,UI_MUTED);
-      UIText(value,x+120,y,118,9,UI_TEXT,true);
-      if(row<6) panelCanvas.Line(UIPx(x),UIPx(y+20),UIPx(x+238),UIPx(y+20),UIInk(UI_BORDER));
-   }
+   for(int i=0;i<ArraySize(statsTrades);i++) if(statsTrades[i].id==statsSelectedId) return i;
+   return -1;
 }
-void StatsDrawCurve()
+void StatsSelect(const int index)
+{
+   if(index<0 || index>=ArraySize(statsTrades)) return;
+   statsSelectedId=statsTrades[index].id;
+   statsReview=ArraySize(statsTrades)-1-index;
+}
+void StatsBuildSeries()
 {
    int n=ArraySize(statsTrades);
-   if(n==0) return;
-   double cumulative[];
-   ArrayResize(cumulative,n+1); cumulative[0]=0;
-   double peak=0;
-   for(int i=0;i<n;i++) { cumulative[i+1]=cumulative[i]+statsTrades[i].net; peak=MathMax(peak,cumulative[i+1]); }
+   ArrayResize(statsCumulative,n); ArrayResize(statsDrawdowns,n);
+   double total=0,peak=0;
+   for(int i=0;i<n;i++)
+   {
+      total+=statsTrades[i].net; peak=MathMax(peak,total);
+      statsCumulative[i]=total; statsDrawdowns[i]=total-peak;
+   }
+   int selected=StatsSelectedIndex();
+   if(n==0) { statsSelectedId=0; statsReview=0; }
+   else StatsSelect(selected<0 ? n-1 : selected);
+}
+int StatsExtremeIndex(const bool best)
+{
+   int found=-1;
+   for(int i=0;i<ArraySize(statsTrades);i++)
+      if(found<0 || (best ? statsTrades[i].net>statsTrades[found].net : statsTrades[i].net<statsTrades[found].net)) found=i;
+   return found;
+}
+int StatsPointX(const int index,const int count)
+{
+   return 82+(int)MathRound((index+1.0)*442/(count+1.0));
+}
+int StatsPointAtX(const double x,const int count)
+{
+   if(count<1) return -1;
+   return MathMax(0,MathMin(count-1,(int)MathRound((x-82)*(count+1.0)/442)-1));
+}
+void StatsHit(const int x,const int y,const int w,const int h,const int action)
+{
+   int n=ArraySize(uiHits); ArrayResize(uiHits,n+1);
+   uiHits[n].x=x; uiHits[n].y=y; uiHits[n].w=w; uiHits[n].h=h; uiHits[n].action=action;
+}
+void StatsAction(const int action)
+{
+   if(!statsOK || ArraySize(statsTrades)==0) return;
+   if(action>=1000)
+   {
+      int index=action-1000;
+      if(index>=ArraySize(statsTrades) || statsTrades[index].id!=statsPressedId) return;
+      StatsSelect(index); statsPressedId=0;
+   }
+   else if(action==111) { if(StatsSelectedIndex()>=0) statsDetail=3; }
+   else if(action==112) statsDetail=2;
+   else if(action==113 || action==114)
+   {
+      StatsSelect(StatsExtremeIndex(action==113)); statsDetail=3;
+   }
+   else if(action==43 || action==44)
+   {
+      int index=StatsSelectedIndex();
+      StatsSelect(MathMax(0,MathMin(ArraySize(statsTrades)-1,index+(action==43 ? -1 : 1))));
+   }
+}
+string StatsDuration(const double minutes)
+{
+   if(minutes<1) return IntegerToString((int)MathRound(minutes*60))+"秒";
+   if(minutes<60) return DoubleToString(minutes,1)+"分钟";
+   return IntegerToString((int)(minutes/60))+"小时"+IntegerToString((int)MathMod(minutes,60))+"分";
+}
+string StatsExitText(const int value)
+{
+   if(value==DEAL_REASON_SL) return "止损 SL";
+   if(value==DEAL_REASON_TP) return "止盈 TP";
+   if(value==DEAL_REASON_SO) return "强制平仓";
+   if(value==DEAL_REASON_CLIENT) return "桌面端操作";
+   if(value==DEAL_REASON_MOBILE) return "手机端操作";
+   if(value==DEAL_REASON_WEB) return "网页端操作";
+   if(value==DEAL_REASON_EXPERT) return "EA / 脚本";
+   return "其他 / 未知";
+}
+void StatsMetric(const int x,const int y,const int w,const string label,const string value,const string caption,const color ink)
+{
+   UIRound(x,y,w,76,UI_CARD);
+   UIText(label,x+12,y+9,w-24,9,UI_MUTED);
+   UIText(value,x+12,y+28,w-24,17,ink);
+   UIText(caption,x+12,y+56,w-24,8,UI_DIM);
+}
+void StatsKV(const int x,const int y,const int w,const string label,const string value,const color ink)
+{
+   int labelWidth=(int)MathRound(w*0.44);
+   UIText(label,x,y,labelWidth,9,UI_MUTED);
+   UIText(value,x+labelWidth,y,w-labelWidth,10,ink,true);
+}
+void StatsSummaryCards()
+{
+   int n=statsSummary.trades;
+   string currency=AccountInfoString(ACCOUNT_CURRENCY);
+   if(statsDetail==2)
+   {
+      double recent=0; int recentCount=MathMin(n,10);
+      for(int i=n-recentCount;i<n;i++) recent+=statsTrades[i].net;
+      double dd=n>0 ? statsDrawdowns[n-1] : 0;
+      StatsMetric(12,181,128,"累计净收益",statsOK ? StatsMoney(statsSummary.net) : "--",IntegerToString(n)+"笔 · "+currency,StatsInk(statsSummary.net));
+      StatsMetric(148,181,128,"当前回撤",statsOK ? StatsMoney(dd) : "--","最大 "+DoubleToString(statsSummary.maxDrawdown,2),dd<0 ? UI_WARN : UI_TEXT);
+      StatsMetric(284,181,128,"收益高点",statsOK ? StatsMoney(statsSummary.peak) : "--","从区间起点0累计",UI_TEXT);
+      StatsMetric(420,181,128,"最近"+IntegerToString(recentCount)+"笔",statsOK && n>0 ? StatsMoney(recent) : "--","净收益合计",StatsInk(recent));
+      return;
+   }
+   string pf=statsSummary.losses>0 ? DoubleToString(statsSummary.pf,2) : "—";
+   StatsMetric(12,181,128,"净收益",statsOK ? StatsMoney(statsSummary.net) : "--",currency+" · 含费用",StatsInk(statsSummary.net));
+   StatsMetric(148,181,128,"胜率",statsOK && n>0 ? DoubleToString(100.0*statsSummary.wins/n,1)+"%" : "--",IntegerToString(n)+"笔完整平仓",UI_TEXT);
+   StatsMetric(284,181,128,"盈利因子",statsOK ? pf : "--",statsSummary.losses>0 ? "总盈利 / 总亏损" : "暂无亏损样本",UI_TEXT);
+   StatsMetric(420,181,128,"最大回撤",statsOK ? DoubleToString(statsSummary.maxDrawdown,2) : "--","已实现 · "+currency,UI_WARN);
+}
+void StatsOverview()
+{
+   UIRound(12,267,536,60,UI_ROW);
+   UIText("本期结果",26,277,100,9,UI_MUTED);
+   string result=MathAbs(statsSummary.net)<0.005 ? "本期净收益接近持平" :
+                 statsSummary.net>0 ? "本期净收益为正" : "本期净收益为负";
+   UIText(result,26,299,270,11,StatsInk(statsSummary.net));
+   UIText("平均每笔 "+StatsMoney(statsSummary.net/statsSummary.trades),310,279,222,11,StatsInk(statsSummary.net),true);
+   UIText("当前连亏 "+IntegerToString(statsSummary.lossStreak)+"笔 · 最长 "+IntegerToString(statsSummary.maxLossStreak)+"笔",290,302,242,9,UI_MUTED,true);
+
+   UIRound(12,337,536,116,UI_ROW);
+   UIText("盈亏结构",26,349,160,10,UI_TEXT);
+   UIText(StringFormat("赢%d / 亏%d / 平%d",statsSummary.wins,statsSummary.losses,statsSummary.breakevens),260,349,272,9,UI_MUTED,true);
+   int gain=(int)MathRound(508.0*statsSummary.wins/statsSummary.trades);
+   int loss=(int)MathRound(508.0*statsSummary.losses/statsSummary.trades);
+   UIRound(26,378,508,6,UI_DIM,0);
+   if(gain>0) UIRound(26,378,gain,6,UI_GAIN,0);
+   if(loss>0) UIRound(26+gain,378,loss,6,UI_LOSS,0);
+   UIText("平均盈利",26,397,150,9,UI_MUTED);
+   UIText(StatsMoney(statsSummary.avgWin),26,417,150,14,UI_GAIN);
+   UIText("平均亏损",200,397,150,9,UI_MUTED);
+   UIText(StatsMoney(statsSummary.avgLoss),200,417,150,14,UI_LOSS);
+   UIText("平均盈亏比",374,397,150,9,UI_MUTED);
+   UIText(statsSummary.losses>0 ? DoubleToString(statsSummary.payoff,2) : "—",374,417,150,14,UI_TEXT);
+
+   UIRound(12,463,260,70,UI_ROW); UIRound(284,463,264,70,UI_ROW);
+   StatsKV(26,475,232,"多单净收益",StatsMoney(statsSummary.buyNet),StatsInk(statsSummary.buyNet));
+   UIText(IntegerToString(statsSummary.buyTrades)+"笔 · 平均 "+(statsSummary.buyTrades>0 ? StatsMoney(statsSummary.buyNet/statsSummary.buyTrades) : "—"),26,504,232,9,UI_MUTED);
+   StatsKV(298,475,236,"空单净收益",StatsMoney(statsSummary.sellNet),StatsInk(statsSummary.sellNet));
+   UIText(IntegerToString(statsSummary.sellTrades)+"笔 · 平均 "+(statsSummary.sellTrades>0 ? StatsMoney(statsSummary.sellNet/statsSummary.sellTrades) : "—"),298,504,236,9,UI_MUTED);
+
+   UIRound(12,543,260,73,UI_ROW); UIRound(284,543,264,73,UI_ROW);
+   UIText("最好一笔",26,554,110,9,UI_MUTED);
+   UIText(StatsMoney(statsSummary.best),136,550,122,15,StatsInk(statsSummary.best),true);
+   UIButton("查看这一笔 ›",26,580,232,113);
+   UIText("最差一笔",298,554,110,9,UI_MUTED);
+   UIText(StatsMoney(statsSummary.worst),408,550,126,15,StatsInk(statsSummary.worst),true);
+   UIButton("查看这一笔 ›",298,580,236,114);
+}
+void StatsPerformance()
+{
+   UIRound(12,267,536,152,UI_ROW);
+   UIText("收益与费用",26,279,230,11,UI_TEXT);
+   UIText(AccountInfoString(ACCOUNT_CURRENCY),350,281,182,9,UI_DIM,true);
+   StatsKV(26,313,240,"盈利合计",StatsMoney(statsSummary.gains),UI_GAIN);
+   StatsKV(292,313,240,"亏损合计",StatsMoney(statsSummary.lossesMoney),UI_LOSS);
+   double costs=statsSummary.commission+statsSummary.swap+statsSummary.fee;
+   StatsKV(26,348,240,"成交毛收益",StatsMoney(statsSummary.net-costs),StatsInk(statsSummary.net-costs));
+   StatsKV(292,348,240,"费用合计",StatsMoney(costs),StatsInk(costs));
+   UIText("佣金 "+StatsMoney(statsSummary.commission)+"   隔夜 "+StatsMoney(statsSummary.swap)+"   其他 "+StatsMoney(statsSummary.fee),26,387,506,9,UI_MUTED);
+
+   UIRound(12,429,536,102,UI_ROW);
+   UIText("持仓时间",26,441,200,11,UI_TEXT);
+   StatsKV(26,474,240,"盈利单平均",statsSummary.winningHolds>0 ? StatsDuration(statsSummary.winningMinutes/statsSummary.winningHolds) : "—",UI_GAIN);
+   StatsKV(292,474,240,"亏损单平均",statsSummary.losingHolds>0 ? StatsDuration(statsSummary.losingMinutes/statsSummary.losingHolds) : "—",UI_LOSS);
+   UIText("全部平均 "+StatsDuration(statsSummary.holdMinutes/statsSummary.trades)+" · 最长 "+StatsDuration(statsSummary.maxHold),26,507,506,9,UI_MUTED);
+
+   UIRound(12,541,536,75,UI_ROW);
+   UIText("成交规模",26,552,200,11,UI_TEXT);
+   StatsKV(26,581,240,"累计入场",DoubleToString(statsSummary.volume,2)+"手",UI_TEXT);
+   StatsKV(292,581,240,"入场 / 退出",IntegerToString(statsSummary.trades)+"笔 / "+IntegerToString(statsSummary.exitDeals)+"次",UI_TEXT);
+}
+// 双图使用相同X坐标和同一持仓ID；0线固定标注，刻度取整避免无意义小数。
+void StatsDrawCurve()
+{
+   int n=ArraySize(statsTrades),selected=StatsSelectedIndex();
+   if(n<1 || selected<0) return;
    for(int chart=0;chart<2;chart++)
    {
-      int top=chart==0 ? 261 : 439;
-      UIRound(12,top,536,166,UI_ROW);
-      UIText(chart==0 ? "累计净收益" : "每笔盈亏",26,top+12,200,10,UI_TEXT);
-      string caption=chart==0 ? "高点 "+StatsMoney(peak) : "盈利 / 亏损 · "+IntegerToString(n)+"笔";
-      UIText(caption,256,top+13,274,8.5,chart==0 ? UI_ACCENT : UI_MUTED,true);
+      int top=chart==0 ? 267 : 413;
+      int plotY=top+36,plotH=chart==0 ? 74 : 64;
+      UIRound(12,top,536,chart==0 ? 136 : 126,UI_ROW);
+      UIText(chart==0 ? "累计净收益" : "每笔盈亏",26,top+10,180,10,UI_TEXT);
+      string caption=chart==0 ? "高点 "+StatsMoney(statsSummary.peak) : "正数在上 · 负数在下";
+      UIText(caption,280,top+11,252,8.5,chart==0 ? UI_ACCENT : UI_MUTED,true);
       double low=0,high=0;
       for(int i=0;i<n;i++)
       {
-         double value=chart==0 ? cumulative[i+1] : statsTrades[i].net;
+         double value=chart==0 ? statsCumulative[i] : statsTrades[i].net;
          low=MathMin(low,value); high=MathMax(high,value);
       }
-      // 留出端点和极值的绘制空间；全零和单笔记录也有稳定坐标轴。
-      double padding=MathMax((high-low)*0.12,0.01);
-      low-=padding; high+=padding;
-      int x=108,y=top+43,w=414,h=90;
-      for(int tick=0;tick<3;tick++)
+      double raw=MathMax(high-low,0.02)/3.0;
+      double power=MathPow(10,MathFloor(MathLog10(raw))),part=raw/power;
+      double step=(part<=1 ? 1 : part<=2 ? 2 : part<=5 ? 5 : 10)*power;
+      double bottom=MathFloor(low/step)*step,upper=MathCeil(high/step)*step;
+      if(upper==bottom) upper=bottom+step;
+      double margin=(upper-bottom)*0.1;
+      double minimum=bottom-margin,maximum=upper+margin;
+      for(int tick=0;tick<7;tick++)
       {
-         double value=high-(high-low)*tick/2.0;
-         int gy=y+(int)MathRound(h*tick/2.0);
-         panelCanvas.Line(UIPx(x),UIPx(gy),UIPx(x+w),UIPx(gy),UIInk(UI_BORDER));
-         UIText(DoubleToString(value,2),24,gy-5,74,8,UI_DIM,true);
+         double value=bottom+tick*step;
+         if(value>upper+step*0.001) break;
+         int y=plotY+(int)MathRound((maximum-value)/(maximum-minimum)*plotH);
+         panelCanvas.Line(UIPx(82),UIPx(y),UIPx(524),UIPx(y),UIInk(MathAbs(value)<step*0.001 ? UI_DIM : UI_BORDER));
+         UIText(DoubleToString(value,step>=1 ? 0 : step>=0.1 ? 1 : 2),20,y-5,52,8,UI_DIM,true);
       }
-      int zero=y+(int)MathRound(high/(high-low)*h);
-      panelCanvas.Line(UIPx(x),UIPx(zero),UIPx(x+w),UIPx(zero),UIInk(UI_DIM));
-      int px=x,py=zero;
+      int zero=plotY+(int)MathRound(maximum/(maximum-minimum)*plotH);
+      int sx=StatsPointX(selected,n);
+      panelCanvas.Line(UIPx(sx),UIPx(plotY),UIPx(sx),UIPx(plotY+plotH),UIInk(UI_MUTED));
+      int px=82,py=zero;
       for(int i=0;i<n;i++)
       {
-         double value=chart==0 ? cumulative[i+1] : statsTrades[i].net;
-         int nx=x+(int)MathRound((chart==0 ? i+1.0 : i+0.5)*w/n);
-         int ny=y+(int)MathRound((high-value)/(high-low)*h);
+         double value=chart==0 ? statsCumulative[i] : statsTrades[i].net;
+         int x=StatsPointX(i,n),y=plotY+(int)MathRound((maximum-value)/(maximum-minimum)*plotH);
          if(chart==0)
          {
-            panelCanvas.LineAA(UIPx(px),UIPx(py),UIPx(nx),UIPx(ny),UIInk(UI_ACCENT));
-            if(i==n-1) panelCanvas.FillCircle(UIPx(nx),UIPx(ny),UIPx(3),UIInk(UI_ACCENT));
-            px=nx; py=ny;
+            panelCanvas.LineAA(UIPx(px),UIPx(py),UIPx(x),UIPx(y),UIInk(UI_ACCENT));
+            if(n<45 || i==selected) panelCanvas.FillCircle(UIPx(x),UIPx(y),UIPx(i==selected ? 4 : 2),UIInk(UI_ACCENT));
+            if(i==selected) panelCanvas.FillCircle(UIPx(x),UIPx(y),UIPx(2),UIInk(UI_ROW));
+            px=x; py=y;
          }
          else
          {
-            int half=MathMax(1,(int)MathMin(9.0,w/(double)n*0.30));
-            panelCanvas.FillRectangle(UIPx(MathMax(x,nx-half)),UIPx(MathMin(zero,ny)),
-                                      UIPx(MathMin(x+w,nx+half)),UIPx(MathMax(zero,ny)),UIInk(StatsInk(value)));
+            int half=MathMax(1,(int)MathMin(7,442.0/(n+1)*0.32));
+            if(i==selected) panelCanvas.FillRectangle(UIPx(x-half-2),UIPx(MathMin(y,zero)-2),UIPx(x+half+2),UIPx(MathMax(y,zero)+2),UIInk(UI_TEXT));
+            panelCanvas.FillRectangle(UIPx(x-half),UIPx(MathMin(y,zero)),UIPx(x+half),UIPx(MathMax(y,zero)),UIInk(StatsInk(value)));
          }
       }
-      UIText(chart==0 ? "起点 0" : "第1笔",108,top+144,95,8,UI_DIM);
-      if(n>2) UIText("第"+IntegerToString((n+1)/2)+"笔",276,top+144,90,8,UI_DIM);
-      if(n>1 || chart==0) UIText("第"+IntegerToString(n)+"笔",424,top+144,100,8,UI_DIM,true);
+      UIText(chart==0 ? "起点0" : "第1笔",82,plotY+plotH+10,80,8,UI_DIM);
+      if(n>2) UIText("第"+IntegerToString((n+1)/2)+"笔",270,plotY+plotH+10,80,8,UI_DIM);
+      UIText("第"+IntegerToString(n)+"笔",444,plotY+plotH+10,80,8,UI_DIM,true);
+      StatsHit(82,plotY,443,plotH+1,110);
    }
-   UIText("按完整平仓顺序 · "+AccountInfoString(ACCOUNT_CURRENCY),24,612,280,8,UI_DIM);
-   UIText("最新 "+StatsMoney(cumulative[n]),318,612,214,9,StatsInk(cumulative[n]),true);
+   TgeStatsTrade tr=statsTrades[selected];
+   UICard(12,549,536,67,UI_CARD);
+   UIText("第"+IntegerToString(selected+1)+"/"+IntegerToString(n)+"笔 · "+TimeToString(tr.closeTime,TIME_MINUTES)+" · "+(tr.direction==POSITION_TYPE_BUY ? "多单" : "空单"),26,559,358,10,UI_TEXT);
+   UIText("单笔 "+StatsMoney(tr.net)+"   累计 "+StatsMoney(statsCumulative[selected])+"   回撤 "+StatsMoney(statsDrawdowns[selected]),26,587,358,9,UI_MUTED);
+   UIButton("查看复盘 ›",416,567,118,111,true);
+}
+void StatsReviewPanel()
+{
+   int index=StatsSelectedIndex(),n=ArraySize(statsTrades);
+   if(index<0) return;
+   TgeStatsTrade tr=statsTrades[index];
+   if(index>0) UIButton("‹ 更早",12,181,84,43);
+   if(index<n-1) UIButton("更新 ›",104,181,84,44);
+   UIText("第"+IntegerToString(index+1)+"/"+IntegerToString(n)+"笔 · #"+IntegerToString((long)tr.id),200,189,210,9,UI_MUTED);
+   UIButton("返回走势",430,181,118,112);
+
+   UIRound(12,220,536,92,UI_CARD);
+   UIText(tr.direction==POSITION_TYPE_BUY ? "多单 BUY" : "空单 SELL",26,231,190,13,tr.direction==POSITION_TYPE_BUY ? UI_ACCENT : UI_SELL);
+   UIText("净收益 · "+AccountInfoString(ACCOUNT_CURRENCY),330,231,202,9,UI_MUTED,true);
+   UIText(DoubleToString(tr.entryVolume,2)+"手 · 持有"+StatsDuration((double)(tr.closeTime-tr.openTime)/60),26,262,286,10,UI_TEXT);
+   UIText(StatsMoney(tr.net),330,252,202,23,StatsInk(tr.net),true);
+   string origin=tr.mixed ? "混合来源" : (ulong)tr.magic==EA魔法号 ? "本EA" : tr.magic==0 ? "手动入场" : "其他EA";
+   UIText(origin+" · 已完整平仓",26,290,280,8.5,UI_DIM);
+
+   double entry=tr.entryValue/tr.entryVolume,exit=tr.exitValue/tr.exitVolume;
+   UIRound(12,322,260,110,UI_ROW); UIRound(284,322,264,110,UI_ROW);
+   UIText("入场 · 加权成交价",26,334,230,9,UI_MUTED);
+   UIText(DoubleToString(entry,_Digits),26,358,230,17,UI_TEXT);
+   UIText(TimeToString(tr.openTime,TIME_DATE|TIME_SECONDS),26,400,230,9,UI_MUTED);
+   UIText("退出 · 加权成交价",298,334,236,9,UI_MUTED);
+   UIText(DoubleToString(exit,_Digits),298,358,236,17,UI_TEXT);
+   UIText(TimeToString(tr.closeTime,TIME_DATE|TIME_SECONDS),298,400,236,9,UI_MUTED);
+
+   UIRound(12,442,536,98,UI_ROW);
+   double move=(tr.direction==POSITION_TYPE_BUY ? 1 : -1)*(exit-entry);
+   StatsKV(26,454,240,"顺方向价差",StatsMoney(move),StatsInk(move));
+   StatsKV(292,454,240,"最后退出来源",StatsExitText(tr.exitReason),UI_TEXT);
+   StatsKV(26,487,240,"入场成交",IntegerToString(tr.entryDeals)+"次",UI_TEXT);
+   StatsKV(292,487,240,"退出成交",IntegerToString(tr.exitDeals)+"次",UI_TEXT);
+   UIText("退出来源按最后一笔成交记录；分批成交可能有不同来源",26,519,506,8,UI_DIM);
+
+   UIRound(12,550,536,66,UI_ROW);
+   StatsKV(26,561,240,"毛收益",StatsMoney(tr.gross),StatsInk(tr.gross));
+   StatsKV(292,561,240,"费用合计",StatsMoney(tr.commission+tr.swap+tr.fee),StatsInk(tr.commission+tr.swap+tr.fee));
+   UIText("佣金 "+StatsMoney(tr.commission)+"   隔夜 "+StatsMoney(tr.swap)+"   其他 "+StatsMoney(tr.fee),26,592,506,8.5,UI_MUTED);
 }
 void StatsPanel()
 {
-   StatsRefresh();
+   StatsRefresh(); StatsBuildSeries();
    string periods[3]={"日统计","周统计","月统计"};
    string current=statsPeriod==0 ? "今日" : statsPeriod==1 ? "本周" : "本月";
    for(int i=0;i<3;i++) UIButton(periods[i],12+i*76,88,68,30+i,statsPeriod==i);
@@ -274,95 +491,24 @@ void StatsPanel()
    for(int i=0;i<4;i++) UIButton(details[i],12+i*76,122,68,36+i,statsDetail==i);
    for(int i=0;i<3;i++) UIButton(filters[i],338+i*72,122,66,40+i,statsFilter==i);
    string first=TimeToString(statsRangeStart,TIME_DATE),last=TimeToString(statsRangeEnd-1,TIME_DATE);
-   string range=first==last ? first : first+" → "+last;
-   UIText(range+" · 券商服务器日期",14,160,530,9.5,UI_MUTED);
-   UIRound(12,181,536,70,UI_CARD);
-   string titles[4]={"净收益","胜率","盈利因子","最大回撤"};
-   double winRate=statsSummary.trades>0 ? 100.0*statsSummary.wins/statsSummary.trades : 0;
-   string profitFactor=statsSummary.losses>0 ? DoubleToString(statsSummary.pf,2) :
-                       statsSummary.wins>0 ? "无亏损" : "--";
-   string values[4]={statsOK ? StatsMoney(statsSummary.net) : "--",
-                    statsOK && statsSummary.trades>0 ? DoubleToString(winRate,1)+"%" : "--",
-                    statsOK ? profitFactor : "--",
-                    statsOK ? "-"+DoubleToString(statsSummary.maxDrawdown,2) : "--"};
-   for(int i=0;i<4;i++)
-   {
-      int x=24+i*134;
-      if(i>0) panelCanvas.Line(UIPx(x-12),UIPx(195),UIPx(x-12),UIPx(235),UIInk(UI_BORDER));
-      UIText(titles[i],x,191,114,8.5,UI_MUTED);
-      UIText(values[i],x,213,114,14,i==0 ? StatsInk(statsSummary.net) : i==3 ? UI_LOSS : UI_TEXT);
-   }
+   UIText((first==last ? first : first+" → "+last)+" · 券商时间 · "+AccountInfoString(ACCOUNT_CURRENCY),14,160,530,9,UI_MUTED);
+
+   if(statsDetail!=3 || !statsOK || statsSummary.trades==0) StatsSummaryCards();
    if(!statsOK || statsSummary.trades==0)
    {
-      UIRound(12,261,536,260,UI_ROW);
-      UIText(statsStatus,24,282,508,10,UI_WARN);
-      UIText(statsOK ? "切换日期或范围，查看已平仓交易" : "恢复连接后自动重试，也可切换日期重新查询",24,315,508,9.5,UI_MUTED);
+      UIRound(12,267,536,349,UI_ROW);
+      UIText(statsStatus,28,380,504,11,UI_WARN);
+      UIText(statsOK ? "切换日期或筛选，查看完整平仓记录" : "连接恢复后自动重试",28,416,504,10,UI_MUTED);
    }
-   else if(statsDetail==0)
-   {
-      UIRound(12,261,536,260,UI_ROW);
-      UIText("结果结构",26,274,200,10,UI_TEXT);
-      UIText(StringFormat("%d笔完成 · 当前连亏%d笔",statsSummary.trades,statsSummary.lossStreak),256,275,274,9,UI_MUTED,true);
-      int gainWidth=(int)MathRound(508.0*statsSummary.wins/statsSummary.trades);
-      int lossWidth=(int)MathRound(508.0*statsSummary.losses/statsSummary.trades);
-      panelCanvas.FillRectangle(UIPx(26),UIPx(305),UIPx(533),UIPx(312),UIInk(UI_DIM));
-      if(gainWidth>0) panelCanvas.FillRectangle(UIPx(26),UIPx(305),UIPx(25+gainWidth),UIPx(312),UIInk(UI_GAIN));
-      if(lossWidth>0) panelCanvas.FillRectangle(UIPx(26+gainWidth),UIPx(305),UIPx(25+gainWidth+lossWidth),UIPx(312),UIInk(UI_LOSS));
-      string pf=statsSummary.losses>0 ? DoubleToString(statsSummary.pf,2) : statsSummary.wins>0 ? "无亏损样本" : "--";
-      StatsLine(0,StringFormat("赢 / 亏 / 平：%d / %d / %d",statsSummary.wins,statsSummary.losses,statsSummary.breakevens),
-                "平均每笔："+StatsMoney(statsSummary.net/statsSummary.trades));
-      StatsLine(1,"平均赚："+StatsMoney(statsSummary.avgWin),"平均亏："+StatsMoney(statsSummary.avgLoss));
-      StatsLine(2,"盈亏比："+(statsSummary.losses>0 ? DoubleToString(statsSummary.payoff,2) : "--"),
-                "最长连亏："+IntegerToString(statsSummary.maxLossStreak)+"笔");
-      StatsLine(3,StringFormat("多单：%d笔  %s",statsSummary.buyTrades,StatsMoney(statsSummary.buyNet)),
-                StringFormat("空单：%d笔  %s",statsSummary.sellTrades,StatsMoney(statsSummary.sellNet)));
-      StatsLine(4,"平均持仓："+DoubleToString(statsSummary.holdMinutes/statsSummary.trades,1)+"分钟",
-                "最长持仓："+DoubleToString(statsSummary.maxHold,1)+"分钟");
-      StatsLine(5,"最好："+StatsMoney(statsSummary.best),"最差："+StatsMoney(statsSummary.worst));
-      StatsLine(6,"累计入场："+DoubleToString(statsSummary.volume,2)+"手","退出成交："+IntegerToString(statsSummary.exitDeals)+"次");
-   }
-   else if(statsDetail==1)
-   {
-      UIRound(12,261,536,260,UI_ROW);
-      UIText("收益与成本",26,274,220,10,UI_TEXT);
-      UIText("每笔净收益",26,304,200,9,UI_MUTED);
-      UIText(StatsMoney(statsSummary.net/statsSummary.trades)+" "+AccountInfoString(ACCOUNT_CURRENCY),240,301,292,15,StatsInk(statsSummary.net),true);
-      StatsLine(0,"盈利交易合计："+StatsMoney(statsSummary.gains),"亏损交易合计："+StatsMoney(statsSummary.lossesMoney));
-      StatsLine(1,"佣金："+StatsMoney(statsSummary.commission),"隔夜费："+StatsMoney(statsSummary.swap));
-      StatsLine(2,"成交费用："+StatsMoney(statsSummary.fee),"平均每笔："+StatsMoney(statsSummary.net/statsSummary.trades));
-      StatsLine(3,"盈利平均持仓："+(statsSummary.winningHolds>0 ? DoubleToString(statsSummary.winningMinutes/statsSummary.winningHolds,1)+"分钟" : "--"),
-                "亏损平均持仓："+(statsSummary.losingHolds>0 ? DoubleToString(statsSummary.losingMinutes/statsSummary.losingHolds,1)+"分钟" : "--"));
-      StatsLine(4,"最长持仓："+DoubleToString(statsSummary.maxHold,1)+"分钟",
-                "额外退出成交："+IntegerToString(statsSummary.exitDeals-statsSummary.trades)+"次");
-      StatsLine(5,"多单净收益："+StatsMoney(statsSummary.buyNet),"空单净收益："+StatsMoney(statsSummary.sellNet));
-      StatsLine(6,"统计范围：完整平仓","金额单位："+AccountInfoString(ACCOUNT_CURRENCY));
-   }
+   else if(statsDetail==0) StatsOverview();
+   else if(statsDetail==1) StatsPerformance();
    else if(statsDetail==2) StatsDrawCurve();
-   else
-   {
-      int n=ArraySize(statsTrades); TgeStatsTrade tr=statsTrades[n-1-statsReview];
-      UIButton("上一笔",12,261,82,43); UIButton("下一笔",102,261,82,44);
-      UIText("第"+IntegerToString(statsReview+1)+" / "+IntegerToString(n)+"笔 · 按最近平仓排序",202,269,330,9,UI_MUTED,true);
-      UIRound(12,298,536,223,UI_ROW);
-      color sideInk=tr.direction==POSITION_TYPE_BUY ? UI_ACCENT : UI_SELL;
-      UIText(tr.direction==POSITION_TYPE_BUY ? "多单 BUY" : "空单 SELL",24,310,160,11,sideInk);
-      UIText("净结果",268,310,80,8.5,UI_MUTED);
-      UIText(StatsMoney(tr.net)+" "+AccountInfoString(ACCOUNT_CURRENCY),354,307,178,12,StatsInk(tr.net),true);
-      UIText("交易编号  #"+IntegerToString((long)tr.id),24,340,230,8.5,UI_DIM);
-      UIText("持仓时长  "+DoubleToString((double)(tr.closeTime-tr.openTime)/60,1)+" 分钟",268,340,240,8.5,UI_DIM);
-      UIText("时间",24,371,80,8.5,UI_MUTED);
-      UIText(TimeToString(tr.openTime,TIME_DATE|TIME_MINUTES)+"  →  "+TimeToString(tr.closeTime,TIME_DATE|TIME_MINUTES),112,371,408,9,UI_TEXT);
-      UIText("价格路径",24,402,80,8.5,UI_MUTED);
-      UIText(DoubleToString(tr.entryValue/tr.entryVolume,_Digits)+"  →  "+DoubleToString(tr.exitValue/tr.exitVolume,_Digits),112,402,408,10,UI_TEXT);
-      UIText("成交结构",24,433,80,8.5,UI_MUTED);
-      UIText(StringFormat("入场 %.2f手 · %d次退出成交",tr.entryVolume,tr.exitDeals),112,433,408,9,UI_TEXT);
-      UIText("结果拆分",24,464,80,8.5,UI_MUTED);
-      UIText("毛收益 "+StatsMoney(tr.gross)+" · 佣金 "+StatsMoney(tr.commission)+" · 隔夜费 "+StatsMoney(tr.swap)+" · 费用 "+StatsMoney(tr.fee),112,464,408,8.5,UI_MUTED);
-   }
-   string note=statsOK ? "完整平仓 · 净收益含逐笔费用 · "+AccountInfoString(ACCOUNT_CURRENCY) :
-                          "请确认MT5已连接并可读取成交历史";
-   if(statsSkipped>0) note+=" · "+IntegerToString(statsSkipped)+"笔缺失/反转未计入";
-   else if(statsOK) note+=" · 回撤不含浮动权益";
-   UIText(note,14,statsDetail==2 ? 633 : 540,530,8,statsSkipped>0 ? UI_WARN : UI_MUTED);
+   else StatsReviewPanel();
+
+   string note=statsDetail==3 ? "浮盈/浮亏及SL调整轨迹未记录 · 此页仅展示成交历史" :
+               statsDetail==2 ? "点击双图选择交易 · 完整平仓累计 · 不含浮动权益" :
+               "完整平仓 · 净收益含费用 · 回撤不含浮动权益";
+   if(statsSkipped>0) note=IntegerToString(statsSkipped)+"笔缺失/反转未计入 · "+note;
+   UIText(note,14,631,532,8,statsSkipped>0 ? UI_WARN : UI_DIM);
    panelCanvas.Update();
 }

@@ -1,5 +1,5 @@
 #property strict
-#property version "1.49"
+#property version "1.50"
 #property description "T哥点位触价 / 明确方向8·区间6·地图5 / 0.02手。独立Magic，仅管理本EA持仓。"
 #include <Trade/Trade.mqh>
 #include <Canvas/Canvas.mqh>
@@ -1106,7 +1106,14 @@ int HitAction(const int mouseX,const int mouseY)
    double x=(mouseX-uiX)/panelScale,y=(mouseY-uiY)/panelScale;
    for(int i=0;i<ArraySize(uiHits);i++)
       if(x>=uiHits[i].x && x<uiHits[i].x+uiHits[i].w && y>=uiHits[i].y && y<uiHits[i].y+uiHits[i].h)
+      {
+         if(uiHits[i].action==110)
+         {
+            int index=StatsPointAtX(x,ArraySize(statsTrades));
+            return index>=0 ? 1000+index : 0;
+         }
          return uiHits[i].action;
+      }
    return 0;
 }
 bool UIMovingAverageGroup(const bool trendGroup)
@@ -1141,21 +1148,26 @@ void ViewAction(const int action)
     else if(action==3) { uiStatistics=true; uiIndicators=false; }
     else if(action==4) { uiStatistics=false; uiIndicators=true; }
    else if(action==29) ToggleTradeMode();
-   else if(action>=30 && action<=44)
+   else if(action>=30 && action<=42)
    {
-      if(action<=32) { statsPeriod=action-30; statsReview=0; statsDirty=true; statsLastAttempt=0; }
+      bool scope=action<=35 || action>=40;
+      if(action<=32) statsPeriod=action-30;
       else if(action<=35)
       {
          if(action==33) statsOffsets[statsPeriod]--;
          else if(action==34) statsOffsets[statsPeriod]=0;
          else statsOffsets[statsPeriod]++;
-         statsReview=0; statsDirty=true; statsLastAttempt=0;
       }
       else if(action<=39) statsDetail=action-36;
-      else if(action<=42) { statsFilter=action-40; statsReview=0; statsDirty=true; statsLastAttempt=0; }
-      else if(action==43) statsReview=MathMin(statsReview+1,MathMax(ArraySize(statsTrades)-1,0));
-      else statsReview=MathMax(statsReview-1,0);
+      else statsFilter=action-40;
+      if(scope)
+      {
+         statsSelectedId=0; statsPressedId=0; statsReview=0;
+         statsDirty=true; statsLastAttempt=0;
+      }
    }
+   else if(action==43 || action==44 || (action>=111 && action<=114) || action>=1000)
+      StatsAction(action);
    else if(action>=50 && action<=59) UIIndicatorSet(action-50,UIIndicatorWindow(action-50)<0);
    else if(action>=70 && action<=75) UIIndicatorSet(action-60,UIIndicatorWindow(action-60)<0);
    else if(action==60 || action==61) UIMovingAverageGroup(action==61);
@@ -1248,15 +1260,13 @@ void Panel()
    panelCanvas.FillRectangle(0,0,UIPx(559),UIPx(39),UIInk(UI_HEADER));
    string pageTitle=uiStatistics ? "交易统计" : uiIndicators ? "看盘设置" : "T哥点位监控";
    UIText(_Symbol+" · "+pageTitle,16,10,222,11,UI_TEXT);
-   UIText("v1.49",242,13,40,8,UI_DIM);
+   UIText("v1.50",242,13,40,8,UI_DIM);
    UIText(TimeToString(TimeGMT()+8*3600,TIME_SECONDS),286,12,100,10,UI_MUTED,true);
    UIButton(uiCollapsed ? "+" : "−",396,7,30,1);
    UIButton(tradeMode ? "交易模式" : "观察模式",434,7,110,29,tradeMode);
    PageTabs(49);
-   ObjectSetString(0,VIEW+"CANVAS",OBJPROP_TOOLTIP,
-                   "拖动标题移动面板；−收起 / +展开；右上角切换交易/观察（观察暂停自动管理，已有服务器订单仍有效） · "+feedStatus+
-                   " · 来源 "+sourceSender+" · 消息 "+identity+
-                   " · 老师来源 "+aiSource+" · "+uiIndicatorNotice+" · 手机TP标记："+markerStatus);
+   // 禁用整块Canvas的原生长提示，避免遮挡统计导航和图形。
+   ObjectSetString(0,VIEW+"CANVAS",OBJPROP_TOOLTIP,"\n");
    if(uiCollapsed)
    {
       string compact=uiStatistics ? "统计页 · 点击 + 展开" :
@@ -1485,6 +1495,8 @@ void OnChartEvent(const int id,const long &lparam,const double &dparam,const str
       if(pressed)
       {
          uiPressedAction=HitAction(mx,my);
+         statsPressedId=uiPressedAction>=1000 && uiPressedAction-1000<ArraySize(statsTrades) ?
+                        statsTrades[uiPressedAction-1000].id : 0;
          if(uiPressedAction==0 && mx>=uiX && mx<uiX+UIPx(275) && my>=uiY && my<uiY+UIPx(40))
          {
             uiDragging=true; uiDragDX=mx-uiX; uiDragDY=my-uiY;

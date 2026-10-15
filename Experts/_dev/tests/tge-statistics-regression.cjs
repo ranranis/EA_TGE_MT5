@@ -14,9 +14,10 @@ function convert(s){
  .replace(/\((?:datetime|int|double|ulong|long)\)/g,'')
  .replace(/\b(?:datetime|ulong|long|double|int|bool|string|color)\s+/g,'let ')
  .replace('(n+1)/2','Math.trunc((n+1)/2)').replace('months/12','Math.trunc(months/12)')
+ .replace(/\bMathPow\b/g,"Math.pow").replace(/\bMathFloor\b/g,"Math.floor").replace(/\bMathCeil\b/g,"Math.ceil").replace(/\bMathLog10\b/g,"Math.log10").replace(/\bMathMod\b/g,"((a,b)=>a%b)")
  .replace(/\bMathMax\b/g,'Math.max').replace(/\bMathMin\b/g,'Math.min').replace(/\bMathAbs\b/g,'Math.abs').replace(/\bMathRound\b/g,'Math.round');
 }
-function trade(){return {id:0,lastDeal:0,openTime:0,closeTime:0,magic:0,direction:0,entryDeals:0,exitDeals:0,mixed:false,reversed:false,
+function trade(){return {id:0,lastDeal:0,openTime:0,closeTime:0,magic:0,direction:0,exitReason:-1,entryDeals:0,exitDeals:0,mixed:false,reversed:false,
  entryVolume:0,exitVolume:0,entryValue:0,exitValue:0,gross:0,commission:0,swap:0,fee:0,net:0};}
 function summary(){return Object.fromEntries(('trades wins losses breakevens exitDeals buyTrades sellTrades lossStreak maxLossStreak winningHolds losingHolds net volume gains lossesMoney avgWin avgLoss pf payoff best worst commission swap fee buyNet sellNet holdMinutes maxHold winningMinutes losingMinutes peak maxDrawdown').split(' ').map(k=>[k,0]));}
 const start=Date.UTC(2026,9,10)/1000;let now=start+12*3600,clock=10000,history=[],selected=[],live=[],selection={},connected=true,failRange=false,failed=new Set(),rangeQueries=0;
@@ -24,7 +25,7 @@ function deal(id,entry,time,volume=.02,price=4100,opts={}){
  return {ticket:history.length+1,id,entry,time,volume,price,type:entry===0?0:1,magic:entry===0?560056:0,symbol:'XAUUSD.c',profit:0,commission:0,swap:0,fee:0,...opts};
 }
 function add(id,entry,time,volume=.02,price=4100,opts={}){const d=deal(id,entry,time,volume,price,opts);history.push(d);return d;}
-const integers={DEAL_POSITION_ID:'id',DEAL_TYPE:'type',DEAL_ENTRY:'entry',DEAL_MAGIC:'magic',DEAL_TIME:'time'};
+const integers={DEAL_POSITION_ID:'id',DEAL_TYPE:'type',DEAL_ENTRY:'entry',DEAL_MAGIC:'magic',DEAL_TIME:'time',DEAL_REASON:'reason'};
 const doubles={DEAL_VOLUME:'volume',DEAL_PRICE:'price',DEAL_PROFIT:'profit',DEAL_COMMISSION:'commission',DEAL_SWAP:'swap',DEAL_FEE:'fee'};
 const cx=vm.createContext({Math,trade,statsPeriod:0,statsOffsets:[0,0,0],statsFilter:0,statsReview:0,statsDirty:true,statsOK:false,
  statsRangeStart:0,statsRangeEnd:0,statsLastAttempt:0,statsSkipped:0,statsStatus:'',statsTrades:[],statsSummary:summary(),EA魔法号:560056,_Symbol:'XAUUSD.c',
@@ -43,7 +44,7 @@ const cx=vm.createContext({Math,trade,statsPeriod:0,statsOffsets:[0,0,0],statsFi
  HistoryDealGetString:(t,p)=>history.find(d=>d.ticket===t)?.[p]||'',
  PositionsTotal:()=>live.length,PositionGetTicket:i=>{selection=live[i];return selection.ticket;},
  PositionGetInteger:p=>selection[p],PositionGetString:p=>selection[p],SymbolInfoDouble:()=>.01,
- GetLastError:()=>77,IntegerToString:String,ArraySize:a=>a.length,ArrayResize:(a,n)=>{while(a.length<n)a.push(0);a.length=n;},ArraySort:a=>a.sort((x,y)=>x-y),
+ GetLastError:()=>77,IntegerToString:String,ArraySize:a=>a.length,ArrayResize:(a,n)=>{while(a.length<n)a.push(a===cx.uiHits?{}:0);a.length=n;},ArraySort:a=>a.sort((x,y)=>x-y),
  ZeroMemory:a=>{for(const k of Object.keys(a))a[k]=typeof a[k]==='boolean'?false:0;}
 });
 for(const [name,args] of [['StatsMonth','date,offset'],['StatsRange',''],['StatsPositionOpen','id'],
@@ -99,6 +100,10 @@ check('one failed position query cannot publish incomplete totals',()=>{
 check('netting reversal is explicitly skipped',()=>{
  cx.statsFilter=2;add(110,0,start);add(110,2,start+100,.04,4110,{profit:10});cx.StatsRefresh();assert.equal(cx.statsSkipped,1);assert.equal(cx.statsSummary.trades,0);
 });
+check('final exit reason follows the latest deal, including same-second tie-break',()=>{
+ add(112,0,start);add(112,1,start+100,.01,4110,{reason:1});add(112,1,start+100,.01,4111,{reason:5});
+ cx.StatsRefresh();assert.equal(cx.statsTrades[0].exitReason,5);
+});
 check('zero baseline captures initial losing trade drawdown',()=>{
  const st=summary();for(const net of [-10,5,-7])cx.StatsAccumulate({...trade(),net,openTime:1,closeTime:61},st);
  assert.equal(st.net,-12);assert.equal(st.maxDrawdown,12);assert.equal(st.maxLossStreak,1);
@@ -136,16 +141,19 @@ const main=fs.readFileSync('EA_T哥点位跟单.mq5','utf8');
 for(const m of main.matchAll(/(UI_[A-Z]+)=C'(\d+),(\d+),(\d+)'/g))cx[m[1]]=[+m[2],+m[3],+m[4]];
 function format(s,...a){let i=0;return s.replace(/%([-+]?)(?:\.(\d+))?([sdf])/g,(_,sign,p,t)=>{const v=a[i++];return t==='s'?String(v):t==='d'?String(Math.trunc(v)):Number(v).toFixed(Number(p||6));});}
 Object.assign(cx,{
+ statsSelectedId:0,statsPressedId:0,statsCumulative:[],statsDrawdowns:[],uiHits:[],
+ DEAL_REASON_CLIENT:0,DEAL_REASON_MOBILE:1,DEAL_REASON_WEB:2,DEAL_REASON_EXPERT:3,DEAL_REASON_SL:4,DEAL_REASON_TP:5,DEAL_REASON_SO:6,
+ TIME_SECONDS:4,
  _Digits:2,TIME_DATE:1,TIME_MINUTES:2,ACCOUNT_CURRENCY:0,
  DoubleToString:(v,d)=>Number(v).toFixed(d),StringFormat:format,
  StringFind:(s,t)=>s.indexOf(t),StringSubstr:(s,i,n)=>n===undefined?s.slice(i):s.slice(i,i+n),
- TimeToString:(s,flags)=>new Date(s*1000).toISOString().slice(0,flags===1?10:16).replace('T',' '),
+ TimeToString:(s,flags)=>{const iso=new Date(s*1000).toISOString();return flags===1?iso.slice(0,10):flags===2?iso.slice(11,16):iso.slice(0,flags&4?19:16).replace('T',' ');},
  AccountInfoString:()=>'USC',UIPx:v=>Math.round(v),UIInk:v=>v,
  UIRound:(x,y,w,h,c)=>ops.push({op:'rect',x,y,w,h,color:c,r:8}),
  UICard:(x,y,w,h,c)=>ops.push({op:'rect',x,y,w,h,color:c,r:8}),
  UIText:(text,x,y,w,size,color,right=false)=>ops.push({op:'text',text:String(text),x,y,w,size,color,right}),
  UIButton:(text,x,y,w,action,active=false)=>{
-  hits.push({x,y,w,h:27,action});cx.UIRound(x,y,w,27,active?[30,65,62]:cx.UI_HEADER);cx.UIText(text,x+8,y+5,w-16,9,active?cx.UI_ACCENT:cx.UI_MUTED);
+  hits.push({x,y,w,h:27,action});cx.uiHits.push({x,y,w,h:27,action});cx.UIRound(x,y,w,27,active?[25,49,76]:cx.UI_HEADER);cx.UIText(text,x+8,y+5,w-16,9,active?cx.UI_ACCENT:cx.UI_MUTED);
  },
  panelCanvas:{
   LineAA:(x,y,x2,y2,color)=>ops.push({op:'line',x,y,x2,y2,color}),
@@ -154,20 +162,22 @@ Object.assign(cx,{
   FillCircle:(x,y,r,color)=>ops.push({op:'circle',x,y,r,color}),Update:()=>{}
  }
 });
-for(const [name,args] of [['StatsMoney','value'],['StatsInk','value'],['StatsLine','row,left,right'],['StatsDrawCurve',''],['StatsPanel','']])
+for(const match of src.slice(src.indexOf('string StatsMoney')).matchAll(/^(?:int|void|string|color) (Stats\w+)\(([^\n]*)\)/gm)){
+ const name=match[1],args=match[2].split(',').map(a=>a.trim().split(/\s+/).pop()).join(',');
  vm.runInContext('function '+name+'('+args+'){'+convert(body(name))+'}',cx);
+}
 cx.StatsRefresh=()=>{};
 function sample(values){
  cx.statsTrades=values.map((net,i)=>({...trade(),id:820100+i,net,gross:net+.2,commission:-.2,direction:i%2,entryVolume:.02,exitVolume:.02,
-  entryValue:82,exitValue:82.1,exitDeals:2,openTime:start+i*600,closeTime:start+i*600+300}));
+  entryValue:82,exitValue:(4100+(i%2===0?1:-1)*(net+.2)/2)*.02,entryDeals:1,exitDeals:2,exitReason:net>0?5:4,openTime:start+i*600,closeTime:start+i*600+300}));
  cx.statsSummary=summary();for(const t of cx.statsTrades)cx.StatsAccumulate(t,cx.statsSummary);
- Object.assign(cx,{statsOK:true,statsSkipped:0,statsStatus:values.length?'按完整平仓统计':'此区间没有符合筛选的完整平仓记录',statsRangeStart:start,statsRangeEnd:start+86400,statsReview:0});
+ Object.assign(cx,{statsOK:true,statsSkipped:0,statsStatus:values.length?'按完整平仓统计':'此区间没有符合筛选的完整平仓记录',statsRangeStart:start,statsRangeEnd:start+86400,statsReview:0,statsSelectedId:0,statsPressedId:0});
 }
 function render(detail){
- cx.statsDetail=detail;ops=[];hits=[];
- const height=detail===2?650:570;
+ cx.statsDetail=detail;ops=[];hits=[];cx.uiHits=[];
+ const height=650;
  cx.UIRound(0,0,560,height,cx.UI_ROOT);cx.UIRound(0,0,560,40,cx.UI_HEADER);
- cx.UIText('XAUUSD.c · 交易统计',16,10,222,11,cx.UI_TEXT);cx.UIText('v1.28',242,13,40,8,cx.UI_DIM);
+ cx.UIText('XAUUSD.c · 交易统计',16,10,222,11,cx.UI_TEXT);cx.UIText('v1.50',242,13,40,8,cx.UI_DIM);
  cx.UIText('09:42:16',286,12,100,10,cx.UI_MUTED,true);cx.UIText('交易模式',434,13,110,9,cx.UI_ACCENT,true);
  ['监控','统计','看盘'].forEach((s,i)=>cx.UIButton(s,12+i*76,49,68,2+i,i===1));
  cx.UIButton('手机TP开',240,49,100,28,true);cx.UIText('已同步5条',350,56,110,8.5,cx.UI_DIM);cx.UIButton('点位线开',462,49,82,27,true);
@@ -186,13 +196,63 @@ check('curve and profit bars render mixed, all-loss, zero, single and dense samp
   sample(values);const before=JSON.stringify([cx.statsTrades,cx.statsSummary]);render(2);
   assert.equal(JSON.stringify([cx.statsTrades,cx.statsSummary]),before);
   assert(ops.some(o=>o.text==='累计净收益'));assert(ops.some(o=>o.text==='每笔盈亏'));
-  assert(ops.some(o=>o.text==='最新 '+cx.StatsMoney(values.reduce((a,b)=>a+b,0))));
+  assert(ops.some(o=>o.text===cx.StatsMoney(values.reduce((a,b)=>a+b,0))));
  }
 });
 check('all statistics pages and empty/error states publish bounded controls and honest captions',()=>{
  sample([12,-3,5]);for(let d=0;d<4;d++)render(d);
- sample([]);render(2);assert(!ops.some(o=>o.text==='累计净收益'));
+ sample([]);render(2);assert(!cx.uiHits.some(h=>h.action===110));
  cx.statsOK=false;cx.statsStatus='历史查询失败';render(0);assert(ops.some(o=>o.text==='历史查询失败'));assert(ops.filter(o=>o.text==='--').length===4);
+});
+check('linked graphs select by position ID and review/back preserve the trade',()=>{
+ sample([10,-25,7,4]);render(2);
+ assert.deepEqual(Array.from(cx.statsCumulative),[10,-15,-8,-4]);
+ assert.deepEqual(Array.from(cx.statsDrawdowns),[0,-25,-18,-14]);
+ for(let i=0;i<4;i++)assert.equal(cx.StatsPointAtX(cx.StatsPointX(i,4),4),i);
+ assert.equal(cx.StatsPointAtX(82,4),0);assert.equal(cx.StatsPointAtX(524,4),3);
+ cx.statsPressedId=cx.statsTrades[1].id;cx.StatsAction(1001);assert.equal(cx.StatsSelectedIndex(),1);
+ cx.StatsAction(111);assert.equal(cx.statsDetail,3);render(3);assert(ops.some(o=>o.text==='-25.00'));
+ cx.StatsAction(112);assert.equal(cx.statsDetail,2);assert.equal(cx.StatsSelectedIndex(),1);
+ cx.StatsAction(43);assert.equal(cx.StatsSelectedIndex(),0);cx.StatsAction(43);assert.equal(cx.StatsSelectedIndex(),0);
+ cx.StatsAction(44);assert.equal(cx.StatsSelectedIndex(),1);
+ cx.StatsAction(113);assert.equal(cx.StatsSelectedIndex(),0);cx.StatsAction(114);assert.equal(cx.StatsSelectedIndex(),1);
+});
+check('refresh preserves selected ID; stale mouse press cannot select a replacement',()=>{
+ sample([2,-4,9]);render(2);cx.StatsSelect(1);const id=cx.statsSelectedId;cx.statsPressedId=id;
+ cx.statsTrades.unshift({...cx.statsTrades[0],id:99});cx.StatsBuildSeries();assert.equal(cx.StatsSelectedIndex(),2);
+ cx.StatsAction(1001);assert.equal(cx.statsSelectedId,id);
+ cx.statsTrades=[];cx.StatsBuildSeries();assert.equal(cx.statsSelectedId,0);
+ assert.equal(cx.StatsPointAtX(100,0),-1);
+});
+check('review has seconds, actual exit source and explicit missing process data',()=>{
+ sample([8]);cx.statsTrades[0].exitReason=4;render(3);
+ assert(ops.some(o=>o.text==='止损 SL'));assert(ops.some(o=>o.text?.includes('轨迹未记录')));
+ assert.equal(cx.StatsExitText(1),'手机端操作');assert.equal(cx.StatsExitText(-1),'其他 / 未知');
+});
+
+check('production mouse events link both plots, review and scope reset at multiple DPI scales',()=>{
+ // Locate definitions, not earlier call sites.
+ function definition(name){
+  const m=main.match(new RegExp('^(?:int|void) '+name+'\\(','m'));assert(m);
+  const tail=main.slice(m.index),start=tail.indexOf('{');let end=start+1,n=1;
+  for(;n;end++){if(tail[end]==='{')n++;if(tail[end]==='}')n--;}return tail.slice(start+1,end-1);
+ }
+ for(const [name,args] of [['HitAction','mouseX,mouseY'],['ViewAction','action'],['OnChartEvent','id,lparam,dparam,sparam']])
+  vm.runInContext('function '+name+'('+args+'){'+convert(definition(name))+'}',cx);
+ Object.assign(cx,{UIViewMask:()=>0,SaveView:()=>{},Panel:()=>render(cx.statsDetail),panelReady:true,
+  uiX:8,uiY:24,uiDragging:false,uiLeftWasDown:false,uiPressedAction:0,
+  CHARTEVENT_MOUSE_MOVE:1,CHARTEVENT_CHART_CHANGE:2,StringToInteger:Number});
+ for(const scale of [.75,1,1.5]){
+  sample([10,-20,7]);cx.panelScale=scale;render(2);
+  const click=(x,y)=>{cx.OnChartEvent(1,8+x*scale,24+y*scale,'1');cx.OnChartEvent(1,8+x*scale,24+y*scale,'0');};
+  click(cx.StatsPointX(0,3),320);assert.equal(cx.StatsSelectedIndex(),0);
+  click(cx.StatsPointX(1,3),470);assert.equal(cx.StatsSelectedIndex(),1);
+  click(450,580);assert.equal(cx.statsDetail,3);assert.equal(cx.StatsSelectedIndex(),1);
+  click(465,194);assert.equal(cx.statsDetail,2);assert.equal(cx.StatsSelectedIndex(),1);
+ }
+ // Scope changes discard old selection before new data is built.
+ cx.Panel=()=>{};cx.ViewAction(41);assert.equal(cx.statsSelectedId,0);assert.equal(cx.statsFilter,1);assert(cx.statsDirty);
+ cx.Panel=()=>render(cx.statsDetail);
 });
 if(process.env.TGE_STATS_PREVIEW){
  fs.mkdirSync(process.env.TGE_STATS_PREVIEW,{recursive:true});
