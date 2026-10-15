@@ -1,5 +1,5 @@
 #property strict
-#property version "1.48"
+#property version "1.49"
 #property description "T哥点位触价 / 明确方向8·区间6·地图5 / 0.02手。独立Magic，仅管理本EA持仓。"
 #include <Trade/Trade.mqh>
 #include <Canvas/Canvas.mqh>
@@ -1181,27 +1181,35 @@ void ViewAction(const int action)
    else return;
    if(recordUndo && UIViewMask()!=before) uiUndoMask=before;
    // 先完成图表命令，再按实际状态画工具栏。
-   ChartRedraw(0); Panel(); SaveView();
+   Panel(); SaveView();
 }
-bool EnsurePanel(const int logicalHeight)
+bool EnsurePanel(const int logicalHeight,const int scaleHeight)
 {
    double dpi=(double)TerminalInfoInteger(TERMINAL_SCREEN_DPI)/96.0;
    int chartWidth=(int)ChartGetInteger(0,CHART_WIDTH_IN_PIXELS),chartHeight=(int)ChartGetInteger(0,CHART_HEIGHT_IN_PIXELS);
    panelScale=MathMax(0.70,MathMin(MathMax(0.85,dpi),1.5));
    if(chartWidth>40) panelScale=MathMin(panelScale,(chartWidth-20)/560.0);
-   if(chartHeight>60) panelScale=MathMin(panelScale,(chartHeight-40)/(double)logicalHeight);
+   if(chartHeight>60) panelScale=MathMin(panelScale,(chartHeight-40)/(double)scaleHeight);
    panelScale=MathMax(panelScale,0.45);
    int width=UIPx(560),height=UIPx(logicalHeight);
-   if(!panelReady || ObjectFind(0,VIEW+"CANVAS")<0 || width!=panelWidth || height!=panelHeight)
+   bool alive=panelReady && ObjectFind(0,VIEW+"CANVAS")>=0;
+   if(!alive)
    {
       if(panelReady) panelCanvas.Destroy();
+      panelReady=false;
       if(!panelCanvas.CreateBitmapLabel(ChartID(),0,VIEW+"CANVAS",uiX,uiY,width,height,COLOR_FORMAT_ARGB_NORMALIZE))
          return false;
-      panelReady=true; panelWidth=width; panelHeight=height;
+      panelReady=true;
       ObjectSetInteger(0,VIEW+"CANVAS",OBJPROP_SELECTABLE,false);
       ObjectSetInteger(0,VIEW+"CANVAS",OBJPROP_BACK,false);
       ObjectSetInteger(0,VIEW+"CANVAS",OBJPROP_ZORDER,1);
    }
+   else if(width!=panelWidth || height!=panelHeight)
+   {
+      // 窗口缩放或主动收起才调整像素缓冲，保留同一个图表对象。
+      if(!panelCanvas.Resize(width,height)) return false;
+   }
+   panelWidth=width; panelHeight=height;
    MovePanel();
    return true;
 }
@@ -1230,15 +1238,17 @@ void Panel()
    int decisionY=heroY+heroHeight+12,positionY=decisionY+88;
    int mapY=positionY+24+MathMax(visible,1)*rowHeight+10;
    int mapHeight=62+pointRows*28;
-   int height=uiCollapsed ? 122 : uiStatistics ? (statsDetail==2 ? 650 : 570) : uiIndicators ? 592 : mapY+42;
-   if(!EnsurePanel(height)) return;
+   // 所有展开页面共享尺寸；页面选择不参与缩放，顶栏和按钮不会随切页跳动。
+   int expandedHeight=MathMax(650,mapY+42);
+   int height=uiCollapsed ? 122 : expandedHeight;
+   if(!EnsurePanel(height,expandedHeight)) return;
    ArrayResize(uiHits,0);
    panelCanvas.Erase(UIInk(UI_ROOT));
    UIRound(0,0,560,height,UI_ROOT);
    panelCanvas.FillRectangle(0,0,UIPx(559),UIPx(39),UIInk(UI_HEADER));
    string pageTitle=uiStatistics ? "交易统计" : uiIndicators ? "看盘设置" : "T哥点位监控";
    UIText(_Symbol+" · "+pageTitle,16,10,222,11,UI_TEXT);
-   UIText("v1.48",242,13,40,8,UI_DIM);
+   UIText("v1.49",242,13,40,8,UI_DIM);
    UIText(TimeToString(TimeGMT()+8*3600,TIME_SECONDS),286,12,100,10,UI_MUTED,true);
    UIButton(uiCollapsed ? "+" : "−",396,7,30,1);
    UIButton(tradeMode ? "交易模式" : "观察模式",434,7,110,29,tradeMode);
