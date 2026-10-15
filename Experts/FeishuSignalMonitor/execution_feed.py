@@ -4,7 +4,7 @@ import hashlib
 import io
 import json
 import re
-from store import state
+from store import state, set_state
 from deepseek_ai import lane_readiness, refs_current, pending_window_start
 
 
@@ -62,6 +62,14 @@ def execution_csv(db, c, now, paused, context, map_active, levels, ai, protocol=
                  and setup.get('mode') == 'SETUP' and setup.get('source_refs')
                  and refs_current(db, c['chat_id'], setup['source_refs']))
         direct = dict(setup, active=bool(valid))
+    # 新地图淘汰更早且范围外的明确方向；本地记住淘汰时间，重启/旧AI结果不复活。
+    scope = dict(chat_id=c['chat_id'], teacher_id=c['teacher_sender_id'],
+                 symbol=c['symbols'][c['teacher_symbol']])
+    retired = state(db, 'map_retired_directions', {}) if protocol == 7 else {}
+    if any(retired.get(k) != v for k, v in scope.items()):
+        retired = dict(scope, plans={})
+    retired_changed = False
+    map_time = context.get('created', 0) if map_active and len(levels) >= 3 else 0
     if direct.get('active'):
         for p in direct.get('plans', []):
             if p.get('basis'):  # AI的旧区间推导不用作直接喊单，区间在下方确定性映射。
@@ -69,8 +77,20 @@ def execution_csv(db, c, now, paused, context, map_active, levels, ai, protocol=
             origin = p.get('origin_id', direct.get('message_id', ''))
             revision = p.get('origin_revision', direct.get('revision', ''))
             created = p.get('origin_created', direct.get('created', 0))
+            confirmed = p.get('confirmed_at', created)
+            if protocol == 7:
+                key = hashlib.sha256(f"DIRECT|{origin}|{revision}|{p['side']}|{p['price']:g}".encode('utf-8')).hexdigest()[:24]
+                if map_time > confirmed and not min(levels) <= p['price'] <= max(levels):
+                    if map_time > retired['plans'].get(key, 0):
+                        retired['plans'][key] = map_time
+                        retired_changed = True
+                if key in retired['plans'] and confirmed <= retired['plans'][key]:
+                    continue
             add('DIRECT', 8, p['side'], p['price'], origin, revision,
-                created, origin+'|'+revision, p.get('exits'), p.get('confirmed_at', created), p['mode'])
+                created, origin+'|'+revision, p.get('exits'), confirmed, p['mode'])
+    if retired_changed:
+        with db:
+            set_state(db, 'map_retired_directions', retired)
 
     # 明确给出的大小区间无需AI臆造方向：下沿BUY、上沿SELL标成规则推导。
     # 即使scene无直接计划、旧ai_snapshot为WAIT，合法的区间仍可独立使用。

@@ -231,5 +231,83 @@ class ExecutionTests(unittest.TestCase):
         self.assertEqual(before[1:],after[1:])
 
 
+    def new_map(self, text='4135--4142--4152--4170', mid='new-map', age=0):
+        raw=self.seed(mid=mid,text=text,age=age)
+        refresh_levels(self.db,self.c,self.now)
+        return raw
+
+    def test_v7_new_map_removes_older_outside_directions_while_ai_is_down(self):
+        self.scene()
+        self.new_map()
+        with self.db:
+            set_state(self.db,'deepseek_status',dict(online=False,error='HTTP 503'))
+        rows=self.feed(protocol=7)
+        self.assertEqual(rows[0][3],'1')
+        self.assertFalse(any(r[2]=='DIRECT' for r in rows[1:-1]))
+        self.assertEqual([float(r[5]) for r in rows[1:-1] if r[2]=='MAP'],[4135,4142,4152,4170])
+        self.assertEqual(len(state(self.db,'map_retired_directions')['plans']),2)
+        self.assertEqual(rows,self.feed(protocol=7))  # 重复导出不产生额外状态/机会。
+
+    def test_v7_new_map_keeps_inside_and_boundary_directions(self):
+        self.scene()
+        self.new_map('4175--4180--4193')
+        self.assertEqual(len([r for r in self.feed(protocol=7)[1:-1] if r[2]=='DIRECT']),2)
+        self.new_map('4160--4180--4200',mid='inside-map',age=-1)
+        self.assertEqual(len([r for r in self.feed(protocol=7)[1:-1] if r[2]=='DIRECT']),2)
+
+    def test_v7_older_or_same_time_map_cannot_remove_newer_direction(self):
+        self.scene()
+        self.new_map(age=50)
+        self.assertEqual(len([r for r in self.feed(protocol=7)[1:-1] if r[2]=='DIRECT']),2)
+        with self.db:
+            setup=state(self.db,'deepseek_setup')
+            for plan in setup['plans']:
+                plan['confirmed_at']=self.now
+            set_state(self.db,'deepseek_setup',setup)
+        self.new_map(mid='equal-map')
+        self.assertEqual(len([r for r in self.feed(protocol=7)[1:-1] if r[2]=='DIRECT']),2)
+
+    def test_v7_removed_plan_stays_removed_after_reopen_and_wider_map(self):
+        from store import connect
+        self.scene()
+        self.new_map()
+        self.feed(protocol=7)
+        path=self.db.execute('PRAGMA database_list').fetchone()[2]
+        self.db.close()
+        self.db=connect(path)
+        self.new_map('4100--4175--4220',mid='wide-map',age=-1)
+        rows=self.feed(protocol=7)
+        self.assertFalse(any(r[2]=='DIRECT' for r in rows[1:-1]))
+        # 更晚明确重申同一计划后可重新使用，原始消息时间不改。
+        with self.db:
+            setup=state(self.db,'deepseek_setup')
+            setup['plans'][0]['confirmed_at']=self.now+2
+            set_state(self.db,'deepseek_setup',setup)
+        direct=[r for r in self.feed(now=self.now+2,protocol=7)[1:-1] if r[2]=='DIRECT']
+        self.assertEqual(len(direct),1)
+        self.assertEqual(float(direct[0][5]),4175)
+
+    def test_v7_newer_outside_direction_can_be_added_after_map(self):
+        self.scene()
+        self.new_map()
+        self.feed(protocol=7)
+        with self.db:
+            setup=state(self.db,'deepseek_setup')
+            setup['plans'][0].update(origin_id='new-direction',origin_revision='new',
+                                    origin_created=self.now+1,confirmed_at=self.now+1)
+            set_state(self.db,'deepseek_setup',setup)
+        self.assertEqual(len([r for r in self.feed(now=self.now+1,protocol=7)[1:-1] if r[2]=='DIRECT']),1)
+
+    def test_v7_historical_or_withdrawn_map_cannot_retire_directions(self):
+        self.scene()
+        self.seed(mid='historical-map',text='4135--4142--4152--4170',historical=True,age=0)
+        refresh_levels(self.db,self.c,self.now)
+        self.assertEqual(len([r for r in self.feed(protocol=7)[1:-1] if r[2]=='DIRECT']),2)
+        raw=self.new_map(mid='withdrawn',age=-1)
+        ingest(self.db,self.c['chat_id'],[dict(raw,deleted=True)])
+        refresh_levels(self.db,self.c,self.now)
+        self.assertEqual(len([r for r in self.feed(protocol=7)[1:-1] if r[2]=='DIRECT']),2)
+
+
 if __name__=='__main__':
     unittest.main()
