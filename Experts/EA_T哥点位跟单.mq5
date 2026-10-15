@@ -1,5 +1,5 @@
 #property strict
-#property version "1.45"
+#property version "1.46"
 #property description "T哥点位触价 / 明确方向8·区间6·地图5 / 0.02手。独立Magic，仅管理本EA持仓。"
 #include <Trade/Trade.mqh>
 #include <Canvas/Canvas.mqh>
@@ -1164,10 +1164,11 @@ void Panel()
    int directRows=0,rangeRows=0;
    for(int i=0;i<ArraySize(aiPlans);i++)
       if(aiPlans[i].priority==8) directRows++; else if(aiPlans[i].priority==6) rangeRows++;
-   int planCount=directRows;
-   int planRows=MathMax((planCount+1)/2,1);
-   int pointRows=MathMax((ArraySize(levels)+5)/6,1);
-   int heroY=180,heroHeight=90+planRows*92+rangeRows*26+pointRows*26;
+   int planRows=(directRows+1)/2;
+   int pointRows=MathMax((ArraySize(levels)+3)/4,1);
+   int directHeight=directRows>0 ? 24+planRows*100 : 28;
+   int rangeHeight=rangeRows>0 ? 26+rangeRows*48+8 : 0;
+   int heroY=180,heroHeight=44+directHeight+rangeHeight+28+pointRows*44+26+32;
    int decisionY=heroY+heroHeight+12,positionY=decisionY+88;
    int mapY=positionY+24+MathMax(visible,1)*rowHeight+10;
    int mapHeight=62+pointRows*28;
@@ -1179,7 +1180,7 @@ void Panel()
    panelCanvas.FillRectangle(0,0,UIPx(559),UIPx(39),UIInk(UI_HEADER));
    string pageTitle=uiStatistics ? "交易统计" : uiIndicators ? "看盘设置" : "T哥点位监控";
    UIText(_Symbol+" · "+pageTitle,16,10,222,11,UI_TEXT);
-   UIText("v1.45",242,13,40,8,UI_DIM);
+   UIText("v1.46",242,13,40,8,UI_DIM);
    UIText(TimeToString(TimeGMT()+8*3600,TIME_SECONDS),286,12,100,10,UI_MUTED,true);
    UIButton(uiCollapsed ? "+" : "−",396,7,30,1);
    UIText(启用真实交易 ? "交易模式" : "观察模式",434,13,110,9,启用真实交易 ? UI_ACCENT : UI_WARN,true);
@@ -1212,46 +1213,85 @@ void Panel()
    UIText("SL "+IntegerToString(protectedCount)+"/"+IntegerToString(count),418,125,114,12,UI_TEXT);
    UIText("TP "+IntegerToString(tpCount)+"/"+IntegerToString(count),418,148,114,8,UI_DIM);
 
-   // 三类参考在同一块：明确方向卡片 -> 区间两端 -> 中性地图。
+   // 价格独占一行或一列，分区按实际内容排布，不为空方向计划预留卡片。
    UICard(12,heroY,536,heroHeight,UI_ROW);
-   UIText("点位计划 · 明确8 / 区间6 / 地图5",28,heroY+12,380,11,UI_TEXT);
+   UIText("点位计划",28,heroY+12,280,12,UI_TEXT);
    bool fallback=AIChannelReady() && StringFind(aiReason,"沿用已确认点位")>=0;
-   UIText(AIChannelReady() ? (fallback ? "沿用已确认" : "同步正常") : "已暂停",424,heroY+14,104,9,
-          AIChannelReady() && !fallback ? UI_ACCENT : UI_WARN,true);
-   int card=0;
-   for(int i=0;i<ArraySize(aiPlans);i++)
+   color syncInk=AIChannelReady() && !fallback ? UI_ACCENT : UI_WARN;
+   UIRound(434,heroY+10,98,26,UI_HEADER,5);
+   UIText(AIChannelReady() ? (fallback ? "沿用已确认" : "同步正常") : "已暂停",
+          444,heroY+15,78,9,syncInk,true);
+   int y=heroY+44;
+   if(directRows>0)
    {
-      if(aiPlans[i].priority!=8) continue;
-      int x=24+(card%2)*260,y=heroY+38+(card/2)*92; card++;
-      bool buy=aiPlans[i].sign>0; color ink=buy ? UI_ACCENT : UI_SELL;
-      UIRound(x,y,252,84,!PlanExecutable(i) ? UI_CARD : buy ? C'20,47,44' : C'36,32,53');
-      UIText(buy ? "8 · 明确 BUY / 多" : "8 · 明确 SELL / 空",x+12,y+8,150,9,ink);
-      UIText(StringSubstr(TimeToString(aiPlans[i].confirmed+8*3600,TIME_DATE|TIME_MINUTES),5,11),x+158,y+8,82,8,UI_DIM,true);
-      UIText(DoubleToString(aiPlans[i].level,_Digits),x+12,y+27,140,18,UI_TEXT);
-      UIText(PlanExecutable(i) ? "±1 · "+PlanAgeCaption(i) : "仅供参考",x+144,y+34,96,8,ink,true);
-      UIText(aiPlans[i].status,x+12,y+61,228,8,UI_MUTED);
+      UIText("明确方向",28,y,260,9,UI_MUTED);
+      UIText("优先级 8",420,y,112,8,UI_DIM,true);
+      int card=0;
+      for(int i=0;i<ArraySize(aiPlans);i++)
+      {
+         if(aiPlans[i].priority!=8) continue;
+         int x=28+(card%2)*260,cy=y+24+(card/2)*100; card++;
+         bool buy=aiPlans[i].sign>0,usable=PlanExecutable(i);
+         color ink=buy ? UI_ACCENT : UI_SELL;
+         UIRound(x,cy,244,92,!usable ? UI_CARD : buy ? C'20,47,44' : C'36,32,53',6);
+         UIText(buy ? "做多 BUY" : "做空 SELL",x+12,cy+8,112,9,ink);
+         UIText(StringSubstr(TimeToString(aiPlans[i].confirmed+8*3600,TIME_DATE|TIME_MINUTES),5,11),
+                x+132,cy+9,100,8,UI_DIM,true);
+         UIText(DoubleToString(aiPlans[i].level,_Digits),x+12,cy+27,220,20,UI_TEXT);
+         UIText(usable ? "触价 ±1.00 · "+PlanAgeCaption(i) : "仅供参考",x+12,cy+60,220,8,ink);
+         UIText(aiPlans[i].status,x+12,cy+76,220,8,UI_MUTED);
+      }
    }
-   if(card==0) UIText("暂无明确方向计划 · 区间/地图仍可独立触发",28,heroY+62,500,11,UI_MUTED);
-   int y=heroY+38+planRows*92;
-   for(int i=0;i<ArraySize(aiPlans);i++)
+   else
    {
-      if(aiPlans[i].priority!=6) continue;
-      string label=aiPlans[i].kind=="INNER" ? "小区间" : "大区间";
-      UIText("6 · "+label+(aiPlans[i].sign>0 ? "下沿 多 " : "上沿 空 ")+DoubleToString(aiPlans[i].level,_Digits),28,y,240,10,UI_TEXT);
-      UIText((PlanExecutable(i) ? PlanAgeCaption(i)+" · " : "")+aiPlans[i].status,278,y+2,250,8,UI_MUTED,true); y+=26;
+      UIText("暂无明确方向计划",28,y+3,220,9,UI_MUTED);
+      UIText("区间 / 地图仍可独立触发",260,y+4,272,8,UI_DIM,true);
    }
+   y+=directHeight;
+   if(rangeRows>0)
+   {
+      UIText("区间边界",28,y,260,9,UI_MUTED);
+      UIText("优先级 6",420,y,112,8,UI_DIM,true);
+      y+=26;
+      for(int i=0;i<ArraySize(aiPlans);i++)
+      {
+         if(aiPlans[i].priority!=6) continue;
+         bool buy=aiPlans[i].sign>0,usable=PlanExecutable(i);
+         color ink=buy ? UI_ACCENT : UI_SELL;
+         string label=(aiPlans[i].kind=="INNER" ? "小区间" : "大区间")+(buy ? "下沿" : "上沿");
+         UIRound(28,y,504,40,UI_CARD,5);
+         UIText(label,40,y+5,94,9,UI_MUTED);
+         UIText(buy ? "做多 BUY" : "做空 SELL",40,y+23,94,8,ink);
+         UIText(DoubleToString(aiPlans[i].level,_Digits),140,y+8,130,16,usable ? UI_TEXT : UI_DIM,true);
+         UIText(usable ? PlanAgeCaption(i) : "仅供参考",288,y+5,232,8,ink,true);
+         UIText(aiPlans[i].status,288,y+23,232,8,UI_MUTED,true);
+         y+=48;
+      }
+      y+=8;
+   }
+   UIText("中性地图",28,y,220,9,UI_MUTED);
+   UIText("优先级 5 · "+IntegerToString(ArraySize(levels))+" 个点位",280,y,252,8,UI_DIM,true);
+   y+=28;
    for(int row=0;row<pointRows;row++)
    {
-      if(row==0) UIText("5 · 地图",28,y,68,9,UI_MUTED);
-      for(int j=0;j<6;j++)
+      for(int col=0;col<4;col++)
       {
-         int i=row*6+j; if(i>=ArraySize(levels)) break;
-         UIText(DoubleToString(levels[i],_Digits),100+j*72,y,70,10,feedActive ? UI_TEXT : UI_DIM);
+         int i=row*4+col; if(i>=ArraySize(levels)) break;
+         int x=28+col*128;
+         UIRound(x,y,120,36,UI_CARD,5);
+         UIText(DoubleToString(levels[i],_Digits),x+10,y+8,100,14,feedActive ? UI_TEXT : UI_DIM,true);
       }
-      y+=26;
+      if(ArraySize(levels)==0)
+      {
+         UIRound(28,y,504,36,UI_CARD,5);
+         UIText("暂无地图点位，等待同步",40,y+10,480,9,UI_DIM);
+      }
+      y+=44;
    }
-   UIText(MapLifeCaption(),28,y,500,8,feedActive ? UI_MUTED : UI_WARN);
-   UIText(AIPlanCaption(),28,heroY+heroHeight-21,500,8,AIChannelReady() ? UI_MUTED : UI_WARN);
+   UIText(MapLifeCaption(),28,y+2,504,8,feedActive ? UI_MUTED : UI_WARN);
+   y+=26;
+   panelCanvas.FillRectangle(UIPx(28),UIPx(y),UIPx(532),UIPx(y),UIInk(UI_BORDER));
+   UIText(AIPlanCaption(),28,y+10,504,8,AIChannelReady() ? UI_MUTED : UI_WARN);
    UIText("当前执行",16,decisionY+3,106,9,UI_DIM);
    UIText("实时触价 · 0.02手",132,decisionY+3,198,9,UI_MUTED);
    UIText("离开4点5秒可重入",336,decisionY+3,204,9,UI_MUTED,true);

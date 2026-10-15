@@ -542,7 +542,7 @@ def process_ai_batch(db, c, client, now, restore_scene=False, preview=False):
     if not rows:
         if preview: raise AIError('没有可重新分析的非历史老师消息')
         current=state(db,'deepseek_status',{})
-        current.update(enabled=True,at=now,**lane_readiness(db,c,now))
+        current.update(enabled=True,at=now,model=c['ai_model'],**lane_readiness(db,c,now))
         set_state(db,'deepseek_status',current);db.commit()
         return 0
     targets=[]
