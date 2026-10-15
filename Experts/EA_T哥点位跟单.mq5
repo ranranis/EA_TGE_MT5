@@ -1,14 +1,15 @@
 #property strict
-#property version "1.47"
+#property version "1.48"
 #property description "T哥点位触价 / 明确方向8·区间6·地图5 / 0.02手。独立Magic，仅管理本EA持仓。"
 #include <Trade/Trade.mqh>
 #include <Canvas/Canvas.mqh>
 // 看盘指标嵌入主EX5，用户仍只需挂载这一份EA。
 #resource "Include\\View\\TgeChartOverlay.ex5"
 #resource "Include\\View\\TgeChartOscillator.ex5"
+#resource "Include\\View\\TgeChartStructure.ex5"
 
 input group "执行与仓位"
-input bool   启用真实交易=true;        // 默认执行交易；手动关闭时仅观察，不发送交易请求
+input bool   启用真实交易=true;        // 初始模式；关闭时每次加载先观察，面板可手动切换
 const double 每次开仓手数=0.02; // 固定0.02手，不从旧set继承其他手数
 input int    最大同时持仓=3;
 input double 挂单最大离价=50.0;        // 保留旧参数名称；现用于严重远离后停止新入场，等待老师新确认
@@ -56,6 +57,14 @@ input int    看盘KD平滑=3;
 input int    看盘KD信号=3;
 
 
+input group "看盘结构 · 仅显示"
+input ENUM_TIMEFRAMES 看盘框体周期=PERIOD_M5;
+input int    看盘近期框根数=5;
+input int    看盘震荡最少根数=12;
+input double 看盘震荡ATR倍数=1.5;
+input int    看盘收缩比较根数=100;
+input double 看盘收缩低位百分比=20.0;
+
 const string FEED="FeishuMT5SignalMonitor\\tge_levels.csv";
 const string VIEW="TGE_";
 // 图表显示和手机TP开关独立于短线候选、仓位及pending状态。
@@ -67,6 +76,7 @@ double levels[];
 string identity="",sourceKind="",sourceSender="",feedStatus="等待首次点位",reason="等待收线";
 datetime sourceTime=0,feedTime=0,readyFrom=0,lastMinute=0;
 bool feedActive=false,busy=false,stateOK=true;
+bool tradeMode=false;
 const int TREND_UNKNOWN=2;
 int maHandle=INVALID_HANDLE,atrHandle=INVALID_HANDLE,trendFastHandle=INVALID_HANDLE,trendSlowHandle=INVALID_HANDLE;
 int lockHandle=INVALID_HANDLE,trend=TREND_UNKNOWN;
@@ -168,7 +178,7 @@ void RestorePending()
 }
 bool CanExecute()
 {
-   return 启用真实交易 && stateOK && lockHandle!=INVALID_HANDLE &&
+   return tradeMode && stateOK && lockHandle!=INVALID_HANDLE &&
           AccountInfoInteger(ACCOUNT_LOGIN)==accountLogin && AccountInfoString(ACCOUNT_SERVER)==accountServer &&
           AccountInfoInteger(ACCOUNT_MARGIN_MODE)==ACCOUNT_MARGIN_MODE_RETAIL_HEDGING &&
           TerminalInfoInteger(TERMINAL_CONNECTED) && TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) &&
@@ -178,7 +188,7 @@ bool CanExecute()
 // 解释既有执行门槛；不会自动改变权限或解除pending。
 string ExecutionBlock()
 {
-   if(!启用真实交易) return "观察模式：交易输入已关闭";
+   if(!tradeMode) return "观察模式：暂停交易及自动管理，已有服务器订单仍有效";
    if(!stateOK) return "状态保存失败，停止请求";
    if(lockHandle==INVALID_HANDLE) return "实例锁未就绪";
    if(AccountInfoInteger(ACCOUNT_LOGIN)!=accountLogin || AccountInfoString(ACCOUNT_SERVER)!=accountServer)
@@ -702,15 +712,15 @@ int statsPeriod=0,statsOffsets[3]={0,0,0},statsFilter=0,statsDetail=0,statsRevie
 
 // 这些句柄和偏好仅供看盘，与策略maHandle/atrHandle分开。
 // 前六项保留旧显示ID，新增均线使用6..9，避免覆盖已有显示偏好。
-string uiIndicatorLabels[16]={"MA5","EMA20","布林","RSI","MACD","ATR","MA10","MA50","MA100","MA200","M5·MA5","M15·MA5","确认拐点","昨高低","ADX","随机KD"};
-int uiIndicatorHandles[16]={INVALID_HANDLE,INVALID_HANDLE,INVALID_HANDLE,INVALID_HANDLE,INVALID_HANDLE,INVALID_HANDLE,INVALID_HANDLE,INVALID_HANDLE,INVALID_HANDLE,INVALID_HANDLE,INVALID_HANDLE,INVALID_HANDLE,INVALID_HANDLE,INVALID_HANDLE,INVALID_HANDLE,INVALID_HANDLE};
+string uiIndicatorLabels[20]={"MA5","EMA20","布林","RSI","MACD","ATR","MA10","MA50","MA100","MA200","M5·MA5","M15·MA5","确认拐点","昨高低","ADX","随机KD","近期K线框","震荡箱体","波动收缩","框宽/ATR"};
+int uiIndicatorHandles[20]={INVALID_HANDLE,INVALID_HANDLE,INVALID_HANDLE,INVALID_HANDLE,INVALID_HANDLE,INVALID_HANDLE,INVALID_HANDLE,INVALID_HANDLE,INVALID_HANDLE,INVALID_HANDLE,INVALID_HANDLE,INVALID_HANDLE,INVALID_HANDLE,INVALID_HANDLE,INVALID_HANDLE,INVALID_HANDLE,INVALID_HANDLE,INVALID_HANDLE,INVALID_HANDLE,INVALID_HANDLE};
 string uiIndicatorNotice="指标随当前图表周期；RSI/MACD/ATR/ADX/KD切换副图；固定MA5只显示已收盘值";
 
 const color UI_ROOT=C'14,19,27',UI_HEADER=C'18,25,35',UI_CARD=C'23,31,43';
 const color UI_ROW=C'20,28,39',UI_BORDER=C'37,48,63',UI_TEXT=C'232,238,245';
-const color UI_MUTED=C'151,166,184',UI_DIM=C'112,130,151',UI_ACCENT=C'89,214,184';
+const color UI_MUTED=C'190,202,216',UI_DIM=C'158,176,197',UI_ACCENT=C'130,199,255';
 const color UI_GAIN=C'255,151,117',UI_LOSS=C'107,174,239',UI_WARN=C'235,193,120';
-const color UI_SELL=C'167,139,250';
+const color UI_SELL=C'240,191,112';
 #include "Include/Journal/TgeStatistics.mqh"
 
 int UIPx(const double value) { return (int)MathRound(value*panelScale); }
@@ -806,11 +816,18 @@ bool UIIndicatorSet(const int index,const bool enabled)
    bool overlay=!UIIsOscillator(index);
    int kind=overlay ? (index>=10 ? index-7 : index==2 ? 2 : index==0 ? 0 : 1) : index>=14 ? index-11 : index-3;
    ENUM_MA_METHOD method=index==0 ? 看盘主均线算法 : 看盘辅助均线算法;
-   color lineInk=index==0 ? clrGold : index==6 ? clrOrange : index==1 ? clrMediumTurquoise :
-                 index==10 ? clrWhite : index==11 ? clrOrangeRed : index==7 ? clrDeepSkyBlue : index==8 ? clrMediumPurple : clrHotPink;
-   int handle=overlay ?
+   color lineInk=index==0 ? C'0,83,138' : index==6 ? C'153,76,0' : index==1 ? C'105,52,139' :
+                  index==10 ? C'20,55,85' : index==11 ? C'112,62,0' : index==7 ? C'45,45,45' :
+                  index==8 ? C'70,63,116' : C'70,83,96';
+   ENUM_LINE_STYLE lineStyle=index==7 || index==10 ? STYLE_DASH :
+                              index==8 || index==11 ? STYLE_DOT : STYLE_SOLID;
+   int lineWidth=lineStyle==STYLE_SOLID ? (index==0 || index==9 ? 3 : 2) : 1;
+   int handle=index>=16 ?
+       iCustom(_Symbol,ChartPeriod(0),"::Include\\View\\TgeChartStructure.ex5",index-16,UIIndicatorName(index),
+               看盘框体周期,看盘近期框根数,看盘震荡最少根数,看盘震荡ATR倍数,看盘ATR周期,
+               看盘布林周期,看盘布林标准差,看盘收缩比较根数,看盘收缩低位百分比) : overlay ?
       iCustom(_Symbol,ChartPeriod(0),"::Include\\View\\TgeChartOverlay.ex5",kind,UIIndicatorName(index),
-              UIIndicatorPeriod(index),method,看盘指标计算价格,看盘布林标准差,lineInk) :
+              UIIndicatorPeriod(index),method,看盘指标计算价格,看盘布林标准差,lineInk,lineStyle,lineWidth) :
       iCustom(_Symbol,ChartPeriod(0),"::Include\\View\\TgeChartOscillator.ex5",kind,UIIndicatorName(index),
               UIIndicatorPeriod(index),看盘MACD快线,看盘MACD慢线,看盘MACD信号线,看盘指标计算价格,
               看盘KD信号,看盘KD平滑,看盘ADX参考线);
@@ -831,17 +848,26 @@ bool UIIndicatorSet(const int index,const bool enabled)
       window=UIIndicatorWindow(index);
       if(window>0) ChartSetInteger(0,CHART_HEIGHT_IN_PIXELS,window,120);
    }
+   if(index>=16)
+   {
+      string tf=EnumToString(看盘框体周期); StringReplace(tf,"PERIOD_","");
+      uiIndicatorNotice=UIIndicatorLabel(index)+" · "+tf+"已收盘 · "+
+         (index==16 ? "滚动范围，不代表震荡" : index==17 ? "均价±ATR框；竖线标确认时间" :
+          index==18 ? "BBW历史低分位，不预判方向" : "框宽与距离均为报价价格差");
+      return true;
+   }
    uiIndicatorNotice=UIIndicatorLabel(index)+(index==10 || index==11 ? "：固定周期收盘值，投影到当前图表" :
                      index==12 ? "：两根右侧K线收完才确认，箭头延后出现" :
                      index==13 ? "：前一交易日高低，按券商D1日期" : "已显示；指标周期跟随当前图表");
    return true;
 }
-// 位0..15表示本EA的显示指标，位16表示老师点位线；不涉及手工指标。
+// 保留旧组合：位0..15为旧指标，位16仍为点位线，新指标使用位17..20。
+int UIIndicatorBit(const int index) { return 1<<(index<16 ? index : index+1); }
 int UIViewMask()
 {
    int mask=uiPointLines ? (1<<16) : 0;
    for(int i=0;i<ArraySize(uiIndicatorLabels);i++)
-      if(UIIndicatorWindow(i)>=0) mask|=(1<<i);
+      if(UIIndicatorWindow(i)>=0) mask|=(UIIndicatorBit(i));
    return mask;
 }
 int UIPresetMask(const int preset)
@@ -862,22 +888,22 @@ string UICombinationText(const int mask)
 {
    string text="";
    for(int i=0;i<ArraySize(uiIndicatorLabels);i++)
-      if((mask & (1<<i))!=0) text+=(text=="" ? "" : " / ")+UIIndicatorLabel(i);
+      if((mask & (UIIndicatorBit(i)))!=0) text+=(text=="" ? "" : " / ")+UIIndicatorLabel(i);
    return text=="" ? "纯K线" : text;
 }
 bool UISetMask(const int mask)
 {
    int oscillators=0;
    for(int i=0;i<ArraySize(uiIndicatorLabels);i++)
-      if((mask & (1<<i))!=0 && UIIsOscillator(i)) oscillators++;
-   if(mask<0 || mask>131071 || oscillators>1) return false;
+      if((mask & (UIIndicatorBit(i)))!=0 && UIIsOscillator(i)) oscillators++;
+   if(mask<0 || mask>2097151 || oscillators>1) return false;
    // 先加载目标主图，再加载副图；失败时不主动清空原有显示。
    for(int i=0;i<ArraySize(uiIndicatorLabels);i++)
-      if((mask & (1<<i))!=0 && !UIIsOscillator(i) && !UIIndicatorSet(i,true)) return false;
+      if((mask & (UIIndicatorBit(i)))!=0 && !UIIsOscillator(i) && !UIIndicatorSet(i,true)) return false;
    for(int i=0;i<ArraySize(uiIndicatorLabels);i++)
-      if((mask & (1<<i))!=0 && UIIsOscillator(i) && !UIIndicatorSet(i,true)) return false;
+      if((mask & (UIIndicatorBit(i)))!=0 && UIIsOscillator(i) && !UIIndicatorSet(i,true)) return false;
    for(int i=0;i<ArraySize(uiIndicatorLabels);i++)
-      if((mask & (1<<i))==0 && !UIIndicatorSet(i,false)) return false;
+      if((mask & (UIIndicatorBit(i)))==0 && !UIIndicatorSet(i,false)) return false;
    uiPointLines=(mask & (1<<16))!=0;
    DrawLevels();
    return UIViewMask()==mask;
@@ -942,7 +968,7 @@ void InitView()
    int page=GlobalVariableCheck(uiPrefix+"page") ? (int)GlobalVariableGet(uiPrefix+"page") :
             GlobalVariableGet(uiPrefix+"stats")>0 ? 1 : 0;
    page=MathMax(0,MathMin(page,2)); uiStatistics=page==1; uiIndicators=page==2;
-   uiWatchTab=(int)MathMax(0,MathMin(GlobalVariableGet(uiPrefix+"watchTab"),1));
+   uiWatchTab=(int)MathMax(0,MathMin(GlobalVariableGet(uiPrefix+"watchTab"),2));
    statsPeriod=(int)MathMax(0,MathMin(GlobalVariableGet(uiPrefix+"period"),2));
    statsFilter=(int)MathMax(0,MathMin(GlobalVariableGet(uiPrefix+"filter"),2));
    statsDetail=(int)MathMax(0,MathMin(GlobalVariableGet(uiPrefix+"detail"),3));
@@ -980,6 +1006,7 @@ void IndicatorPage()
    UIText("组合沿用输入参数中的周期 · 手工添加的指标保留",16,122,520,9,UI_MUTED);
    UIButton("组合模板",16,146,100,80,uiWatchTab==0);
    UIButton("单项指标",124,146,100,81,uiWatchTab==1);
+   UIButton("结构辅助",232,146,92,98,uiWatchTab==2);
    UIButton("撤销切换",332,146,100,92,uiUndoMask>=0);
    UIButton("清空指标",444,146,100,93);
    if(uiWatchTab==0)
@@ -1002,27 +1029,42 @@ void IndicatorPage()
          UIButton("保存到 "+IntegerToString(i+1),16+i*180,452,168,94+i);
       }
    }
-   else
+   else if(uiWatchTab==1)
    {
       UIText("均线",16,192,160,10,UI_MUTED);
       UIText("点位与结构",16,300,200,10,UI_MUTED);
       UIText("波动与动量",16,364,200,10,UI_MUTED);
       ChartTools(222);
    }
+   else
+   {
+      string tf=EnumToString(看盘框体周期); StringReplace(tf,"PERIOD_","");
+      UIText("框体与波动 · "+tf+" 已收盘",16,190,528,11,UI_TEXT);
+      string notes[4]={"近期高低范围，不等同震荡","边界确认后固定；标实际确认时间",
+                       "BBW相对历史收窄，不提示多空","显示框宽、ATR及收盘到上下沿距离"};
+      for(int i=0;i<4;i++)
+      {
+         int y=222+i*58,index=16+i;
+         bool visible=UIIndicatorWindow(index)>=0;
+         UIButton(UIIndicatorLabel(index)+(visible ? "开" : "关"),16,y,168,100+i,visible);
+         UIText(notes[i],200,y+6,340,9,UI_MUTED);
+      }
+      UIText("白底辨识：名称 + H/L标签 + 实线/虚线",16,466,528,9,UI_MUTED);
+   }
    UIRound(12,502,536,74,UI_HEADER);
    UIText(uiIndicatorNotice,26,513,508,9,UI_MUTED);
-   UIText("仅调整看盘显示 · 不切换周期，不改变EA交易条件",26,541,508,9,UI_DIM);
+   UIText("白底高对比配色 · 开/关文字标识 · 仅用于看盘",26,541,508,9,UI_MUTED);
    panelCanvas.Update();
 }
 void UIButton(const string text,const int x,const int y,const int w,const int action,const bool active=false)
 {
    // 导航用底部指示线；开关用状态灯；普通操作保留中性描边。
    bool navigation=(action>=2 && action<=4) || (action>=30 && action<=32) ||
-                   (action>=36 && action<=42) || action==80 || action==81;
-   bool toggle=action==27 || action==28 || (action>=50 && action<=59) ||
-               (action>=70 && action<=75);
-   color edge=active ? C'57,121,111' : C'49,63,80';
-   color fill=active ? C'24,48,47' : C'22,30,41';
+                   (action>=36 && action<=42) || action==80 || action==81 || action==98;
+   bool toggle=action==27 || action==28 || action==29 || (action>=50 && action<=59) ||
+               (action>=70 && action<=75) || (action>=100 && action<=103);
+   color edge=active ? C'95,151,200' : C'78,94,114';
+   color fill=active ? C'25,49,76' : C'22,30,41';
    UIRound(x,y,w,27,edge,4);
    UIRound(x+1,y+1,w-2,25,fill,3);
    if(navigation && active) UIRound(x+8,y+24,w-16,2,UI_ACCENT,0);
@@ -1077,14 +1119,27 @@ bool UIMovingAverageGroup(const bool trendGroup)
    return true;
 }
 
+void ToggleTradeMode()
+{
+   bool enabled=!tradeMode;
+   if(enabled && AccountInfoInteger(ACCOUNT_MARGIN_MODE)!=ACCOUNT_MARGIN_MODE_RETAIL_HEDGING)
+   { reason="无法切换交易模式：需要Hedging账户"; return; }
+   if(!Store("tradeMode",enabled ? 1 : 0)) return;
+   GlobalVariablesFlush();
+   tradeMode=enabled;
+   markerDirty=true;
+   reason=enabled ? "已切换交易模式，等待执行条件" : "已切换观察模式，暂停交易及自动管理";
+   DecisionLog("MODE",reason);
+}
 void ViewAction(const int action)
 {
    int before=UIViewMask();
-   bool recordUndo=action==27 || (action>=50 && action<=75) || (action>=82 && action<=90) || action==93;
+   bool recordUndo=action==27 || (action>=50 && action<=75) || (action>=82 && action<=90) || action==93 || (action>=100 && action<=103);
    if(action==1) uiCollapsed=!uiCollapsed;
     else if(action==2) { uiStatistics=false; uiIndicators=false; }
     else if(action==3) { uiStatistics=true; uiIndicators=false; }
     else if(action==4) { uiStatistics=false; uiIndicators=true; }
+   else if(action==29) ToggleTradeMode();
    else if(action>=30 && action<=44)
    {
       if(action<=32) { statsPeriod=action-30; statsReview=0; statsDirty=true; statsLastAttempt=0; }
@@ -1103,8 +1158,9 @@ void ViewAction(const int action)
    else if(action>=50 && action<=59) UIIndicatorSet(action-50,UIIndicatorWindow(action-50)<0);
    else if(action>=70 && action<=75) UIIndicatorSet(action-60,UIIndicatorWindow(action-60)<0);
    else if(action==60 || action==61) UIMovingAverageGroup(action==61);
-   else if(action==80 || action==81) uiWatchTab=action-80;
-   else if(action>=82 && action<=87) UIApplyMask(UIPresetMask(action-82));
+   else if(action==80 || action==81 || action==98) uiWatchTab=action==98 ? 2 : action-80;
+   else if(action>=100 && action<=103) UIIndicatorSet(action-84,UIIndicatorWindow(action-84)<0);
+    else if(action>=82 && action<=87) UIApplyMask(UIPresetMask(action-82));
    else if(action>=88 && action<=90) UIFavorite(action-88,false);
    else if(action>=94 && action<=96) UIFavorite(action-94,true);
    else if(action==92)
@@ -1181,13 +1237,13 @@ void Panel()
    panelCanvas.FillRectangle(0,0,UIPx(559),UIPx(39),UIInk(UI_HEADER));
    string pageTitle=uiStatistics ? "交易统计" : uiIndicators ? "看盘设置" : "T哥点位监控";
    UIText(_Symbol+" · "+pageTitle,16,10,222,11,UI_TEXT);
-   UIText("v1.47",242,13,40,8,UI_DIM);
+   UIText("v1.48",242,13,40,8,UI_DIM);
    UIText(TimeToString(TimeGMT()+8*3600,TIME_SECONDS),286,12,100,10,UI_MUTED,true);
    UIButton(uiCollapsed ? "+" : "−",396,7,30,1);
-   UIText(启用真实交易 ? "交易模式" : "观察模式",434,13,110,9,启用真实交易 ? UI_ACCENT : UI_WARN,true);
+   UIButton(tradeMode ? "交易模式" : "观察模式",434,7,110,29,tradeMode);
    PageTabs(49);
    ObjectSetString(0,VIEW+"CANVAS",OBJPROP_TOOLTIP,
-                   "拖动标题移动面板；−收起 / +展开 · "+feedStatus+
+                   "拖动标题移动面板；−收起 / +展开；右上角切换交易/观察（观察暂停自动管理，已有服务器订单仍有效） · "+feedStatus+
                    " · 来源 "+sourceSender+" · 消息 "+identity+
                    " · 老师来源 "+aiSource+" · "+uiIndicatorNotice+" · 手机TP标记："+markerStatus);
    if(uiCollapsed)
@@ -1358,11 +1414,11 @@ int OnInit()
    { Print("本版分批只支持Hedging账户"); return INIT_FAILED; }
    accountLogin=AccountInfoInteger(ACCOUNT_LOGIN); accountServer=AccountInfoString(ACCOUNT_SERVER);
    prefix="TG."+IntegerToString((long)Hash(accountServer+"|"+IntegerToString(accountLogin)+"|"+_Symbol+"|"+IntegerToString((long)EA魔法号)))+".";
-   // 独占文件句柄跨图表/跨同机终端防重复；观察实例使用独立状态命名空间。
-   if(!启用真实交易) prefix+="obs"+IntegerToString(ChartID())+".";
+   // 两种模式共用持仓状态和独占锁，切换不能绕过实例互斥或pending对账。
    FolderCreate("FeishuMT5SignalMonitor",FILE_COMMON);
    lockHandle=FileOpen("FeishuMT5SignalMonitor\\"+prefix+"lock",FILE_READ|FILE_WRITE|FILE_BIN|FILE_COMMON);
    if(lockHandle==INVALID_HANDLE) { Print("同账户/品种/Magic已有实例"); return INIT_FAILED; }
+   tradeMode=启用真实交易 && (!GlobalVariableCheck(prefix+"tradeMode") || Load("tradeMode")>0);
    execution.SetExpertMagicNumber(EA魔法号); execution.SetDeviationInPoints(30);
    execution.SetTypeFillingBySymbol(_Symbol); execution.SetAsyncMode(false);
    maHandle=iMA(_Symbol,PERIOD_M5,5,0,MODE_SMA,PRICE_CLOSE); atrHandle=iATR(_Symbol,PERIOD_M5,14);

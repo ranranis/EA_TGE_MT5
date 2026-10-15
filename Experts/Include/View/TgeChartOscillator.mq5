@@ -6,9 +6,9 @@
 #property indicator_type1 DRAW_LINE
 #property indicator_type2 DRAW_LINE
 #property indicator_type3 DRAW_LINE
-#property indicator_color1 clrDeepSkyBlue
-#property indicator_color2 clrOrange
-#property indicator_color3 clrHotPink
+#property indicator_color1 C'0,83,138'
+#property indicator_color2 C'153,76,0'
+#property indicator_color3 C'105,52,139'
 #property indicator_width1 2
 input int ViewKind=0; // 0 RSI，1 MACD，2 ATR，3 ADX/DMI，4随机KD（不包含J线）
 input string ViewName="TGE.View";
@@ -32,6 +32,8 @@ int OnInit()
    IndicatorSetString(INDICATOR_SHORTNAME,ViewName);
    IndicatorSetInteger(INDICATOR_DIGITS,ViewKind==0 || ViewKind>=3 ? 2 : _Digits);
    for(int i=0;i<3;i++) PlotIndexSetDouble(i,PLOT_EMPTY_VALUE,EMPTY_VALUE);
+   PlotIndexSetInteger(1,PLOT_LINE_STYLE,STYLE_DASH); PlotIndexSetInteger(1,PLOT_LINE_WIDTH,1);
+   PlotIndexSetInteger(2,PLOT_LINE_STYLE,STYLE_DOT); PlotIndexSetInteger(2,PLOT_LINE_WIDTH,1);
    PlotIndexSetInteger(0,PLOT_DRAW_BEGIN,ViewKind==1 ? ViewSlow+ViewSignal-2 :
                        ViewKind==3 ? 2*ViewPeriod : ViewKind==4 ? ViewPeriod+ViewD+ViewSlowing-3 : ViewPeriod);
    PlotIndexSetString(0,PLOT_LABEL,ViewKind==0 ? "RSI"+IntegerToString(ViewPeriod) :
@@ -53,19 +55,20 @@ int OnInit()
    else if(ViewKind==1)
    {
       PlotIndexSetInteger(0,PLOT_DRAW_TYPE,DRAW_HISTOGRAM);
-      PlotIndexSetInteger(0,PLOT_LINE_COLOR,clrMediumTurquoise);
+      PlotIndexSetInteger(0,PLOT_LINE_COLOR,C'0,83,138');
+      PlotIndexSetInteger(1,PLOT_LINE_STYLE,STYLE_SOLID); PlotIndexSetInteger(1,PLOT_LINE_WIDTH,2);
       PlotIndexSetInteger(1,PLOT_DRAW_BEGIN,ViewSlow+ViewSignal-2);
       IndicatorSetInteger(INDICATOR_LEVELS,1); IndicatorSetDouble(INDICATOR_LEVELVALUE,0,0);
       viewHandle=iMACD(_Symbol,_Period,ViewFast,ViewSlow,ViewSignal,ViewPrice);
    }
    else if(ViewKind==2)
    {
-      PlotIndexSetInteger(0,PLOT_LINE_COLOR,clrGold); IndicatorSetDouble(INDICATOR_MINIMUM,0);
+      PlotIndexSetInteger(0,PLOT_LINE_COLOR,C'45,45,45'); IndicatorSetDouble(INDICATOR_MINIMUM,0);
       viewHandle=iATR(_Symbol,_Period,ViewPeriod);
    }
    else if(ViewKind==3)
    {
-      PlotIndexSetInteger(0,PLOT_LINE_COLOR,clrGold); PlotIndexSetInteger(1,PLOT_LINE_COLOR,clrMediumTurquoise);
+      PlotIndexSetInteger(0,PLOT_LINE_COLOR,C'45,45,45'); PlotIndexSetInteger(1,PLOT_LINE_COLOR,C'0,83,138');
       PlotIndexSetInteger(1,PLOT_DRAW_BEGIN,ViewPeriod); PlotIndexSetInteger(2,PLOT_DRAW_BEGIN,ViewPeriod);
       IndicatorSetInteger(INDICATOR_LEVELS,1); IndicatorSetDouble(INDICATOR_LEVELVALUE,0,ViewStrength);
       viewHandle=iADX(_Symbol,_Period,ViewPeriod);
@@ -78,6 +81,8 @@ int OnInit()
       IndicatorSetDouble(INDICATOR_LEVELVALUE,0,20); IndicatorSetDouble(INDICATOR_LEVELVALUE,1,80);
       viewHandle=iStochastic(_Symbol,_Period,ViewPeriod,ViewD,ViewSlowing,MODE_SMA,STO_LOWHIGH);
    }
+   IndicatorSetInteger(INDICATOR_LEVELCOLOR,C'112,112,112');
+   IndicatorSetInteger(INDICATOR_LEVELSTYLE,STYLE_DASH);
    return viewHandle==INVALID_HANDLE ? INIT_FAILED : INIT_SUCCEEDED;
 }
 int OnCalculate(const int rates_total,const int prev_calculated,const datetime &time[],

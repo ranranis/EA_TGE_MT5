@@ -57,7 +57,6 @@ void InitTgeMobileMarkers()
    if(GlobalVariableCheck(markerPrefix+"enabled")) uiMobileMarkers=GlobalVariableGet(markerPrefix+"enabled")>0;
    markerSequence=(long)GlobalVariableGet(markerPrefix+"sequence");
    markerCreateAt=(datetime)GlobalVariableGet(markerPrefix+"create");
-   if(!启用真实交易) { markerStatus="观察模式不挂单"; return; }
    markerLock=FileOpen("FeishuMT5SignalMonitor\\"+markerPrefix+"lock",FILE_READ|FILE_WRITE|FILE_BIN|FILE_COMMON);
    if(markerLock==INVALID_HANDLE) { markerStatus="其他实例正在管理标记"; return; }
    markerTrade.SetExpertMagicNumber(手机标记挂单Magic);
@@ -157,7 +156,7 @@ void SyncTgeMobileMarkers()
    markerLastMs=ms; markerDirty=false;
    if(!TgeMarkerCanRequest())
    {
-      markerStatus=!启用真实交易 ? "观察模式不挂单" : markerLock==INVALID_HANDLE ? "等待标记实例锁" :
+      markerStatus=!tradeMode ? "观察模式不挂单" : markerLock==INVALID_HANDLE ? "等待标记实例锁" :
                    EA魔法号==(ulong)手机标记挂单Magic ? "标记Magic冲突" : "等待交易权限/状态";
       return;
    }
