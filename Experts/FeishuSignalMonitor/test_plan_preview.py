@@ -11,7 +11,7 @@ import urllib.request
 import urllib.error
 
 from app import config_load, export_teacher_levels
-from dashboard import serve
+from dashboard import serve, snapshot, published_reference
 from deepseek_ai import AIError, initialize_ai, process_ai_batch
 from plan_preview import begin_preview, generate_preview, apply_preview
 from store import connect, ingest, state, set_state, iso
@@ -75,6 +75,31 @@ class PreviewTests(unittest.TestCase):
         draft=self.draft(Mock(interpret=Mock(side_effect=AIError('模型未通过'))))
         self.assertEqual(draft['status'],'FAILED')
         self.assertEqual(state(self.db,'deepseek_setup'),self.original)
+
+    def test_dashboard_uses_published_feed_not_old_ai_directions(self):
+        export_teacher_levels(self.db,self.c,False,time.time())
+        path=self.home/'common/FeishuMT5SignalMonitor/tge_execution_v7.csv'
+        # 原AI解释仍是BUY4175；实际导出已替换为新地图，网页必须跟随文件。
+        path.write_text(f'TGA,7,{int(self.now)},1,{self.c["symbols"][self.c["teacher_symbol"]]},1,updated\n'
+                        f'PLAN,map,MAP,5,AUTO,4142,source,revision,{int(self.now)-10},group,0,0,0,0,{int(self.now)-10},REFERENCE\nEND,1\n',encoding='utf-8')
+        result=snapshot(self.home,self.c)
+        self.assertEqual(result['ai_setup']['plans'][0]['price'],4175)
+        self.assertEqual([p['price'] for p in result['execution_reference']['plans']],[4142])
+        before=path.read_bytes()
+        snapshot(self.home,self.c)
+        self.assertEqual(path.read_bytes(),before)
+
+    def test_dashboard_feed_stale_paused_or_incomplete_is_not_active(self):
+        export_teacher_levels(self.db,self.c,False,self.now)
+        online=dict(online=True,sync_healthy=True,paused=False)
+        self.assertTrue(published_reference(self.c,self.now,online)['active'])
+        self.assertFalse(published_reference(self.c,self.now,online|{'paused':True})['active'])
+        stale=published_reference(self.c,self.now+self.c['sync_max_age_seconds']+1,online)
+        self.assertFalse(stale['active']);self.assertTrue(stale['plans'])
+        path=self.home/'common/FeishuMT5SignalMonitor/tge_execution_v7.csv'
+        path.write_text(path.read_text(encoding='utf-8').split('END,')[0],encoding='utf-8')
+        invalid=published_reference(self.c,self.now,online)
+        self.assertFalse(invalid['available']);self.assertEqual(invalid['plans'],[])
 
     def test_edit_during_preview_invalidates(self):
         def reply(*args,**kwargs):

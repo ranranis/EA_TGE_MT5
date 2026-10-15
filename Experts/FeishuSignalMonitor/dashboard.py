@@ -1,5 +1,8 @@
 """仅监听127.0.0.1；同源令牌保护人工预览/应用，不暴露凭证或文件目录。"""
+import csv
 import json
+import math
+import os
 import secrets
 from contextlib import closing
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -10,10 +13,42 @@ import time
 
 from store import state, iso, stamp
 from teacher_strategy import sender_name, message_link
-from deepseek_ai import member_follow_snapshot, member_follow_snapshots, ai_snapshot
+from deepseek_ai import member_follow_snapshot, member_follow_snapshots
 from teacher_scene import scene_view
 from plan_preview import begin_preview, generate_preview, apply_preview, public_preview
 from deepseek_ai import AIError
+
+
+def published_reference(c,now,status):
+    """展示EA实际读取的原子导出文件，不把旧AI解释当作仍在执行的计划。"""
+    folder=(Path(c['common_files']) if c.get('common_files') else
+            Path(os.environ['APPDATA'])/'MetaQuotes/Terminal/Common/Files')/'FeishuMT5SignalMonitor'
+    try:
+        with (folder/'tge_execution_v7.csv').open(encoding='utf-8-sig',newline='') as f:
+            rows=list(csv.reader(f))
+        head=rows[0];count=int(head[5]);generated=int(head[2])
+        if (len(head)!=7 or head[:2]!=['TGA','7'] or head[3] not in ('0','1') or
+            head[4]!=c['symbols'][c['teacher_symbol']] or not 0<=count<=28 or
+            len(rows)!=count+2 or rows[-1]!=['END',str(count)]):
+            raise ValueError()
+        plans=[]
+        for row in rows[1:-1]:
+            if len(row)!=16 or row[0]!='PLAN': raise ValueError()
+            kind=row[2];priority=int(row[3]);price=float(row[5])
+            if (kind not in ('DIRECT','INNER','OUTER','MAP') or
+                priority!=({'DIRECT':8,'MAP':5}.get(kind,6)) or
+                row[4] not in (('AUTO',) if kind=='MAP' else ('BUY','SELL')) or
+                not math.isfinite(price) or price<=0): raise ValueError()
+            plans.append(dict(id=row[1],kind=kind,priority=priority,side=row[4],price=price,
+                              source_id=row[6],created=int(row[8]),confirmed=int(row[14])))
+        fresh=generated>0 and -5<=now-generated<=c['sync_max_age_seconds']
+        active=bool(fresh and head[3]=='1' and status.get('online') and
+                    status.get('sync_healthy') and not status.get('paused'))
+        return dict(available=True,active=active,fresh=fresh,generated=generated,symbol=head[4],
+                    plans=sorted(plans,key=lambda p:-p['priority']),
+                    reason=head[6] if active else ('导出已过期，仅供查看' if not fresh else '同步暂停或未就绪，仅供查看'))
+    except (OSError,ValueError,IndexError):
+        return dict(available=False,active=False,fresh=False,plans=[],reason='执行文件尚不可读或不完整，等待重新导出')
 
 
 def snapshot(home,c):
@@ -47,7 +82,7 @@ def snapshot(home,c):
         return dict(at=iso(now),chat_name=c['chat_name'],teacher_only=c.get('teacher_only',False),status=status,messages=messages,message_count=count,
                     follow=member_follow_snapshot(db,c,now,status.get('paused',False)),
                     follows=member_follow_snapshots(db,c,now,status.get('paused',False)),
-                    execution_reference=ai_snapshot(db,c,now,status.get('paused',False)) if c.get('ai_enabled') else {},
+                    execution_reference=published_reference(c,now,status),
                     levels=state(db,'teacher_levels',{}),analysis=state(db,'teacher_analysis',{}),
                     preview=public_preview(state(db,'plan_preview',{})),scene=scene_view(db,c),ai=state(db,'deepseek_status',{}),ai_setup=state(db,'deepseek_setup',{}),
                     ai_recent=state(db,'deepseek_recent',[]),ai_review=state(db,'deepseek_review',{}),
