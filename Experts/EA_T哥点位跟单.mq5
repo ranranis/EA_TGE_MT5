@@ -1,5 +1,5 @@
 #property strict
-#property version "1.51"
+#property version "1.52"
 #property description "T哥点位触价 / 明确方向8·区间6·地图5 / 0.02手。独立Magic，仅管理本EA持仓。"
 #include <Trade/Trade.mqh>
 #include <Canvas/Canvas.mqh>
@@ -281,6 +281,8 @@ void DrawLevels()
       ObjectSetInteger(0,name,OBJPROP_COLOR,feedActive ? C'38,83,145' : C'145,151,160');
       ObjectSetInteger(0,name,OBJPROP_STYLE,STYLE_SOLID);
       ObjectSetInteger(0,name,OBJPROP_WIDTH,2);
+      // 点位属于行情背景层，已有对象也更新，避免重新开启后盖住前景Canvas面板。
+      ObjectSetInteger(0,name,OBJPROP_BACK,true);
       ObjectSetInteger(0,name,OBJPROP_SELECTABLE,false);
       ObjectSetInteger(0,name,OBJPROP_TIMEFRAMES,uiPointLines ? OBJ_ALL_PERIODS : OBJ_NO_PERIODS);
       ObjectSetString(0,name,OBJPROP_TEXT,"T点位 "+DoubleToString(levels[i],_Digits));
@@ -1266,7 +1268,7 @@ void Panel()
    panelCanvas.FillRectangle(0,0,UIPx(559),UIPx(39),UIInk(UI_HEADER));
    string pageTitle=uiStatistics ? "交易统计" : uiIndicators ? "看盘设置" : "T哥点位监控";
    UIText(_Symbol+" · "+pageTitle,16,10,222,11,UI_TEXT);
-   UIText("v1.51",242,13,40,8,UI_DIM);
+   UIText("v1.52",242,13,40,8,UI_DIM);
    UIText(TimeToString(TimeGMT()+8*3600,TIME_SECONDS),286,12,100,10,UI_MUTED,true);
    UIButton(uiCollapsed ? "+" : "−",396,7,30,1);
    UIButton(tradeMode ? "交易模式" : "观察模式",434,7,110,29,tradeMode);

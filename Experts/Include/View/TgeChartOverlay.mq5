@@ -63,9 +63,10 @@ int OnInit()
    else if(ViewKind==6)
    {
       PlotIndexSetString(0,PLOT_LABEL,"前一交易日高"); PlotIndexSetString(1,PLOT_LABEL,"前一交易日低");
-      PlotIndexSetInteger(0,PLOT_LINE_COLOR,C'105,52,139'); PlotIndexSetInteger(1,PLOT_LINE_COLOR,C'45,45,45');
+      // 日高低作为次要参考：细线、低饱和配色，结合线型和文字识别。
+      PlotIndexSetInteger(0,PLOT_LINE_COLOR,C'91,103,120'); PlotIndexSetInteger(1,PLOT_LINE_COLOR,C'109,99,85');
       for(int i=0;i<2;i++)
-      { PlotIndexSetInteger(i,PLOT_LINE_STYLE,i==0 ? STYLE_SOLID : STYLE_DOT); PlotIndexSetInteger(i,PLOT_LINE_WIDTH,i==0 ? 2 : 1); }
+      { PlotIndexSetInteger(i,PLOT_LINE_STYLE,i==0 ? STYLE_DASH : STYLE_DOT); PlotIndexSetInteger(i,PLOT_LINE_WIDTH,1); }
       return INIT_SUCCEEDED; // 日高低直接使用CopyRates，不需要指标句柄。
    }
    else viewHandle=ViewKind==2 ? iBands(_Symbol,_Period,ViewPeriod,0,ViewDeviation,ViewPrice) :
@@ -90,7 +91,8 @@ void PaintNames(const datetime at,const int last)
       ObjectMove(0,name,0,at,price);
       ObjectSetString(0,name,OBJPROP_TEXT,titles[i]);
       ObjectSetString(0,name,OBJPROP_FONT,"Microsoft YaHei UI");
-      ObjectSetInteger(0,name,OBJPROP_FONTSIZE,10);
+      ObjectSetInteger(0,name,OBJPROP_FONTSIZE,ViewKind==6 ? 9 : 10);
+      if(ViewKind==6) ObjectSetInteger(0,name,OBJPROP_BACK,true);
       ObjectSetInteger(0,name,OBJPROP_ANCHOR,ANCHOR_RIGHT_LOWER);
       ObjectSetInteger(0,name,OBJPROP_COLOR,PlotIndexGetInteger(i,PLOT_LINE_COLOR));
       ObjectSetInteger(0,name,OBJPROP_SELECTABLE,false); ObjectSetInteger(0,name,OBJPROP_HIDDEN,true);
