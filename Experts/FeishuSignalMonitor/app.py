@@ -50,7 +50,13 @@ def config_load(home):
     c=defaults|loaded
     if type(c['teacher_only']) is not bool: raise ValueError('teacher_only须为布尔值')
     if c['mode'] not in ('monitor','paper') or type(c['ai_enabled']) is not bool: raise ValueError('只允许 monitor / paper 模式，AI开关须为布尔值')
-    if c['ai_model'] not in ('deepseek-flash','deepseek-v4-pro'): raise ValueError('DeepSeek模型不支持')
+    if c['ai_provider'] not in ('deepseek','workbuddy'): raise ValueError('AI解析入口不支持')
+    if c['ai_provider']=='deepseek' and c['ai_model'] not in ('deepseek-flash','deepseek-v4-pro'): raise ValueError('DeepSeek模型不支持')
+    if c['ai_provider']=='workbuddy':
+        if not isinstance(c['ai_model'],str) or not c['ai_model'].strip() or len(c['ai_model'])>80: raise ValueError('WorkBuddy模型不能为空')
+        if not isinstance(c['workbuddy_executable'],str) or not Path(c['workbuddy_executable']).is_file(): raise ValueError('WorkBuddy安装路径无效')
+    for key,low,high in [('ai_context_messages',16,512),('ai_batch_messages',1,32)]:
+        if type(c[key]) is not int or not low<=c[key]<=high: raise ValueError('AI消息读取数量超出范围：'+key)
     for key in ('poll_seconds','quote_seconds','overlap_seconds','window_seconds','max_pages','reconcile_batch','thread_batch','signal_ttl_seconds','pending_ttl_seconds','quote_max_age_seconds','sync_max_age_seconds','initial_equity','max_spread_points'):
         if type(c[key]) not in (int,float) or c[key]<=0: raise ValueError('配置应为正数：'+key)
     if c['poll_seconds']<5 or c['quote_seconds']<0.5: raise ValueError('轮询周期过短')
@@ -317,7 +323,7 @@ def run(home,c,once=False,with_dashboard=True):
                 worker=threading.Thread(target=sync_worker,args=(home,c,stop),name='lark-reader')
                 worker.start()
             if c.get('ai_enabled'):
-                ai_thread=threading.Thread(target=ai_worker,args=(home,c,stop),name='deepseek-reader')
+                ai_thread=threading.Thread(target=ai_worker,args=(home,c,stop),name='ai-reader')
                 ai_thread.start()
             last_report=0; last_export=0; last_quote_warning=0; last_analysis=0
             healthy=False; result={}

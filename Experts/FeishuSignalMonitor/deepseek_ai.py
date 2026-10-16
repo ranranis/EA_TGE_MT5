@@ -144,13 +144,20 @@ class DeepSeek:
         try:
             choice = data['choices'][0]
             if choice['finish_reason']!='stop':
-                raise AIError('DeepSeek输出未完整结束，暂不使用')
+                raise AIError('AI输出未完整结束，暂不使用')
             result=json.loads(choice['message']['content'])
             # 成员没有更新老师场景的权限；其多余scene也不参与引用映射。
             if not scene_requested and isinstance(result,dict):result.pop('scene',None)
             return translate(result,originals,incoming=True)
         except (KeyError, IndexError, TypeError, ValueError):
-            raise AIError('DeepSeek未返回完整JSON，暂不使用') from None
+            raise AIError('AI未返回完整JSON，暂不使用') from None
+
+
+def create_ai_client(home, config):
+    if config.get('ai_provider','deepseek')=='workbuddy':
+        from workbuddy_ai import WorkBuddy
+        return WorkBuddy(home, config)
+    return DeepSeek(home, config)
 
 
 def resolve_token(token, anchor):
@@ -445,7 +452,7 @@ def pending_rows(db, c, now):
     config=dict(c,_map_message_id=state(db,'teacher_levels',{}).get('message_id'))
     for lane in ['teacher','group_summary']+['follow:'+mid for mid in follow_ids(c)]+['member']:
         batch=[r for r in rows if message_lane(config,r)==lane]
-        if batch:return batch[:1] if lane=='group_summary' else batch[:8]
+        if batch:return batch[:1] if lane=='group_summary' else batch[:c.get('ai_batch_messages',8)]
     return []
 
 
@@ -581,8 +588,23 @@ def process_ai_batch(db, c, client, now, restore_scene=False, preview=False):
         FROM messages m LEFT JOIN ai_messages a
         ON a.chat_id=m.chat_id AND a.message_id=m.message_id AND a.revision=m.revision
         WHERE m.chat_id=? AND m.sender IN ({author_slots}) AND (m.created<? OR (m.created=? AND m.rowid<?))
-        ORDER BY m.created DESC,m.rowid DESC LIMIT 56""",
-        (c['chat_id'],*authors,rows[-1]['created'],rows[-1]['created'],rows[-1]['sequence'])).fetchall()
+        ORDER BY m.created DESC,m.rowid DESC LIMIT ?""",
+        (c['chat_id'],*authors,rows[-1]['created'],rows[-1]['created'],rows[-1]['sequence'],c.get('ai_context_messages',56))).fetchall()
+    # 会后群友总结也作为背景；只发送原有summary_source认可的消息，
+    # 不把普通群友聊天、晒单或群内指令放进老师来源上下文。
+    if c.get('allow_group_summaries'):
+        summary_rows=db.execute('''SELECT m.*,m.rowid AS sequence,a.payload,a.status AS ai_status
+            FROM messages m LEFT JOIN ai_messages a
+            ON a.chat_id=m.chat_id AND a.message_id=m.message_id AND a.revision=m.revision
+            WHERE m.chat_id=? AND (m.created<? OR (m.created=? AND m.rowid<?))
+            ORDER BY m.created DESC,m.rowid DESC LIMIT ?''',
+            (c['chat_id'],rows[-1]['created'],rows[-1]['created'],rows[-1]['sequence'],
+             c.get('ai_context_messages',56)*2)).fetchall()
+        merged={r['message_id']:r for r in context_rows}
+        for r in summary_rows:
+            if not r['deleted'] and summary_source(json.loads(r['raw']),r['sender'],c):
+                merged[r['message_id']]=r
+        context_rows=sorted(merged.values(),key=lambda r:(r['created'],r['sequence']),reverse=True)[:c.get('ai_context_messages',56)]
     context=[]
     target_ids={r['message_id'] for r in rows}
     for r in reversed(context_rows):
@@ -596,11 +618,11 @@ def process_ai_batch(db, c, client, now, restore_scene=False, preview=False):
             value=None
         context.append(dict(message_id=r['message_id'],revision=r['revision'],sender_id=r['sender'],sequence=r['sequence'],
             time=iso(r['created']),text=text[:6000],historical=bool(r['historical']),deleted=bool(r['deleted']),
-            source_role='follow_member' if r['sender'] in follow_ids(c) else 'teacher',interpretation=value))
+            source_role='teacher' if r['sender']==c['teacher_sender_id'] else 'follow_member' if r['sender'] in follow_ids(c) else 'group_summary',interpretation=value))
     summary_batch=all(message_lane(c,r)=='group_summary' for r in rows)
     previous_scene=state(db,'meeting_scene' if summary_batch else 'teacher_scene',{})
-    # 场景来源有时已离开最近56条，按已知消息ID补回原文，不扩大群历史读取。
-    wanted=previous_scene.get('source_refs',[])+state(db,'deepseek_setup',{}).get('source_refs',[])
+    # 场景来源可能超出最近上下文上限，按已知消息ID补回原文，不扩大群历史读取。
+    wanted=previous_scene.get('source_refs',[])+state(db,'meeting_scene',{}).get('source_refs',[])+state(db,'deepseek_setup',{}).get('source_refs',[])
     for ref in wanted:
         if any(m['message_id']==ref['message_id'] for m in context) or ref['message_id'] in target_ids: continue
         r=db.execute("SELECT m.*,m.rowid AS sequence,a.payload,a.status AS ai_status FROM messages m LEFT JOIN ai_messages a ON a.chat_id=m.chat_id AND a.message_id=m.message_id AND a.revision=m.revision WHERE m.chat_id=? AND m.message_id=?",
@@ -685,7 +707,7 @@ def process_ai_batch(db, c, client, now, restore_scene=False, preview=False):
         if not isinstance(raw_result,dict) or set(raw_result) not in ({'interpretations'},{'interpretations','scene'}):
             raise AIError('AI根字段错误')
         if teacher_targets and isinstance(client,DeepSeek) and 'scene' not in raw_result:
-            raise AIError('DeepSeek未返回完整交易场景')
+            raise AIError('AI未返回完整交易场景')
         output=validate_interpretations(raw_result['interpretations'],targets,context,live_anchor,'scene' in raw_result) if targets else {}
         # 整批场景也必须通过本地核验；不因逐条WATCH而静默丢掉完整语义。
         # 成员批即使模型误带scene，也没有更新老师场景的权限，直接忽略该字段。
@@ -765,7 +787,7 @@ def process_ai_batch(db, c, client, now, restore_scene=False, preview=False):
 def ai_worker(home, c, stop):
     db=connect(Path(home)/'data/monitor.sqlite')
     initialize_ai(db)
-    client=DeepSeek(home,c)
+    client=create_ai_client(home,c)
     try:
         while not stop.is_set():
             try:

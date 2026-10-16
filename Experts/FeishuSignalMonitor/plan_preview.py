@@ -7,7 +7,7 @@ import uuid
 from contextlib import closing
 
 from store import state, set_state, stamp
-from deepseek_ai import AIError, DeepSeek, process_ai_batch, refs_current, lane_readiness, SYSTEM
+from deepseek_ai import AIError, DeepSeek, create_ai_client, process_ai_batch, refs_current, lane_readiness, SYSTEM
 from teacher_scene import SCENE_PROMPT, publish_scene
 
 
@@ -25,7 +25,7 @@ def fingerprint(db,c):
     levels=state(db,'teacher_levels',{})
     values=[rows,{k:levels.get(k) for k in ('message_id','revision','active','levels')},
             state(db,'teacher_scene',{}),state(db,'deepseek_setup',{}),c['chat_id'],c['teacher_sender_id'],
-            c.get('ai_model'),SYSTEM,SCENE_PROMPT]
+            c.get('ai_model'),c.get('ai_provider','deepseek'),c.get('ai_context_messages',56),c.get('ai_batch_messages',8),SYSTEM,SCENE_PROMPT]
     return hashlib.sha256(json.dumps(values,ensure_ascii=False,sort_keys=True).encode('utf-8')).hexdigest()
 
 
@@ -35,7 +35,7 @@ def public_preview(value):
 
 def begin_preview(home,c,now=None):
     now=now or time.time()
-    if not c.get('ai_enabled'): raise AIError('请先启用DeepSeek')
+    if not c.get('ai_enabled'): raise AIError('请先启用AI解析')
     with closing(open_db(home)) as db, db:
         db.execute('BEGIN IMMEDIATE')
         previous=state(db,'plan_preview',{})
@@ -51,7 +51,7 @@ def generate_preview(home,c,preview_id,client=None):
         with closing(open_db(home,True)) as db:
             db.execute('BEGIN')  # 本次读取使用一致快照；API等待期间不持有写锁。
             guard=fingerprint(db,c)
-            scene=process_ai_batch(db,c,client or DeepSeek(home,c),time.time(),preview=True)
+            scene=process_ai_batch(db,c,client or create_ai_client(home,c),time.time(),preview=True)
         with closing(open_db(home)) as db, db:
             db.execute('BEGIN IMMEDIATE')
             draft=state(db,'plan_preview',{})

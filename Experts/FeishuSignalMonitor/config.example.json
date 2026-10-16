@@ -43,5 +43,9 @@
   "follow_sender_id": "",
   "ai_model": "deepseek-flash",
   "follow_members": [],
-  "teacher_only": true
+  "teacher_only": true,
+  "ai_provider": "deepseek",
+  "ai_context_messages": 56,
+  "ai_batch_messages": 8,
+  "workbuddy_executable": ""
 }
