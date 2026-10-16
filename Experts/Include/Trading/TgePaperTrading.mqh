@@ -27,36 +27,97 @@ string PaperName(const int arm)
    if(arm==1) return "B 区间反弹";
    if(arm==2) return "C 单点收回";
    if(arm==3) return "D 顺势回踩";
-   return "E 突破回踩";
+   return "E 突破跟进";
 }
-// C/D/E的纯收盘判定，所有bars均为已完成K线，trend为当时已缓存的M5趋势。
+// v1.79：B/C/D/E仅使用已收盘M1；各组放宽入口，仍保留来源和冲击门槛。
+string PaperRule(const int arm)
+{
+   if(arm==0) return "触价即试，保留原方向";
+   if(arm==1) return "两点之间靠边反弹，一次收回即可";
+   if(arm==2) return "单点轻收回，不要求大实体";
+   if(arm==3) return "趋势回踩；M5中性时看M1短线方向";
+   return "突破即跟进，或三根内回踩再进";
+}
+// 返回突破K的series索引；0=刚收盘突破，1..3=随后三根内回踩。
+// 更老一根只用于证明跨越；中途收盘失守后不能复用旧突破。
+int PaperBreakBar(const double level,const int sign,const MqlRates &bars[],const double volatility)
+{
+   if(ArraySize(bars)<3 || sign==0 || volatility<=0) return -1;
+   double buffer=MathMax(TickSize()*2,volatility*0.10);
+   for(int k=0;k<=3 && k+1<ArraySize(bars);k++)
+   {
+      if(sign*(bars[k+1].close-level)>0 || sign*(bars[k].close-level)<buffer) continue;
+      if(bars[k].high-bars[k].low>volatility*3) continue;
+      bool held=true;
+      for(int j=0;j<k;j++) if(sign*(bars[j].close-level)<buffer) held=false;
+      if(!held) continue;
+      if(k==0)
+      {
+         if(sign*(bars[0].close-bars[0].open)>=volatility*0.10) return k;
+      }
+      else
+      {
+         double edge=sign>0 ? bars[0].low : bars[0].high;
+         if(sign*(edge-level)>=-MathMax(TEACHER_BAND,volatility*0.75) &&
+            sign*(edge-level)<=TEACHER_BAND) return k;
+      }
+   }
+   return -1;
+}
 int PaperReaction(const int arm,const double level,const int messageSide,const MqlRates &bars[],
                   const double volatility,const int trendValue)
 {
    if(ArraySize(bars)<3 || volatility<=0 || level<=0) return 0;
    MqlRates b=bars[0];
-   double buffer=MathMax(TickSize()*2,volatility*观察收回ATR倍数);
    if(b.high-b.low>volatility*3) return 0;
    int sign=messageSide!=0 ? messageSide : (b.close>level ? 1 : -1);
+   double buffer=MathMax(TickSize()*2,volatility*0.10);
+   double reach=MathMax(TEACHER_BAND,MathMin(2.0,volatility*0.75));
    if(arm==4)
    {
-      // 突破K必须先完成；下一根回踩K也必须完成。不用同根高低猜先后。
-      bool up=bars[2].close<=level && bars[1].close>level+buffer;
-      bool down=bars[2].close>=level && bars[1].close<level-buffer;
-      sign=up ? 1 : down ? -1 : 0;
-      if(sign==0 || messageSide*sign<0) return 0;
+      // 已有明确消息方向不反做；中性点由真实突破方向决定。
+      if(PaperBreakBar(level,sign,bars,volatility)<0 ||
+         sign*(b.close-level)>MathMax(TEACHER_BAND,MathMin(2.0,volatility))) return 0;
+      return sign;
    }
-   if(arm==3 && trendValue!=sign) return 0;
-   if(sign*(b.close-b.open)<volatility*0.10 || sign*(b.close-level)<buffer ||
-      MathAbs(b.close-level)>TEACHER_BAND+buffer) return 0;
-   if(sign>0 && (b.low<level-TEACHER_BAND || b.low>level+TEACHER_BAND)) return 0;
-   if(sign<0 && (b.high>level+TEACHER_BAND || b.high<level-TEACHER_BAND)) return 0;
+   if(arm==3)
+   {
+      int paperTrend=trendValue;
+      // M5中性时，最近三根M1收盘有连续同向推进即可；不逆明确M5趋势。
+      if(paperTrend==0 && MathAbs(b.close-bars[2].close)>=volatility*0.20)
+      {
+         if(b.close>bars[1].close && bars[1].close>=bars[2].close) paperTrend=1;
+         if(b.close<bars[1].close && bars[1].close<=bars[2].close) paperTrend=-1;
+      }
+      if(paperTrend!=sign) return 0;
+   }
+   // 容许小实体/十字线与有限刺穿，但收盘必须回到点位正确一侧。
+   if(sign*(b.close-b.open)<-volatility*0.10 || sign*(b.close-level)<buffer ||
+      MathAbs(b.close-level)>reach) return 0;
+   double edge=sign>0 ? b.low : b.high;
+   if(sign*(edge-level)<-MathMax(TEACHER_BAND,volatility*0.75) ||
+      sign*(edge-level)>TEACHER_BAND) return 0;
    return sign;
+}
+// B只在两个有效点位之间试反弹；不再要求上下沿各自多次历史反应。
+int PaperRangePeer(const int i,const int sign)
+{
+   if(sign==0 || ArraySize(adaptiveBars)<3) return -1;
+   long offset=(long)MathRound((double)(TimeCurrent()-TimeGMT())/3600.0)*3600;
+   int peer=-1; double nearest=DBL_MAX;
+   for(int j=0;j<ArraySize(aiPlans);j++)
+   {
+      double gap=sign*(aiPlans[j].level-aiPlans[i].level);
+      if(j==i || gap<5.0 || gap>=nearest || EntrySourceReason(j)!="") continue;
+      if(aiPlans[j].sign==sign || aiPlans[j].confirmed+offset>adaptiveBars[0].time ||
+         aiPlans[j].available+offset>adaptiveBars[0].time) continue;
+      nearest=gap; peer=j;
+   }
+   return peer;
 }
 int PaperDirection(const int arm,const int i)
 {
    if(arm==0) return PlanSign(i);
-   if(arm==1) return ObserverDirection(i);
    return PaperReaction(arm,aiPlans[i].level,aiPlans[i].sign,adaptiveBars,adaptiveATR,adaptiveTrend);
 }
 string PaperReactionStatus(const int i,const MqlTick &q,const int arm,datetime after)
@@ -64,18 +125,31 @@ string PaperReactionStatus(const int i,const MqlTick &q,const int arm,datetime a
    if(!AdaptiveMarketFresh() || ArraySize(adaptiveBars)<3) return "等待完整收盘行情";
    MqlRates b=adaptiveBars[0];
    long offset=(long)MathRound((double)(TimeCurrent()-TimeGMT())/3600.0)*3600;
-   datetime evidenceBar=arm==4 ? adaptiveBars[2].time : b.time;
+   int sign=PaperDirection(arm,i);
+   datetime evidenceBar=b.time;
+   if(arm==4 && sign!=0)
+   {
+      int k=PaperBreakBar(aiPlans[i].level,sign,adaptiveBars,adaptiveATR);
+      if(k>=0) evidenceBar=adaptiveBars[k+1].time;
+   }
+   if(arm==3 && adaptiveTrend==0) evidenceBar=adaptiveBars[2].time;
    if(aiPlans[i].confirmed+offset>evidenceBar || aiPlans[i].available+offset>evidenceBar)
       return "当时尚未收到该点位版本，等待新的反应";
    if(q.time<b.time+60 || q.time>=b.time+120) return "等待新的一分钟行情";
    if(TimeCurrent()<adaptiveRecoverUntil) after=(datetime)MathMax(after,adaptiveShockUntil);
    if(after>0 && evidenceBar<after) return "等待消息或冲击结束后的新反应";
-   int sign=PaperDirection(arm,i);
-   if(sign==0) return arm==4 ? "等待突破完成后再回踩" : arm==3 ? "等待顺势回踩并收回" : "等待点位收回，暂不入场";
+   if(sign==0) return arm==4 ? "等待收盘突破或三根内回踩" : arm==3 ? "等待趋势方向的点位反应" : "等待靠近点位并轻收回";
    double entry=sign>0 ? q.ask : q.bid;
-   if(sign*(entry-aiPlans[i].level)<=0 ||
-      MathAbs(entry-aiPlans[i].level)>TEACHER_BAND+MathMax(TickSize()*2,adaptiveATR*观察收回ATR倍数))
+   double reach=MathMax(TEACHER_BAND,MathMin(2.0,adaptiveATR*(arm==4 ? 1.0 : 0.75)));
+   if(sign*(entry-aiPlans[i].level)<=0 || MathAbs(entry-aiPlans[i].level)>reach)
       return "价格已离开反应区域，不追价";
+   if(arm==1)
+   {
+      int peer=PaperRangePeer(i,sign);
+      if(peer<0) return "等待另一侧有效点位，暂不能组成区间";
+      if(sign*(aiPlans[peer].level-entry)<MathMax(2.0,adaptiveATR*0.75))
+         return "距另一侧点位太近，反弹空间不足";
+   }
    return "区间反应候选";
 }
 PaperTrade paperTrades[];
@@ -111,7 +185,7 @@ string PaperClean(string text)
 string PaperPolicy()
 {
    // 改变比较规则或费用会自动分开账本，不能把不同假设的成绩相加。
-   return "P2/five-arms-v1.72/tp5/sl10/hold60/lot"+DoubleToString(每次开仓手数,8)+"/cap"+IntegerToString(最大同时持仓)+
+   return "P3/five-arms-v1.79/tp5/sl10/hold60/lot"+DoubleToString(每次开仓手数,8)+"/cap"+IntegerToString(最大同时持仓)+
       "/fee"+DoubleToString(模拟每手往返费用,8)+"/slip"+DoubleToString(模拟单边滑点价格,8)+
       "/news"+IntegerToString((int)启用消息日历)+"/windows"+IntegerToString(重点事件前后分钟)+","+
       IntegerToString(一般高重要性前后分钟)+"/shock"+IntegerToString(冲击冷却秒数)+
@@ -683,11 +757,11 @@ void PaperPoll()
       }
       if(conflict) { paperStatus[arm]="同优先级意见冲突，等待新消息或新行情"; continue; }
       PaperEvent e; ZeroMemory(e); e.kind="OPEN"; e.arm=arm; e.sign=side; e.msc=q.time_msc;
-      e.bar=arm==0 ? 0 : arm==1 ? entryObservations[ArraySize(entryObservations)-1].bar : adaptiveBars[0].time;
+      e.bar=arm==0 ? 0 : adaptiveBars[0].time;
       e.level=aiPlans[best].level; e.volume=每次开仓手数;
       e.entry=Align((side>0 ? q.ask : q.bid)+side*模拟单边滑点价格,side);
       e.source=aiPlans[best].id+"/"+aiPlans[best].source+"/"+IntegerToString((long)aiPlans[best].confirmed);
-      e.why=PaperName(arm)+"：按本组规则自动模拟入场";
+      e.why=PaperName(arm)+"："+PaperRule(arm);
       if(arm==0) e.why+="；B当时："+UnifiedEntryStatus(best,q,2,false);
       if(!PaperEmit(e)) return;
       paperStatus[arm]="已模拟"+(side>0 ? "买入 " : "卖出 ")+DoubleToString(e.entry,_Digits);
@@ -726,7 +800,7 @@ void PaperPanel()
       "费用尚未配置：金额未扣佣金，不可当作净收益",16,533,528,9,UI_WARN);
    UIText("每秒采样试做；历史归档另存收到的报价，不保证完整逐笔。",16,560,528,8.5,UI_DIM);
    UIText("已补算 "+IntegerToString(paperScores[paperDetailArm].repaired)+" 笔；未取得完整报价的记录不猜测盈亏。",16,585,528,8.5,UI_DIM);
-   UIText("所有组均为待验证假设，暂不接管实盘。",16,614,528,9,UI_MUTED);
+   UIText("1.79新规则独立统计 · "+PaperRule(paperDetailArm),16,614,528,9,UI_MUTED);
    panelCanvas.Update();
 }
 void StopPaper()

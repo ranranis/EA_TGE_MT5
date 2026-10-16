@@ -74,7 +74,7 @@ function env(existing=''){
   ORDER_TYPE_BUY:0,ORDER_TYPE_SELL:1,OrderCalcProfit:(type,s,v,entry,exit)=>({ok:true,gross:(type===0?1:-1)*(exit-entry)*100*v})
  });
  const funcs=[
- ['PaperName','arm'],['PaperReaction','arm,level,messageSide,bars,volatility,trendValue'],['PaperDirection','arm,i'],['PaperReactionStatus','i,q,arm,after'],['EffectiveEntryMethod',''],['EntrySourceReason','i'],['UnifiedEntryStatus','i,q,method,live'],
+ ['PaperName','arm'],['PaperRule','arm'],['PaperBreakBar','level,sign,bars,volatility'],['PaperRangePeer','i,sign'],['PaperReaction','arm,level,messageSide,bars,volatility,trendValue'],['PaperDirection','arm,i'],['PaperReactionStatus','i,q,arm,after'],['EffectiveEntryMethod',''],['EntrySourceReason','i'],['UnifiedEntryStatus','i,q,method,live'],
  ['ObserverDirection','i'],['ObserverEntryStatus','i,q,after'],
  ['PaperClean','text'],['PaperDetailFind','id'],['PaperClearReview',''],['PaperSyncReview',''],['PaperDetailCount',''],['PaperDetailAction','action'],['PaperSettle','e'],['PaperRemember','e'],['PaperDetailPanel',''],['PaperMoment','msc'],['PaperPolicy',''],['PaperEncode','e'],['PaperParse','line,e'],
  ['PaperFind','id'],['PaperVisitIndex','arm,level'],['PaperEventValid','e'],['PaperApply','e'],
@@ -98,10 +98,11 @@ function env(existing=''){
   quote:()=>quote};
 }
 function observe(e,sign=1){
- const p=e.x.aiPlans[0],bar=Math.floor(e.quote().time/60)*60-60;
- e.x.entryObservations=[{sign,bar,utc:e.x.TimeGMT(),lower:100,upper:110,atr:2,why:'wait',
-  lowerEvidence:p.kind+'/'+p.sign+'/'+p.id+'/'+p.source,upperEvidence:p.kind+'/'+p.sign+'/'+p.id+'/'+p.source,
-  lowerConfirmed:p.confirmed,upperConfirmed:p.confirmed}];
+ const bar=Math.floor(e.quote().time/60)*60-60;
+ e.x.adaptiveBars=[{time:bar,open:100.75,close:100.8,low:100,high:101},
+  {time:bar-60,open:100.8,close:100.8,low:100.5,high:101},
+  {time:bar-120,open:100.8,close:100.8,low:100.5,high:101}];
+ e.x.aiPlans.push(plan({id:'upper',level:110,sign:-1}));
 }
 let checks=0;function test(n,fn){fn();checks++;console.log('PASS '+n);}
 test('兼容模式保持旧行为；指定入场方式不随持单策略变化',()=>{
@@ -113,22 +114,24 @@ test('有效点位开虚拟单，保留原消息方向；未确认的新方法�
  assert.equal(e.x.paperScores[0].opened,1);assert.match(e.file,/B当时/);
 });
 test('已收盘反应可自动启动B，两组账本独立且同次触及不重复',()=>{
- const e=env();observe(e);e.tick(100.7,100.8);assert.equal(e.x.paperTrades.length,2);
- for(let i=0;i<3;i++)e.tick(100.6,100.7);assert.equal(e.x.paperTrades.length,2);assert.deepEqual(Array.from(e.x.paperScores,s=>s.opened).slice(0,2),[1,1]);
+ const e=env();observe(e);e.tick(100.7,100.8);assert.equal(e.x.paperTrades.length,3);
+ for(let i=0;i<3;i++)e.tick(100.6,100.7);assert.equal(e.x.paperTrades.length,3);assert.deepEqual(Array.from(e.x.paperScores,s=>s.opened).slice(0,2),[1,1]);
 });
-test('新判断不使用未来收盘、过期判断、旧启动记录或相反消息方向',()=>{
- for(const type of ['future','old','restart','direction']){
-  const e=env();observe(e);const r=e.x.entryObservations[0];
-  if(type==='future')r.bar=e.x.TimeCurrent();
-  if(type==='old')r.bar-=120;
-  if(type==='restart')r.utc=1;
+test('B不使用未来收盘、过期行情、晚到消息或相反消息方向',()=>{
+ for(const type of ['future','old','late','direction']){
+  const e=env();observe(e);const b=e.x.adaptiveBars[0];
+  if(type==='future')b.time=e.x.TimeCurrent();
+  if(type==='old')b.time-=120;
+  if(type==='late')e.x.aiPlans[0].available=1000;
   if(type==='direction')e.x.aiPlans[0].sign=-1;
   e.tick(100.7,100.8);assert.equal(e.x.paperScores[1].opened,0,type);
  }
 });
-test('新消息替换来源后旧研判不触发；暂停后可用新反应恢复',()=>{
- const e=env();observe(e);e.x.aiPlans[0].confirmed=901;e.tick(100.7,100.8);assert.equal(e.x.paperScores[1].opened,0);
- observe(e);e.tick(100.7,100.8);assert.equal(e.x.paperScores[1].opened,1);
+test('新消息替换后等待新K反应，不能复用到达之前的K线',()=>{
+ const e=env();observe(e);e.x.aiPlans[0].available=1000;
+ e.tick(100.7,100.8);assert.equal(e.x.paperScores[1].opened,0);
+ e.setNow(1080);e.x.adaptiveBars[0].time=1020;
+ e.tick(100.7,100.8);assert.equal(e.x.paperScores[1].opened,1);
 });
 test('断开的消息、撤销、到期以及异常点差不产生新模拟',()=>{
  for(const type of ['feed','cancel','expiry','spread']){
@@ -140,7 +143,7 @@ test('断开的消息、撤销、到期以及异常点差不产生新模拟',()=
 test('两组共享消息窗口与冲击暂停，恢复不永久卡死',()=>{
  const e=env();observe(e);e.x.AdaptiveNewsState=()=>'消息窗口';e.tick(100.7,100.8);assert.equal(e.x.paperTrades.length,0);
  e.x.AdaptiveNewsState=()=>'';e.x.adaptiveShockUntil=1100;e.tick(100.7,100.8);assert.equal(e.x.paperTrades.length,0);
- e.x.adaptiveShockUntil=0;e.tick(100.7,100.8);assert.equal(e.x.paperTrades.length,2);
+ e.x.adaptiveShockUntil=0;e.tick(100.7,100.8);assert.equal(e.x.paperTrades.length,3);
 });
 test('BUY用Ask入Bid出，TP不取得跳空额外利润并扣费用',()=>{
  const e=env();e.tick(99.9,100);e.tick(106,106.1);
@@ -233,7 +236,7 @@ test('成绩单布局和明细按钮在固定面板内，不覆盖切换',()=>{
  assert.equal(buttons[0].id,205);assert.equal(buttons.filter(b=>b.id>=210&&b.id<215).length,5);
 });
 
-test('C只需单点反应，D要求顺势，E要求前根突破后本根回踩',()=>{
+test('C轻收回，D保留明确趋势方向，E支持突破后回踩',()=>{
  const e=env(),b=[{time:900,open:100.1,close:100.8,low:100,high:101},
  {time:840,open:99.9,close:101,low:99.8,high:101.2},{time:780,open:99,close:99.5,low:98.5,high:100}];
  assert.equal(e.x.PaperReaction(2,100,1,b,2,0),1);
@@ -250,7 +253,7 @@ test('C/D/E空头完全对称，冲击K线或离点过远不给候选',()=>{
  b[0].low=90;for(const a of [2,3,4])assert.equal(e.x.PaperReaction(a,100,-1,b,2,-1),0);
 });
 test('晚收到的消息不能回看旧K触发C/D/E，收到时间不由原文时间冒充',()=>{
- const e=env();e.x.adaptiveBars=[{time:900,open:100.1,close:100.8,low:100,high:101},{time:840,close:101},{time:780,close:99}];
+ const e=env();e.x.adaptiveBars=[{time:900,open:100.1,close:100.8,low:100,high:101},{time:840,open:99.9,close:101,low:99.8,high:101.2},{time:780,close:99}];
  e.x.adaptiveTrend=1;e.x.aiPlans[0].available=1000;
  for(const arm of [2,3,4])assert.match(e.x.PaperReactionStatus(0,{time:1001,ask:100.8,bid:100.7},arm,0),/尚未收到/);
  e.x.aiPlans[0].available=800;e.x.aiPlans[0].confirmed=800;
@@ -343,5 +346,85 @@ test('只隐藏GAP，正常亏损保留；点选一单只画小字入出，翻�
  x.PaperDetailAction(220);x.PaperDetailAction(217);assert.equal(x.marks.size,0);
  x.paperPressedId=2;x.PaperDetailAction(220);assert.equal(x.paperReviewId,0);
  assert(!sources[3].includes('OBJ_ARROW'));
+});
+
+test('B不再要求历史两端反复触碰，但另一端必须有效且当时已收到',()=>{
+ for(const type of ['valid','cancel','watch','late','same','none']){
+  const e=env();observe(e);
+  if(type==='cancel')e.x.aiPlans[1].feedState='CANCELLED';
+  if(type==='watch')e.x.aiPlans[1].kind='WATCH';
+  if(type==='late')e.x.aiPlans[1].available=1000;
+  if(type==='same')e.x.aiPlans[1].sign=1;
+  if(type==='none')e.x.aiPlans.pop();
+  e.tick(100.7,100.8);
+  assert.equal(e.x.paperScores[1].opened,type==='valid'?1:0,type);
+ }
+});
+test('C接受轻收回、小实体和有限刺穿，多空对称；超出区域仍拒绝',()=>{
+ const x=env().x;
+ for(const sign of [1,-1]){
+  const map=p=>100+sign*(p-100);
+  const b=[{time:900,open:map(100.3),close:map(100.2),low:sign>0?98.7:99.5,high:sign>0?100.5:101.3},{time:840,close:100},{time:780,close:100}];
+  assert.equal(x.PaperReaction(2,100,sign,b,2,0),sign);
+  b[0].close=map(102.1);assert.equal(x.PaperReaction(2,100,sign,b,2,0),0);
+ }
+});
+test('D在M5中性时可按连续M1推进开单，明确反向M5仍不做',()=>{
+ for(const sign of [1,-1]){
+  const e=env(),map=p=>100+sign*(p-100);
+  e.x.aiPlans=[plan({sign,available:700,confirmed:700})];
+  e.x.adaptiveBars=[{time:900,open:map(100.5),close:map(100.6),low:sign>0?100:99.2,high:sign>0?100.8:100},
+   {time:840,close:map(100.2)},{time:780,close:map(99.9)}];
+  e.tick(sign>0?100.5:99.4,sign>0?100.6:99.5);
+  assert.equal(e.x.paperScores[3].opened,1);
+  e.x.adaptiveTrend=-sign;assert.equal(e.x.PaperDirection(3,0),0);
+ }
+});
+test('E刚收盘突破可跟进，无需等下一根；不追超过两点的价格',()=>{
+ for(const sign of [1,-1]){
+  const e=env(),map=p=>100+sign*(p-100);
+  e.x.aiPlans=[plan({sign,confirmed:700,available:700})];
+  e.x.adaptiveBars=[{time:900,open:map(99.8),close:map(100.8),low:99,high:101},
+   {time:840,close:map(99.8)},{time:780,close:map(99.5)}];
+  assert.equal(e.x.PaperBreakBar(100,sign,e.x.adaptiveBars,2),0);
+  assert.match(e.x.PaperReactionStatus(0,{time:1001,bid:102.1,ask:102.2},4,0),/不追价/);
+  e.tick(sign>0?100.7:99.2,sign>0?100.8:99.3);
+  assert.equal(e.x.paperScores[4].opened,1);
+ }
+});
+test('E第三根回踩仍可进，第四根、途中失守或消息前的突破不复用',()=>{
+ const e=env(),x=e.x;x.aiPlans=[plan({confirmed:600,available:600,sign:1})];
+ x.adaptiveBars=[
+  {time:900,open:100.7,close:100.8,low:100.1,high:101},
+  {time:840,close:101,low:100.8,high:101.5},
+  {time:780,close:101.3,low:101,high:101.5},
+  {time:720,open:99.8,close:100.8,low:99.7,high:101},
+  {time:660,close:99.8}];
+ assert.equal(x.PaperBreakBar(100,1,x.adaptiveBars,2),3);
+ assert.equal(x.PaperReactionStatus(0,{time:1001,bid:100.7,ask:100.8},4,0),'区间反应候选');
+ x.aiPlans[0].available=700;
+ assert.match(x.PaperReactionStatus(0,{time:1001,bid:100.7,ask:100.8},4,0),/尚未收到/);
+ x.aiPlans[0].available=600;
+ assert.match(x.PaperReactionStatus(0,{time:1001,bid:100.7,ask:100.8},4,700),/消息或冲击/);
+ x.adaptiveBars[1].close=100.1;assert.equal(x.PaperDirection(4,0),0);
+ x.adaptiveBars[1].close=101;
+ x.adaptiveBars.unshift({time:960,open:100.7,close:100.8,low:100,high:101});
+ assert.equal(x.PaperDirection(4,0),0);
+});
+test('放宽B-E仍受参考点、消息、冲击和点差门槛约束',()=>{
+ for(const type of ['watch','news','shock','spread']){
+  const e=env();observe(e);
+  e.x.aiPlans[0].available=700;e.x.aiPlans[0].confirmed=700;e.x.adaptiveTrend=1;
+  e.x.adaptiveBars[1]={time:840,open:99.8,close:100.8,low:99.5,high:101};
+  e.x.adaptiveBars[2]={time:780,close:99.5};
+  if(type==='watch')e.x.aiPlans[0].kind='WATCH';
+  if(type==='news')e.x.AdaptiveNewsState=()=>'消息窗口';
+  if(type==='shock')e.x.adaptiveShockUntil=1100;
+  e.tick(100.7,type==='spread'?101.7:100.8);
+  assert.deepEqual(Array.from(e.x.paperScores,s=>s.opened),[0,0,0,0,0],type);
+ }
+});
+test('新策略使用独立账本版本，不把旧策略盈亏混入',()=>{
+ assert(env().x.PaperPolicy().startsWith('P3/five-arms-v1.79/'));
 });
 console.log(checks+' paper checks passed; synthetic quotes/files, no broker trading, no profitability claim');

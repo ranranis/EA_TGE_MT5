@@ -432,8 +432,7 @@ string UnifiedEntryStatus(const int i,const MqlTick &q,const int method,const bo
       datetime after=0; string news=AdaptiveNewsState(TimeCurrent(),after);
       if(news!="") return news;
       if(TimeCurrent()<adaptiveShockUntil) return "急涨急跌，暂等稳定";
-      if(method==2) return ObserverEntryStatus(i,q,after);
-      if(method>=3) return PaperReactionStatus(i,q,method-1,after);
+      if(method>=2) return PaperReactionStatus(i,q,method-1,after);
       int side=PlanSign(i);
       if(side==0) return "等待接近点位";
       if(!InTeacherBand(side>0 ? q.ask : q.bid,aiPlans[i].level)) return "等待接近点位";
