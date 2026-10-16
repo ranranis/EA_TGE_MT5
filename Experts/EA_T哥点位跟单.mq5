@@ -1,5 +1,5 @@
 #property strict
-#property version "1.75"
+#property version "1.77"
 #property description "T哥点位：积极入场、分级保护、结构化退出；固定0.02手，独立Magic。"
 #include <Trade/Trade.mqh>
 #include <Canvas/Canvas.mqh>
@@ -7,6 +7,7 @@
 #resource "Include\\View\\TgeChartOverlay.ex5"
 #resource "Include\\View\\TgeChartOscillator.ex5"
 #resource "Include\\View\\TgeChartStructure.ex5"
+#resource "Include\\View\\TgePaperHistory.ex5"
 
 input group "执行与仓位"
 input bool   启用真实交易=true;        // 初始模式；关闭时每次加载先观察，面板可手动切换
@@ -1441,8 +1442,8 @@ void ViewAction(const int action)
       else reason="无法打开编辑入口，请从监控看板进入点位编辑器";
    }
    else if(action==9) { uiObserver=true; uiStatistics=false; uiIndicators=false; uiPositions=false; }
-   else if(action>=210 && action<210+PAPER_ARMS) { paperDetailArm=action-210; paperSelectedId=0; paperChartDirty=true; }
-   else if(action>=215 && action<=219) PaperDetailAction(action);
+   else if(action>=210 && action<210+PAPER_ARMS) { paperDetailArm=action-210; paperListPage=0; }
+   else if(action>=215 && action<=217) PaperDetailAction(action);
    else if(action==205) uiPaperSummary=!uiPaperSummary;
    else if(action>=200 && action<=204) ObserverAction(action);
    else if(action==29) ToggleTradeMode();
@@ -1725,7 +1726,7 @@ void Panel()
    panelCanvas.FillRectangle(0,0,UIXPx(559),UIPx(39),UIInk(UI_HEADER));
    string pageTitle=uiObserver ? "入场研判" : uiPositions ? "持仓明细" : uiStatistics ? "交易统计" : uiIndicators ? "看盘设置" : "T哥点位计划";
    UIText(_Symbol+" · "+pageTitle,16,10,222,11,UI_TEXT);
-   UIText("v1.75",242,13,40,8,UI_DIM);
+   UIText("v1.77",242,13,40,8,UI_DIM);
    UIText(TimeToString(TimeGMT()+8*3600,TIME_SECONDS),286,12,100,10,UI_MUTED,true);
    UIButton(uiCollapsed ? "+" : "−",396,7,30,1);
    UIButton(tradeMode ? "交易模式" : "观察模式",434,7,110,29,tradeMode);
@@ -1767,7 +1768,7 @@ void Panel()
    bool hasManual=false;
    for(int i=0;i<ArraySize(aiPlans);i++) if(aiPlans[i].source=="MANUAL") { hasManual=true; break; }
    UIText(hasManual ? "点位计划 · 含手动修正" : "点位计划",28,heroY+12,280,12,UI_TEXT);
-   UIButton("编辑点位",332,heroY+10,94,8);
+   UIButton("编辑/删除点位",332,heroY+10,94,8);
    bool fallback=AIChannelReady() && StringFind(aiReason,"沿用已确认点位")>=0;
    color syncInk=AIChannelReady() && !fallback ? UI_ACCENT : UI_WARN;
    UIRound(434,heroY+10,98,26,UI_HEADER,5);
@@ -1950,6 +1951,7 @@ int OnInit()
    LifePoll();
    MqlTick q; bool fresh=FreshQuote(q); RefreshPlanValidity(q,fresh,true);
    InitObserver(); RefreshObserver(); InitPaper();
+   ObjectsDeleteAll(0,VIEW+"PAPER_REVIEW_");
    EventSetTimer(1); Panel(); SyncHistoryLayer();
    return INIT_SUCCEEDED;
 }

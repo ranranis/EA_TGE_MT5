@@ -13,9 +13,18 @@
   $('pe-undo').disabled=busy||dirty||remoteConflict||!view?.can_undo;
   $('pe-parse').disabled=busy;$('pe-use-parse').disabled=busy||!parsed;
   for(const id of ['pe-mode','pe-add','pe-reload','pe-text'])$(id).disabled=busy;
-  for(const box of ['pe-auto','pe-levels','pe-disabled','pe-bands'])for(const e of $(box).querySelectorAll('input,select,button'))e.disabled=busy;
+  for(const box of ['pe-auto','pe-levels','pe-disabled','pe-deleted','pe-bands'])for(const e of $(box).querySelectorAll('input,select,button'))e.disabled=busy;
+ }
+ function removePrice(price,replaces=[]){
+  const targets=new Set([price,...replaces].filter(v=>Number.isFinite(v)&&v>0));
+  draft.levels=draft.levels.filter(p=>!targets.has(p.price)&&!p.replaces.some(v=>targets.has(v)));
+  draft.disabled=draft.disabled.filter(p=>!targets.has(p));
+  draft.deleted=[...new Set([...(draft.deleted||[]),...targets])];
+  if(draft.mode==='auto')draft.mode='merge';
+  changed();editRows();renderAuto();
  }
  function editRows(){
+  draft.deleted??=[];
   $('pe-mode').value=draft.mode;
   const box=$('pe-levels');box.replaceChildren();
   for(const p of draft.levels){
@@ -26,8 +35,9 @@
    role.setAttribute('aria-label','点位作用');role.onchange=()=>{p.role=role.value;changed();};
    note.value=p.note;note.placeholder='备注 / 原文依据';note.maxLength=200;note.className='pe-note';note.setAttribute('aria-label','备注');
    note.oninput=()=>{p.note=note.value;changed();};
-   row.append(price,role,button(p.replaces.length?'恢复自动':'删除',()=>{draft.levels=draft.levels.filter(v=>v.id!==p.id);changed();editRows();renderAuto();}),note,
+   row.append(price,role,button('删除',()=>{draft.levels=draft.levels.filter(v=>v.id!==p.id);removePrice(p.price,p.replaces);}),note,
      el('small',p.replaces.length?'替换原价格：'+p.replaces.map(fmt).join(' / '):'手动补充；同价自动候选会被此项替换'));
+   if(p.replaces.length)row.append(button('恢复自动',()=>{draft.levels=draft.levels.filter(v=>v.id!==p.id);changed();editRows();renderAuto();}));
    const life=el('label','有效期（小时）'),hours=el('input');hours.type='number';hours.min=1;hours.max=720;hours.value=p.hours??24;
    hours.oninput=()=>{p.hours=Number(hours.value);changed();};life.append(hours);
    row.append(life,button(p.renew?'已选择重新确认':'重新确认此点',()=>{p.renew=!p.renew;changed();editRows();}));
@@ -35,6 +45,9 @@
   }
   if(!draft.levels.length)box.append(el('p','尚无手动修正，可在左侧修改或直接添加。','muted'));
   $('pe-disabled').replaceChildren(...draft.disabled.map(p=>button(fmt(p)+' · 恢复自动',()=>{draft.disabled=draft.disabled.filter(v=>v!==p);changed();editRows();renderAuto();})));
+  $('pe-deleted').replaceChildren(...draft.deleted.map(p=>button(fmt(p)+' · 解除屏蔽',()=>{
+   draft.deleted=draft.deleted.filter(v=>v!==p);changed();editRows();renderAuto();
+  })));
   const bands=$('pe-bands');bands.replaceChildren();
   for(const [key,name] of [['inner_range','小区间'],['outer_range','大区间']]){
    const row=el('div',undefined,'pe-band'),select=el('select');row.append(el('h3',name));
@@ -56,6 +69,7 @@
   const box=$('pe-auto');box.replaceChildren();const table=el('table',undefined,'pe-table'),groups=new Map();
   for(const r of view?.auto?.rows||[]){const price=Number(r[5]);if(!groups.has(price))groups.set(price,[]);groups.get(price).push(r);}
   for(const [price,rows] of [...groups].sort((a,b)=>a[0]-b[0])){
+   if((draft.deleted||[]).includes(price))continue;
    rows.sort((a,b)=>Number(b[3])-Number(a[3]));const r=rows[0],tr=el('tr'),actions=el('td');
    const overridden=draft.levels.some(p=>p.price===price||p.replaces.includes(price)),disabled=draft.disabled.includes(price);
    tr.append(el('td',fmt(price)),el('td',rows.map(label).map(s=>s.split(' · ').slice(1).join(' · ')).join(' / ')+(disabled?' · 已停用':overridden?' · 已手动修正':'')));
@@ -67,7 +81,7 @@
     if(disabled)draft.disabled=draft.disabled.filter(v=>v!==price);
     else{if(overridden){txt('pe-status','请先移除对应手动修正，再停用原价格。');return;}draft.disabled.push(price);}
     if(draft.mode==='auto')draft.mode='merge';changed();editRows();renderAuto();
-   }));
+   }),button('删除',()=>removePrice(price)));
    const life=(latest?.point_lifecycle?.points||[]).find(p=>p.price===price);
    if(life){
     const details=el('details'),summary=el('summary',life.reason+' · 来源记录');details.append(summary);
@@ -89,7 +103,7 @@
  }
  window.renderPointEditor=d=>{
   const next=d.point_editor;if(!next)return;view=next;
-  if(draft===null){draft=clone(next.draft);revision=next.revision;editRows();}
+  if(draft===null){draft=clone(next.draft);draft.deleted??=[];revision=next.revision;editRows();}
   remoteConflict=next.revision!==revision;
   txt('pe-badge',dirty?'未保存草稿':remoteConflict?'另一页面已修改':'草稿已载入');
   txt('pe-source',remoteConflict?'另一页面已修改，请重新载入后操作。':next.changed?'自动点位已有新版本。你的手动修正仍保留；核对左侧新来源后，可保留修正应用，或逐条恢复自动。':!next.initialized?'首次应用网页清单后，将接管旧手动文件入口；目前执行计划不变。':`当前已应用：${{auto:'全部自动',merge:'自动＋手动修正',manual:'全部手动'}[next.applied?.draft.mode]} · ${tm(next.applied?.at)}`);

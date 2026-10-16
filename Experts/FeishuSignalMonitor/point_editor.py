@@ -25,7 +25,7 @@ def digest(value):
 
 
 def empty_draft():
-    return dict(mode='merge', levels=[], disabled=[], inner_range={'action': 'inherit'}, outer_range={'action': 'inherit'})
+    return dict(mode='merge', levels=[], disabled=[], deleted=[], inner_range={'action': 'inherit'}, outer_range={'action': 'inherit'})
 
 
 def price(value, c):
@@ -37,7 +37,7 @@ def price(value, c):
 
 
 def validate_draft(value, c):
-    if not isinstance(value, dict) or set(value) != set(empty_draft()):
+    if not isinstance(value, dict) or set(value)-set(empty_draft()) or set(empty_draft())-set(value)-{'deleted'}:
         raise ValueError('点位草稿字段不完整')
     if value['mode'] not in ('auto', 'merge', 'manual'):
         raise ValueError('请选择自动、混合或手动模式')
@@ -69,6 +69,12 @@ def validate_draft(value, c):
     if not isinstance(value['disabled'], list) or len(value['disabled']) > 64:
         raise ValueError('停用价格最多64项')
     result['disabled'] = sorted(set(price(v, c) for v in value['disabled']))
+    deleted=value.get('deleted', [])
+    if not isinstance(deleted, list) or len(deleted)>256:
+        raise ValueError('删除记录最多256项，请恢复不需要屏蔽的价格')
+    result['deleted']=sorted(set(price(v,c) for v in deleted))
+    if seen.intersection(result['deleted']) or set(result['disabled']).intersection(result['deleted']):
+        raise ValueError('同一个价格不能既删除又添加或停用')
     if seen.intersection(result['disabled']):
         raise ValueError('同一个价格不能既添加又停用')
     for key in ('inner_range', 'outer_range'):
@@ -90,7 +96,7 @@ def validate_draft(value, c):
     inner, outer = result['inner_range'], result['outer_range']
     if inner['action'] == outer['action'] == 'replace' and not outer['low'] <= inner['low'] < inner['high'] <= outer['high']:
         raise ValueError('小区间须在大区间内')
-    if result['mode'] == 'manual' and not result['levels'] and not any(result[k]['action'] == 'replace' for k in ('inner_range', 'outer_range')):
+    if result['mode'] == 'manual' and not result['levels'] and not result['deleted'] and not result['disabled'] and not any(result[k]['action'] == 'replace' for k in ('inner_range', 'outer_range')):
         raise ValueError('全部手动模式至少填写一个点位或区间')
     return result
 
@@ -107,7 +113,7 @@ def remember_auto(db, c, rows):
 def merge_rows(rows, applied):
     if not applied or applied['draft']['mode'] == 'auto': return copy.deepcopy(rows)
     d = applied['draft']; result = copy.deepcopy(rows) if d['mode'] == 'merge' else []
-    blocked = set(d['disabled'])
+    blocked = set(d['disabled']) | set(d.get('deleted', []))
     for p in d['levels']: blocked.update(p['replaces']); blocked.add(p['price'])
     result = [r for r in result if float(r[5]) not in blocked]
     generated = []
@@ -194,7 +200,7 @@ def editor_view(db, c):
             from point_lifecycle import lifecycle_rows
             preview=lifecycle_rows(db,c,preview,time.time(),applied_override=candidate,persist=False)
         except (ValueError,KeyError) as ex: error=str(ex)
-    return dict(revision=value.get('revision', 0), draft=value.get('draft', empty_draft()), applied=applied, saved='draft' in value,
+    return dict(revision=value.get('revision', 0), draft=dict(empty_draft(), **value.get('draft', {})), applied=applied, saved='draft' in value,
                 auto=auto, can_undo='previous' in value,
                 preview_rows=preview,preview_error=error,
                 changed=bool(applied and applied['auto_revision'] != auto.get('revision')),

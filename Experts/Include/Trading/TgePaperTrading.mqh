@@ -1,14 +1,16 @@
 // P1：独立虚拟账本；仅OnTimer采样，无交易请求，不触碰真实pending/消费/持仓状态。
 struct PaperTrade
 {
-   long id,opened;
+   long id,opened,checked;
+   bool recovering;
+   datetime retry;
    datetime bar;
    int arm,sign;
    double level,entry,volume,mfe,mae;
    string source;
 };
 struct PaperVisit { int arm; double level; datetime away; };
-struct PaperScore { int opened,closed,wins,losses,invalid; double net,peak,drawdown; };
+struct PaperScore { int opened,closed,wins,losses,invalid,repaired; double net,peak,drawdown; };
 struct PaperEvent
 {
    long seq,id,msc;
@@ -79,6 +81,20 @@ string PaperReactionStatus(const int i,const MqlTick &q,const int arm,datetime a
 PaperTrade paperTrades[];
 PaperVisit paperVisits[];
 PaperScore paperScores[PAPER_ARMS];
+struct PaperSettlement { long id,msc; int arm; double net; };
+PaperSettlement paperSettlements[];
+PaperTrade paperRepair;
+long paperRepairId=0;
+int paperRepairCursor=0;
+datetime paperRepairRetry=0;
+int paperHistoryHandle=INVALID_HANDLE;
+long paperHistoryId=0,paperHistoryFrom=0,paperHistoryUntil=0;
+datetime paperHistoryStarted=0;
+void PaperReleaseHistory()
+{
+   if(paperHistoryHandle!=INVALID_HANDLE) IndicatorRelease(paperHistoryHandle);
+   paperHistoryHandle=INVALID_HANDLE; paperHistoryId=0;
+}
 long paperSeq=0,paperLastTick=0;
 int paperFile=INVALID_HANDLE;
 bool paperReady=false,paperPending=false,paperRestored=false;
@@ -133,7 +149,7 @@ bool PaperParse(const string line,PaperEvent &e)
    e.fee=StringToDouble(f[13]); e.mfe=StringToDouble(f[14]); e.mae=StringToDouble(f[15]);
    e.source=f[16]; e.why=f[17];
    return e.seq>0 && e.msc>0 && e.arm>=0 && e.arm<PAPER_ARMS &&
-      (e.kind=="OPEN" || e.kind=="CLOSE" || e.kind=="GAP" || e.kind=="REARM" || e.kind=="WAIT");
+      (e.kind=="OPEN" || e.kind=="CLOSE" || e.kind=="GAP" || e.kind=="REPAIR" || e.kind=="REARM" || e.kind=="WAIT");
 }
 int PaperFind(const long id)
 {
@@ -153,6 +169,14 @@ bool PaperEventValid(const PaperEvent &e)
    if(e.kind=="REARM") return PaperVisitIndex(e.arm,e.level)>=0;
    if(e.kind=="OPEN") return e.id==e.seq && PaperFind(e.id)<0 && (e.sign==1 || e.sign==-1) &&
       e.level>0 && e.entry>0 && e.volume>0 && PaperVisitIndex(e.arm,e.level)<0;
+   if(e.kind=="REPAIR")
+   {
+      int d=PaperDetailFind(e.id);
+      return d>=0 && paperDetails[d].endEvent.kind=="GAP" &&
+         paperDetails[d].entryEvent.arm==e.arm && paperDetails[d].entryEvent.sign==e.sign &&
+         paperDetails[d].entryEvent.entry==e.entry && paperDetails[d].entryEvent.volume==e.volume &&
+         e.msc>=paperDetails[d].entryEvent.msc && e.exit>0 && e.fee>=0;
+   }
    int i=PaperFind(e.id);
    if(i<0 || paperTrades[i].arm!=e.arm || paperTrades[i].sign!=e.sign ||
       paperTrades[i].entry!=e.entry || paperTrades[i].volume!=e.volume || e.msc<paperTrades[i].opened) return false;
@@ -163,8 +187,8 @@ bool PaperEventValid(const PaperEvent &e)
 struct PaperDetail { PaperEvent entryEvent, endEvent; };
 PaperDetail paperDetails[];
 bool paperShowDetails=false;
-long paperSelectedId=0;
-bool paperChartDirty=true;
+int paperListPage=0;
+const int PAPER_PAGE_SIZE=5;
 int PaperDetailFind(const long id)
 {
    for(int i=0;i<ArraySize(paperDetails);i++)
@@ -173,7 +197,6 @@ int PaperDetailFind(const long id)
 }
 void PaperRemember(const PaperEvent &e)
 {
-   paperChartDirty=true;
    if(e.kind=="OPEN")
    {
       int count=0,oldest=-1;
@@ -181,7 +204,7 @@ void PaperRemember(const PaperEvent &e)
          if(paperDetails[i].entryEvent.arm==e.arm)
          {
             count++;
-            if(oldest<0 && paperDetails[i].endEvent.kind!="") oldest=i;
+            if(oldest<0 && paperDetails[i].endEvent.kind!="" && paperDetails[i].entryEvent.id!=paperRepairId) oldest=i;
          }
       // 每组最多保留200笔；绝不丢弃尚未结束的模拟仓。
       if(count>=200 && oldest>=0)
@@ -192,166 +215,104 @@ void PaperRemember(const PaperEvent &e)
       int n=ArraySize(paperDetails); ArrayResize(paperDetails,n+1);
       paperDetails[n].entryEvent=e; ZeroMemory(paperDetails[n].endEvent);
    }
-   else if(e.kind=="CLOSE" || e.kind=="GAP")
+   else if(e.kind=="CLOSE" || e.kind=="GAP" || e.kind=="REPAIR")
    {
       int i=PaperDetailFind(e.id);
       if(i>=0) paperDetails[i].endEvent=e;
    }
 }
-int PaperSelected()
+int PaperDetailCount()
 {
-   int selected=PaperDetailFind(paperSelectedId);
-   if(selected>=0 && paperDetails[selected].entryEvent.arm==paperDetailArm) return selected;
-   for(int i=ArraySize(paperDetails)-1;i>=0;i--)
-      if(paperDetails[i].entryEvent.arm==paperDetailArm) return i;
-   return -1;
+   int count=0;
+   for(int i=0;i<ArraySize(paperDetails);i++) if(paperDetails[i].entryEvent.arm==paperDetailArm) count++;
+   return count;
 }
 void PaperDetailAction(const int action)
 {
-   if(action==215)
-   {
-      paperShowDetails=!paperShowDetails;
-      if(!paperShowDetails) PaperClearReviewChart(); else paperChartDirty=true;
-      return;
-   }
-   if(action==219) { PaperClearReviewChart(); ReviewReturnLive(); return; }
-   int at=PaperSelected(); if(at<0) return;
-   if(action==218)
-   {
-      reviewNavTime=(datetime)(paperDetails[at].entryEvent.msc/1000);
-      reviewNavAttempts=0; ReviewNavigate(); return;
-   }
-   int step=action==216 ? -1 : 1;
-   for(int i=at+step;i>=0 && i<ArraySize(paperDetails);i+=step)
-      if(paperDetails[i].entryEvent.arm==paperDetailArm)
-      { paperSelectedId=paperDetails[i].entryEvent.id; paperChartDirty=true; break; }
+   if(action==215) { paperShowDetails=!paperShowDetails; paperListPage=0; return; }
+   int last=MathMax(0,(PaperDetailCount()-1)/PAPER_PAGE_SIZE);
+   if(action==216) paperListPage=MathMax(0,paperListPage-1);
+   if(action==217) paperListPage=MathMin(last,paperListPage+1);
 }
 string PaperMoment(const long msc)
 {
    return TimeToString((datetime)(msc/1000),TIME_DATE|TIME_SECONDS);
 }
-string PaperReviewPrefix()
-{
-   return VIEW+"PAPER_REVIEW_";
-}
-void PaperClearReviewChart()
-{
-   string objectPrefix=PaperReviewPrefix();
-   for(int i=ObjectsTotal(0,0)-1;i>=0;i--)
-   {
-      string name=ObjectName(0,i,0);
-      if(StringFind(name,objectPrefix)==0) ObjectDelete(0,name);
-   }
-   paperChartDirty=true;
-   ChartRedraw(0);
-}
-void PaperReviewArrow(const string name,const datetime at,const double price,
-                      const int code,const color ink,const int width,const string tip)
-{
-   if(ObjectFind(0,name)<0 && !ObjectCreate(0,name,OBJ_ARROW,0,at,price)) return;
-   ObjectMove(0,name,0,at,price);
-   ObjectSetInteger(0,name,OBJPROP_ARROWCODE,code);
-   ObjectSetInteger(0,name,OBJPROP_COLOR,ink);
-   ObjectSetInteger(0,name,OBJPROP_WIDTH,width);
-   ObjectSetInteger(0,name,OBJPROP_BACK,true);
-   ObjectSetInteger(0,name,OBJPROP_SELECTABLE,false);
-   ObjectSetInteger(0,name,OBJPROP_HIDDEN,true);
-   ObjectSetInteger(0,name,OBJPROP_ZORDER,0);
-   ObjectSetString(0,name,OBJPROP_TOOLTIP,tip);
-}
-void PaperReviewLine(const string name,const datetime t1,const double p1,
-                     const datetime t2,const double p2,const color ink,const int width,
-                     const ENUM_LINE_STYLE style,const string tip)
-{
-   if(ObjectFind(0,name)<0 && !ObjectCreate(0,name,OBJ_TREND,0,t1,p1,t2,p2)) return;
-   ObjectMove(0,name,0,t1,p1); ObjectMove(0,name,1,t2,p2);
-   ObjectSetInteger(0,name,OBJPROP_COLOR,ink);
-   ObjectSetInteger(0,name,OBJPROP_WIDTH,width);
-   ObjectSetInteger(0,name,OBJPROP_STYLE,style);
-   ObjectSetInteger(0,name,OBJPROP_RAY_LEFT,false);
-   ObjectSetInteger(0,name,OBJPROP_RAY_RIGHT,false);
-   ObjectSetInteger(0,name,OBJPROP_BACK,true);
-   ObjectSetInteger(0,name,OBJPROP_SELECTABLE,false);
-   ObjectSetInteger(0,name,OBJPROP_HIDDEN,true);
-   ObjectSetInteger(0,name,OBJPROP_ZORDER,0);
-   ObjectSetString(0,name,OBJPROP_TOOLTIP,tip);
-}
-void PaperDrawReviewChart()
-{
-   if(!paperShowDetails || !paperChartDirty) return;
-   PaperClearReviewChart();
-   paperChartDirty=false;
-   string objectPrefix=PaperReviewPrefix();
-   int selectedIndex=PaperSelected();
-   for(int i=0;i<ArraySize(paperDetails);i++)
-   {
-      PaperEvent e=paperDetails[i].entryEvent, end=paperDetails[i].endEvent;
-      if(e.arm!=paperDetailArm || i!=selectedIndex || e.msc<=0 || e.entry<=0) continue;
-      int width=3;
-      color entryInk=e.sign>0 ? C'0,108,180' : C'190,88,35';
-      color exitInk=e.sign>0 ? C'0,145,110' : C'175,55,115';
-      string base=objectPrefix+IntegerToString(e.id)+"_";
-      string direction=e.sign>0 ? "模拟多单" : "模拟空单";
-      PaperReviewArrow(base+"IN",(datetime)(e.msc/1000),e.entry,e.sign>0 ? 233 : 234,
-                       entryInk,width,direction+" 入场 #"+IntegerToString(e.id)+" · "+PaperMoment(e.msc));
-      if(end.kind=="CLOSE" && end.msc>e.msc && end.exit>0)
-      {
-         PaperReviewLine(base+"PATH",(datetime)(e.msc/1000),e.entry,(datetime)(end.msc/1000),end.exit,
-                         end.gross-end.fee>=0 ? C'0,145,110' : C'190,88,35',width,
-                         end.gross-end.fee>=0 ? STYLE_SOLID : STYLE_DASH,
-                         direction+" 入场→出场 #"+IntegerToString(e.id));
-         PaperReviewArrow(base+"OUT",(datetime)(end.msc/1000),end.exit,e.sign>0 ? 234 : 233,
-                          exitInk,width,direction+" 出场 #"+IntegerToString(e.id)+" · "+PaperMoment(end.msc)+
-                          " · "+DoubleToString(end.gross-end.fee,2));
-      }
-   }
-   ChartRedraw(0);
-}
 void PaperDetailPanel()
 {
-   PaperDrawReviewChart();
-   UIText("模拟单明细 · "+PaperName(paperDetailArm),16,94,340,16,UI_TEXT);
+   UIText("模拟单列表 · "+PaperName(paperDetailArm),16,94,340,16,UI_TEXT);
    UIButton("返回成绩单",420,94,124,215);
    for(int arm=0;arm<PAPER_ARMS;arm++)
       UIButton(PaperName(arm),12+arm*108,132,104,210+arm,paperDetailArm==arm);
-   int at=PaperSelected(),count=0,ordinal=0;
-   for(int i=0;i<ArraySize(paperDetails);i++)
-      if(paperDetails[i].entryEvent.arm==paperDetailArm)
-      { count++; if(i==at) ordinal=count; }
-   UIText("本组 "+IntegerToString(ordinal)+"/"+IntegerToString(count)+" · 按开仓时间，最新在后 · 券商时间",16,172,528,9,UI_MUTED);
-   if(at<0)
+   int count=PaperDetailCount(),pages=MathMax(1,(count+PAPER_PAGE_SIZE-1)/PAPER_PAGE_SIZE);
+   paperListPage=MathMax(0,MathMin(paperListPage,pages-1));
+   UIText("共 "+IntegerToString(count)+" 笔 · 新单在前 · "+IntegerToString(paperListPage+1)+"/"+IntegerToString(pages)+" 页 · 券商时间",16,172,528,9,UI_MUTED);
+   int seen=0,shown=0;
+   for(int i=ArraySize(paperDetails)-1;i>=0 && shown<PAPER_PAGE_SIZE;i--)
    {
-      UIText("本组尚无模拟开单记录",26,226,508,14,UI_TEXT);
-      UIText(paperStatus[paperDetailArm],26,265,508,10,UI_MUTED);
-      UIText("五组继续自动运行；有模拟开单后这里会显示。",26,308,508,9,UI_DIM);
-      panelCanvas.Update(); return;
+      PaperEvent e=paperDetails[i].entryEvent,end=paperDetails[i].endEvent;
+      if(e.arm!=paperDetailArm) continue;
+      if(seen++<paperListPage*PAPER_PAGE_SIZE) continue;
+      bool closed=end.kind=="CLOSE" || end.kind=="REPAIR",gap=end.kind=="GAP";
+      int live=PaperFind(e.id),y=198+shown*72;
+      string status=closed ? (end.kind=="REPAIR" ? "已补算" : "已平仓") : gap ? "旧缺失·待补齐" :
+         live>=0 && paperTrades[live].recovering ? "核对历史中" : "模拟持仓";
+      double net=end.gross-end.fee;
+      string result=closed ? (net>0 ? "+" : "")+DoubleToString(net,2)+" "+AccountInfoString(ACCOUNT_CURRENCY) : "—";
+      if(!closed && !gap && live>=0 && !paperTrades[live].recovering)
+      {
+         MqlTick q; double floating=0;
+         if(FreshQuote(q) && OrderCalcProfit(e.sign>0 ? ORDER_TYPE_BUY : ORDER_TYPE_SELL,_Symbol,e.volume,e.entry,e.sign>0 ? q.bid : q.ask,floating))
+            result="浮动 "+(floating>0 ? "+" : "")+DoubleToString(floating,2);
+      }
+      UICard(12,y,536,66,UI_ROW);
+      UIText((e.sign>0 ? "BUY" : "SELL")+" #"+IntegerToString(e.id)+" · "+DoubleToString(e.volume,2)+"手",24,y+6,230,10,UI_TEXT);
+      UIText(status,256,y+7,128,9,gap ? UI_WARN : UI_MUTED);
+      UIText(result,382,y+5,150,11,closed ? (net>0 ? UI_GAIN : net<0 ? UI_LOSS : UI_MUTED) : UI_TEXT,true);
+      UIText("入 "+DoubleToString(e.entry,_Digits)+" · "+PaperMoment(e.msc),24,y+27,306,9,UI_TEXT);
+      UIText("点位 "+DoubleToString(e.level,_Digits),356,y+27,176,9,UI_MUTED,true);
+      string tail=closed ? "出 "+DoubleToString(end.exit,_Digits)+" · "+PaperMoment(end.msc)+" · "+end.why :
+         gap ? "旧版已作废；后台尝试按历史报价补算，不猜测出场" :
+         "SL "+DoubleToString(e.entry-e.sign*10,_Digits)+" · TP "+DoubleToString(e.entry+e.sign*5,_Digits)+" · 最长60分钟";
+      UIText(tail,24,y+48,508,8,UI_MUTED);
+      shown++;
    }
-   PaperEvent e=paperDetails[at].entryEvent, end=paperDetails[at].endEvent;
-   bool closed=end.kind=="CLOSE",gap=end.kind=="GAP";
-   int live=PaperFind(e.id);
-   double mfe=live>=0 ? paperTrades[live].mfe : end.mfe;
-   double mae=live>=0 ? paperTrades[live].mae : end.mae;
-   UICard(12,202,536,346,UI_ROW);
-   UIText((e.sign>0 ? "做多 BUY" : "做空 SELL")+" · #"+IntegerToString(e.id),26,214,300,13,UI_TEXT);
-   UIText(closed ? "已平仓" : gap ? "过程缺失" : "模拟持仓中",350,216,180,11,gap ? UI_WARN : UI_ACCENT,true);
-   UIText("点位 "+DoubleToString(e.level,_Digits)+" · "+DoubleToString(e.volume,2)+"手",26,246,508,11,UI_TEXT);
-   UIText("开仓 "+PaperMoment(e.msc)+"   @ "+DoubleToString(e.entry,_Digits),26,278,508,10,UI_TEXT);
-   UIText("结束 "+(end.kind!="" ? PaperMoment(end.msc) : "尚未结束")+
-      (closed ? "   @ "+DoubleToString(end.exit,_Digits) : ""),26,307,508,10,UI_MUTED);
-   UIText("SL "+DoubleToString(e.entry-e.sign*10,_Digits)+"   TP "+DoubleToString(e.entry+e.sign*5,_Digits)+
-      "   最长60分钟",26,336,508,10,UI_MUTED);
-   UIText(closed ? "结果 "+DoubleToString(end.gross-end.fee,2)+" "+AccountInfoString(ACCOUNT_CURRENCY)+
-      " · 费用 "+DoubleToString(end.fee,2) : gap ? "结果不计入盈亏，不推测缺失过程" : "结果待平仓结算",26,365,508,12,UI_TEXT);
-   UIText("最大顺行 "+DoubleToString(mfe,2)+" / 最大逆行 "+DoubleToString(mae,2)+"（采样价格差）",26,398,508,9,UI_MUTED);
-   UIText("入场原因："+e.why,26,428,508,9,UI_TEXT);
-   UIText("结束原因："+(end.kind!="" ? end.why : "等待止盈、止损或时间退出"),26,458,508,9,UI_MUTED);
-   UIText("判断K线："+(e.bar>0 ? TimeToString(e.bar,TIME_DATE|TIME_MINUTES) : "碰价入场，无收线条件"),26,487,508,9,UI_DIM);
-   UIText("来源："+e.source,26,516,508,8,UI_DIM);
-   UIButton("上一笔",12,562,92,216); UIButton("下一笔",112,562,92,217);
-   UIButton("定位入场K线",212,562,148,218); UIButton("返回实时",368,562,176,219);
-   UIText("仅模拟 · 每组显示最近200笔；完整记录保留在原账本",16,601,528,9,UI_MUTED);
-   UIText(reviewNotice!="" ? reviewNotice : "费用0表示未配置佣金；模拟金额不含隔夜费。",16,628,528,8,UI_DIM);
+   if(shown==0)
+   {
+      UICard(12,202,536,70,UI_ROW);
+      UIText("本组尚无模拟开单记录",26,220,500,12,UI_TEXT);
+      UIText(paperStatus[paperDetailArm],26,245,500,9,UI_MUTED);
+   }
+   UIButton("上一页",12,568,108,216); UIButton("下一页",130,568,108,217);
+   UIText("每页5笔 · 最近200笔 · 浮动未扣费用",250,575,294,9,UI_MUTED);
+   UIText(paperHealth,16,612,528,9,UI_MUTED);
+   UIText("仅模拟 · 补算保留原开仓与旧缺失记录，不重建当时未开出的单",16,636,528,8,UI_DIM);
    panelCanvas.Update();
+}
+void PaperSettle(const PaperEvent &e)
+{
+   int n=ArraySize(paperSettlements),at=n;
+   ArrayResize(paperSettlements,n+1);
+   while(at>0 && (paperSettlements[at-1].msc>e.msc ||
+      (paperSettlements[at-1].msc==e.msc && paperSettlements[at-1].id>e.id)))
+   { paperSettlements[at]=paperSettlements[at-1]; at--; }
+   paperSettlements[at].id=e.id; paperSettlements[at].msc=e.msc;
+   paperSettlements[at].arm=e.arm; paperSettlements[at].net=e.gross-e.fee;
+   if(at==n)
+   {
+      paperScores[e.arm].net+=e.gross-e.fee;
+      paperScores[e.arm].peak=MathMax(paperScores[e.arm].peak,paperScores[e.arm].net);
+      paperScores[e.arm].drawdown=MathMax(paperScores[e.arm].drawdown,paperScores[e.arm].peak-paperScores[e.arm].net);
+      return;
+   }
+   // 补算可能是更早的结束时间，按实际结束顺序重新计算该组回撤。
+   paperScores[e.arm].net=0; paperScores[e.arm].peak=0; paperScores[e.arm].drawdown=0;
+   for(int i=0;i<ArraySize(paperSettlements);i++) if(paperSettlements[i].arm==e.arm)
+   {
+      paperScores[e.arm].net+=paperSettlements[i].net;
+      paperScores[e.arm].peak=MathMax(paperScores[e.arm].peak,paperScores[e.arm].net);
+      paperScores[e.arm].drawdown=MathMax(paperScores[e.arm].drawdown,paperScores[e.arm].peak-paperScores[e.arm].net);
+   }
 }
 
 void PaperApply(const PaperEvent &e)
@@ -369,7 +330,8 @@ void PaperApply(const PaperEvent &e)
    if(e.kind=="OPEN")
    {
       int n=ArraySize(paperTrades); ArrayResize(paperTrades,n+1);
-      paperTrades[n].id=e.id; paperTrades[n].opened=e.msc; paperTrades[n].bar=e.bar;
+      paperTrades[n].id=e.id; paperTrades[n].opened=e.msc;
+      paperTrades[n].checked=e.msc; paperTrades[n].recovering=false; paperTrades[n].retry=0; paperTrades[n].bar=e.bar;
       paperTrades[n].arm=e.arm; paperTrades[n].sign=e.sign; paperTrades[n].level=e.level;
       paperTrades[n].entry=e.entry; paperTrades[n].volume=e.volume;
       paperTrades[n].mfe=0; paperTrades[n].mae=0; paperTrades[n].source=e.source;
@@ -377,16 +339,19 @@ void PaperApply(const PaperEvent &e)
       paperVisits[n].arm=e.arm; paperVisits[n].level=e.level; paperVisits[n].away=0;
       paperScores[e.arm].opened++; return;
    }
-   int at=PaperFind(e.id),n=ArraySize(paperTrades);
-   for(int j=at+1;j<n;j++) paperTrades[j-1]=paperTrades[j];
-   ArrayResize(paperTrades,n-1);
-   if(e.kind=="GAP") { paperScores[e.arm].invalid++; return; }
+   if(e.kind=="REPAIR") { paperScores[e.arm].invalid--; paperScores[e.arm].repaired++; }
+   else
+   {
+      int at=PaperFind(e.id),n=ArraySize(paperTrades);
+      for(int j=at+1;j<n;j++) paperTrades[j-1]=paperTrades[j];
+      ArrayResize(paperTrades,n-1);
+      if(e.kind=="GAP") { paperScores[e.arm].invalid++; return; }
+   }
    double net=e.gross-e.fee;
-   paperScores[e.arm].closed++; paperScores[e.arm].net+=net;
+   paperScores[e.arm].closed++;
    if(net>0) paperScores[e.arm].wins++;
    if(net<0) paperScores[e.arm].losses++;
-   paperScores[e.arm].peak=MathMax(paperScores[e.arm].peak,paperScores[e.arm].net);
-   paperScores[e.arm].drawdown=MathMax(paperScores[e.arm].drawdown,paperScores[e.arm].peak-paperScores[e.arm].net);
+   PaperSettle(e);
    paperLastResult=PaperName(e.arm)+ " · "+e.why+" · "+
       DoubleToString(net,2)+" "+AccountInfoString(ACCOUNT_CURRENCY);
 }
@@ -432,6 +397,8 @@ void InitPaper()
       if(!PaperEventValid(e)) { paperHealth="模拟账本顺序异常，保留文件并停止模拟"; return; }
       PaperApply(e); paperLastLine=line;
    }
+   for(int i=0;i<ArraySize(paperTrades);i++)
+   { paperTrades[i].recovering=true; paperTrades[i].checked=paperTrades[i].opened; }
    paperRestored=ArraySize(paperTrades)>0;
    paperReady=true; paperHealth="自动模拟已就绪，等待新报价";
 }
@@ -454,16 +421,97 @@ string PaperExit(const PaperTrade &t,const MqlTick &q,double &price)
    if(why!="") price=Align(price-t.sign*模拟单边滑点价格,-t.sign);
    return why;
 }
-bool PaperInvalidate(const MqlTick &q)
+// 返回 -1=等待数据/收益换算，0=下一段，1=已追上当前，2=已找到实际报价触发的退出。
+// 每段最多5分钟；失败不推进游标，未取得完整窗口不使用部分返回值。
+int PaperHistoryStep(PaperTrade &t,const MqlTick &latest,PaperEvent &ending)
 {
-   for(int i=ArraySize(paperTrades)-1;i>=0;i--)
+   if(TimeGMT()<t.retry) return -1;
+   if(t.checked>latest.time_msc) return 1;
+   if(paperHistoryHandle!=INVALID_HANDLE && paperHistoryId!=t.id) return 0;
+   if(paperHistoryHandle==INVALID_HANDLE)
    {
-      PaperEvent e; PaperFromTrade(paperTrades[i],q,e);
-      e.kind="GAP"; e.why="断流、重启或保存中断，过程缺失；不计盈亏";
-      if(!PaperEmit(e)) return false;
+      paperHistoryFrom=t.checked;
+      paperHistoryUntil=(long)MathMin(t.checked+300000,latest.time_msc);
+      paperHistoryHandle=iCustom(_Symbol,PERIOD_M1,"::Include\\View\\TgePaperHistory.ex5",
+         paperHistoryFrom,paperHistoryUntil,t.opened,t.entry,t.sign,paperHistoryUntil==latest.time_msc);
+      if(paperHistoryHandle==INVALID_HANDLE) { t.retry=TimeGMT()+10; return -1; }
+      paperHistoryId=t.id; paperHistoryStarted=TimeGMT();
    }
-   for(int i=0;i<ArraySize(paperVisits);i++) paperVisits[i].away=0;
-   paperRestored=false; return true;
+   double values[6],one[1]; bool ready=BarsCalculated(paperHistoryHandle)>0;
+   if(ready) for(int b=0;b<6;b++)
+   {
+      if(CopyBuffer(paperHistoryHandle,b,0,1,one)!=1 || !MathIsValidNumber(one[0]) || one[0]==EMPTY_VALUE)
+      { ready=false; break; }
+      values[b]=one[0];
+   }
+   if(!ready || values[0]==0)
+   {
+      if(TimeGMT()-paperHistoryStarted<15) return 0;
+      PaperReleaseHistory(); t.retry=TimeGMT()+10; return -1;
+   }
+   long until=paperHistoryUntil;
+   PaperReleaseHistory();
+   t.mfe=MathMax(t.mfe,values[3]); t.mae=MathMin(t.mae,values[4]);
+   MqlTick q=latest; double exit=0; string why="";
+   if(values[0]==2)
+   {
+      q.time_msc=(long)values[1]; q.time=(datetime)(q.time_msc/1000);
+      exit=Align(values[2]-t.sign*模拟单边滑点价格,-t.sign);
+      why=values[5]==1 ? "止损" : values[5]==2 ? "止盈" : "满60分钟退出";
+   }
+   else if(latest.time_msc-until<=5000)
+   {
+      // 已补到最近5秒内，按原采样口径处理最新报价，不无限追赶移动中的末端。
+      double delta=t.sign*((t.sign>0 ? latest.bid : latest.ask)-t.entry);
+      t.mfe=MathMax(t.mfe,delta); t.mae=MathMin(t.mae,delta);
+      why=PaperExit(t,q,exit); until=latest.time_msc;
+   }
+   if(why!="")
+   {
+      PaperFromTrade(t,q,ending); ending.kind="CLOSE"; ending.exit=exit;
+      ending.why="历史报价补齐 · "+why;
+      if(!OrderCalcProfit(t.sign>0 ? ORDER_TYPE_BUY : ORDER_TYPE_SELL,_Symbol,t.volume,t.entry,exit,ending.gross))
+      { t.retry=TimeGMT()+10; return -1; }
+      ending.fee=模拟每手往返费用*t.volume;
+      return 2;
+   }
+   t.checked=until+1; t.retry=0;
+   return until==latest.time_msc ? 1 : 0;
+}
+
+void PaperRepairLegacy(const MqlTick &q)
+{
+   if(paperPending || TimeGMT()<paperRepairRetry) return;
+   if(paperRepairId>0)
+   {
+      int d=PaperDetailFind(paperRepairId);
+      if(d<0 || paperDetails[d].endEvent.kind!="GAP")
+      { if(paperHistoryId==paperRepairId) PaperReleaseHistory(); paperRepairId=0; }
+   }
+   if(paperRepairId==0)
+   {
+      int n=ArraySize(paperDetails);
+      for(int k=0;k<n;k++)
+      {
+         int i=(paperRepairCursor+k)%n;
+         if(paperDetails[i].endEvent.kind!="GAP") continue;
+         PaperEvent e=paperDetails[i].entryEvent; ZeroMemory(paperRepair);
+         paperRepair.id=e.id; paperRepair.arm=e.arm; paperRepair.sign=e.sign; paperRepair.opened=e.msc;
+         paperRepair.checked=e.msc; paperRepair.level=e.level; paperRepair.entry=e.entry;
+         paperRepair.volume=e.volume; paperRepair.bar=e.bar; paperRepair.source=e.source;
+         paperRepairId=e.id; paperRepairCursor=(i+1)%n; break;
+      }
+      if(paperRepairId==0) { paperRepairRetry=TimeGMT()+30; return; }
+   }
+   PaperEvent ending;
+   int state=PaperHistoryStep(paperRepair,q,ending);
+   if(state==2)
+   {
+      ending.kind="REPAIR"; ending.why="旧缺失补算 · "+ending.why;
+      if(PaperEmit(ending)) paperRepairId=0;
+   }
+   else if(state<0 || state==1)
+   { paperRepairId=0; paperRepairRetry=TimeGMT()+10; }
 }
 int PaperCount(const int arm)
 {
@@ -483,30 +531,49 @@ void PaperPoll()
    {
       if(TimeGMT()<paperRetry) return;
       if(!PaperWrite(paperFrozen)) { paperRetry=TimeGMT()+10; return; }
-      PaperApply(paperFrozen); paperPending=false; paperRestored=true;
+      PaperApply(paperFrozen); paperPending=false;
    }
    MqlTick q;
-   if(!FreshQuote(q)) { paperHealth="报价断流，等待恢复；缺失过程不补算收益"; return; }
-   if(paperLastTick>0 && q.time_msc<=paperLastTick) return;
-   if(paperRestored || (paperLastTick>0 && q.time_msc-paperLastTick>5000))
-   {
-      if(!PaperInvalidate(q)) return;
-      paperLastTick=q.time_msc; paperHealth="缺失过程已排除，等待下一次完整机会"; return;
-   }
+   if(!FreshQuote(q)) { paperHealth="等待新报价 · 模拟持仓保留，恢复后核对历史"; return; }
+   if(paperLastTick>0 && q.time_msc<paperLastTick) return;
+   bool gap=paperRestored || (paperLastTick>0 && q.time_msc-paperLastTick>5000);
+   if(gap) for(int i=0;i<ArraySize(paperTrades);i++) paperTrades[i].recovering=true;
+   paperRestored=false;
+   bool newTick=q.time_msc>paperLastTick;
    paperLastTick=q.time_msc;
-   // 已有模拟单的退出不受消息中断、入场暂停影响。
+   int recoveryBudget=2; bool waiting=false;
+   // 已有模拟单的退出不受消息中断、入场暂停影响；缺口不再直接作废。
    for(int i=ArraySize(paperTrades)-1;i>=0;i--)
    {
+      if(paperTrades[i].recovering)
+      {
+         waiting=true;
+         if(recoveryBudget<=0 || TimeGMT()<paperTrades[i].retry) continue;
+         if(paperHistoryHandle!=INVALID_HANDLE && paperHistoryId!=paperTrades[i].id) continue;
+         recoveryBudget--;
+         PaperEvent e; int state=PaperHistoryStep(paperTrades[i],q,e);
+         if(state==2) { if(!PaperEmit(e)) return; }
+         else if(state==1) paperTrades[i].recovering=false;
+         continue;
+      }
+      if(!newTick) continue;
       double delta=paperTrades[i].sign*((paperTrades[i].sign>0 ? q.bid : q.ask)-paperTrades[i].entry);
       paperTrades[i].mfe=MathMax(paperTrades[i].mfe,delta);
       paperTrades[i].mae=MathMin(paperTrades[i].mae,delta);
-      double exit=0; string why=PaperExit(paperTrades[i],q,exit); if(why=="") continue;
+      double exit=0; string why=PaperExit(paperTrades[i],q,exit);
+      if(why=="") { paperTrades[i].checked=q.time_msc+1; continue; }
       PaperEvent e; PaperFromTrade(paperTrades[i],q,e); e.kind="CLOSE"; e.exit=exit; e.why=why;
       if(!OrderCalcProfit(e.sign>0 ? ORDER_TYPE_BUY : ORDER_TYPE_SELL,_Symbol,e.volume,e.entry,e.exit,e.gross))
-      { paperRestored=true; paperHealth="收益换算失败，下次将排除不完整样本"; return; }
+      {
+         paperTrades[i].recovering=true; paperTrades[i].retry=TimeGMT()+10;
+         waiting=true; continue;
+      }
       e.fee=模拟每手往返费用*e.volume;
       if(!PaperEmit(e)) return;
    }
+   if(!waiting || (paperRepairId>0 && paperHistoryId==paperRepairId)) PaperRepairLegacy(q);
+   if(paperPending) return;
+   if(!newTick) return;
    for(int i=ArraySize(paperVisits)-1;i>=0;i--)
    {
       if(PaperAreaBusy(paperVisits[i].arm,paperVisits[i].level)) { paperVisits[i].away=0; continue; }
@@ -519,6 +586,10 @@ void PaperPoll()
    }
    for(int arm=0;arm<PAPER_ARMS;arm++)
    {
+      bool recovering=false;
+      for(int i=0;i<ArraySize(paperTrades);i++)
+         if(paperTrades[i].arm==arm && paperTrades[i].recovering) recovering=true;
+      if(recovering) { paperStatus[arm]="正在补齐已有模拟单；本组暂缓新开"; continue; }
       if(PaperCount(arm)>=最大同时持仓) { paperStatus[arm]="模拟持仓已达上限"; continue; }
       int best=-1,side=0,closest=-1; double nearest=DBL_MAX;
       paperStatus[arm]=AIChannelReady() ? "等待有效点位" : "消息未同步，暂停新模拟";
@@ -565,7 +636,7 @@ void PaperPoll()
       if(!PaperEmit(e)) return;
       paperStatus[arm]="已模拟"+(side>0 ? "买入 " : "卖出 ")+DoubleToString(e.entry,_Digits);
    }
-   paperHealth="自动比较运行中 · 无需人工处理";
+   paperHealth=waiting ? "历史报价核对中 · 未结束单保留，失败10秒后重试" : "自动比较运行中 · 旧缺失记录后台补算";
 }
 void PaperPanel()
 {
@@ -578,10 +649,10 @@ void PaperPanel()
    UIText(replayHealth,16,179,528,9,UI_MUTED);
    UIText("各组相同0.02手 / TP5 SL10 / 最长60分钟",16,203,528,9,UI_DIM);
    UIText("点选策略查看原因",16,233,176,9,UI_MUTED);
-   UIText("净结果 / "+AccountInfoString(ACCOUNT_CURRENCY)+"（完整平仓）",198,233,88,9,UI_MUTED);
-   UIText("已平/当前持有",290,233,80,9,UI_MUTED);
-   UIText("赢/亏（完整）",374,233,65,9,UI_MUTED);
-   UIText("回撤 / 过程缺失",444,233,100,9,UI_MUTED);
+   UIText("结果 / "+AccountInfoString(ACCOUNT_CURRENCY),198,233,88,9,UI_MUTED);
+   UIText("已平/持有",290,233,80,9,UI_MUTED);
+   UIText("赢/亏",374,233,65,9,UI_MUTED);
+   UIText("回撤/待补",444,233,100,9,UI_MUTED);
    for(int arm=0;arm<PAPER_ARMS;arm++)
    {
       int y=255+arm*41;
@@ -594,16 +665,17 @@ void PaperPanel()
    }
    UIText(PaperName(paperDetailArm)+"："+paperStatus[paperDetailArm],16,472,528,9,UI_TEXT);
    UIButton("查看本组模拟单",16,501,190,215);
-   UIText("可翻页 / 定位入场K线",220,506,324,9,UI_MUTED);
+   UIText("持仓样式 · 分页查看",220,506,324,9,UI_MUTED);
    UIText(模拟每手往返费用>0 ? "已扣设置费用，不含隔夜费；仍为模拟估算" :
       "费用尚未配置：金额未扣佣金，不可当作净收益",16,533,528,9,UI_WARN);
    UIText("每秒采样试做；历史归档另存收到的报价，不保证完整逐笔。",16,560,528,8.5,UI_DIM);
-   UIText("缺失过程不计盈亏；旧两组成绩保留在原账本。",16,585,528,8.5,UI_DIM);
+   UIText("已补算 "+IntegerToString(paperScores[paperDetailArm].repaired)+" 笔；未取得完整报价的记录不猜测盈亏。",16,585,528,8.5,UI_DIM);
    UIText("所有组均为待验证假设，暂不接管实盘。",16,614,528,9,UI_MUTED);
    panelCanvas.Update();
 }
 void StopPaper()
 {
+   PaperReleaseHistory();
    if(paperPending && paperFile!=INVALID_HANDLE && PaperWrite(paperFrozen))
    { PaperApply(paperFrozen); paperPending=false; }
    if(paperFile!=INVALID_HANDLE) { FileClose(paperFile); paperFile=INVALID_HANDLE; }

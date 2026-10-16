@@ -54,6 +54,39 @@ class EditorTests(unittest.TestCase):
         self.db=connect(self.home/'data/monitor.sqlite')
         self.assertTrue(all(p['kind']=='WATCH' and p['life_state']=='DISABLED' for p in self.export()['plans']))
 
+    def test_delete_suppresses_auto_and_lifecycle_and_undo_restores(self):
+        before=self.export()
+        d=empty_draft();d['deleted']=[4175];self.save(d);self.apply()
+        self.assertEqual(self.export()['plans'],[])
+        # 新自动来源和反复导出都不能绕过用户删除。
+        self.now+=2
+        auto=state(self.db,'point_editor_auto')['rows'];auto[0][7]='new-message'
+        remember_auto(self.db,self.c,auto)
+        self.assertEqual(self.export()['plans'],[])
+        self.apply('undo')
+        self.assertEqual([p['price'] for p in self.export()['plans']],[4175])
+
+    def test_deleted_supports_old_drafts_and_rejects_conflicts(self):
+        d=empty_draft();d.pop('deleted')
+        self.assertEqual(validate_draft(d,self.c)['deleted'],[])
+        d=self.draft();d['deleted']=[4170]
+        with self.assertRaises(ValueError): validate_draft(d,self.c)
+        d=empty_draft();d['deleted']=[4175];d['disabled']=[4175]
+        with self.assertRaises(ValueError): validate_draft(d,self.c)
+
+    def test_delete_last_manual_point_can_publish_empty_plan(self):
+        self.export()
+        d=empty_draft();d['mode']='manual';d['deleted']=[4175]
+        self.save(d);self.apply()
+        self.assertEqual(self.export()['plans'],[])
+
+    def test_deleted_range_edge_cannot_be_regenerated(self):
+        self.export()
+        d=empty_draft();d['inner_range']=dict(action='replace',low=4170,high=4180)
+        d['deleted']=[4170]
+        self.save(d);self.apply()
+        self.assertNotIn(4170,[p['price'] for p in self.export()['plans']])
+
     def test_recover_one_auto_keeps_other_manual_additions(self):
         self.export();d=self.draft();d['levels'].append(dict(id='two',price=4190,role='neutral',note='',replaces=[]))
         self.save(d);self.apply();self.assertEqual({p['price'] for p in self.export()['plans']},{4170,4190})

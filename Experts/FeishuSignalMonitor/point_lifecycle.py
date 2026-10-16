@@ -49,8 +49,10 @@ def lifecycle_rows(db,c,rows,now,applied_override=None,persist=True):
         (c['chat_id'],now+5))}
     teachers=[r for r in messages.values() if r['sender']==c['teacher_sender_id'] and not r['historical'] and not r['deleted']]
     teachers.sort(key=lambda r:(r['created'],r['sequence']))
+    deleted=set(applied['draft'].get('deleted', [])) if applied and applied['draft']['mode']!='auto' else set()
     groups={}
     for original in rows:
+        if float(original[5]) in deleted: continue
         r=copy.deepcopy(original)
         source=messages.get(r[6],{})
         text=json.loads(source['raw']).get('content','') if source else ''
@@ -120,6 +122,7 @@ def lifecycle_rows(db,c,rows,now,applied_override=None,persist=True):
         points.append(dict(price=price,side=r[4],state=status,reason=reason,expires=chosen['expires'],sources=evidence))
     if applied and applied['draft']['mode']!='auto':
         for price in applied['draft']['disabled']:
+            if price in deleted: continue
             ident=hashlib.sha256(('DISABLED|'+str(price)).encode()).hexdigest()[:24]
             output.append(['PLAN',ident,'WATCH',0,'AUTO',f'{price:.10f}','MANUAL',ident,int(applied['at']),
                            'DISABLED|'+str(price),*['0.0000000000']*4,int(applied['at']),'REFERENCE',0,0,'DISABLED','人工停用：恢复自动后重新核验'])

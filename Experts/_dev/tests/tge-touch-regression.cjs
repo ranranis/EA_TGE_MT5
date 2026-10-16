@@ -146,6 +146,19 @@ test('重复心跳更新新鲜度但内容不变不重画点位线',()=>{
  const paused=csv.map((r,i)=>{if(i!==0)return r;const f=r.split(',');f[3]='0';return f.join(',');});
  file(x,paused);assert(x.ReadAISetups());assert.equal(draws,3);
 });
+test('无效点位不进展示地图，实时过期也会清除线条且保留原因',()=>{
+ const {x,setNow}=env();const now=Number(csv[0].split(',')[2]);setNow(now);
+ const lines=csv.map((line,i)=>{
+  if(i<1||i>3)return line;
+  const f=line.split(',');f[2]='WATCH';f[3]='0';f[4]='AUTO';f[10]=f[11]=f[12]=f[13]='0';f[15]='REFERENCE';
+  f[18]=['DISABLED','EXPIRED','CANCELLED'][i-1];return f.join(',');
+ });
+ let draws=0;x.DrawLevels=()=>draws++;file(x,lines);assert(x.ReadAISetups());
+ assert.equal(x.levels.length,2);assert.equal(x.aiPlans.length,5);
+ const last=lines[4].split(',');last[16]=String(now+1);lines[4]=last.join(',');
+ file(x,lines);assert(x.ReadAISetups());setNow(now+2);file(x,lines);assert(x.ReadAISetups());
+ assert.equal(x.levels.length,1);assert.equal(draws,3);
+});
 test('截断、错品种、错优先级快照停用且不替换旧计划',()=>{
  for(const lines of [csv.slice(0,-1),csv.map((r,i)=>i===0?r.replace('XAUUSD','EURUSD'):r),csv.map((r,i)=>i===1?r.replace(/DIRECT,(90|95|100)/,'DIRECT,70'):r)]){
  const {x,setNow}=env();setNow(Number(csv[0].split(',')[2]));file(x,lines);assert(!x.ReadAISetups());assert(!x.aiReady);assert.equal(x.aiPlans[0].id,'direct-a');}

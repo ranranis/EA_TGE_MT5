@@ -113,7 +113,9 @@ bool ReadAISetups()
          }
       bool mapped=false;
       for(int j=0;j<ArraySize(map);j++) if(MathAbs(map[j]-level)<TickSize()*0.5) mapped=true;
-      if(!mapped)
+      bool visible=(incoming[i].feedState=="READY" &&
+         (incoming[i].expires==0 || TimeGMT()<incoming[i].expires)) || incoming[i].feedState=="WATCH";
+      if(!mapped && visible)
       {
          int n=ArraySize(map); ArrayResize(map,n+1); map[n]=level; mapAt=MathMax(mapAt,incoming[i].created);
       }
@@ -129,6 +131,10 @@ bool ReadAISetups()
    bool displayChanged=identity!=nextIdentity || feedActive!=(aiReady && ArraySize(map)>0) ||
                        priceMin!=lastPriceMin || priceMax!=lastPriceMax;
    lastPriceMin=priceMin; lastPriceMax=priceMax;
+   ArraySort(map);
+   if(ArraySize(levels)!=ArraySize(map)) displayChanged=true;
+   else for(int i=0;i<ArraySize(levels);i++)
+      if(levels[i]!=map[i]) { displayChanged=true; break; }
    identity=nextIdentity; aiIdentity=identity;
    aiSource=count>0 ? incoming[0].source : "";
    ArraySort(map); ArrayCopy(levels,map); ArrayResize(levels,ArraySize(map));

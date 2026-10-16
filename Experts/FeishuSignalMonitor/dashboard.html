@@ -16,6 +16,8 @@ button:disabled{opacity:.45;cursor:not-allowed}.actions{display:flex;gap:10px;fl
 </div><div>
 <h3>手动补充 / 修正</h3><div id="pe-levels"></div><button id="pe-add">＋ 添加点位</button>
 <h3>停用的自动价格</h3><div id="pe-disabled"></div>
+<h3>已删除价格（不会被自动同步加回）</h3><div id="pe-deleted"></div>
+<p class="muted">删除会从EA清单与主图移除该价格，保留来源历史；可解除屏蔽，或撤销上次应用。先保存草稿，再应用到EA。</p>
 </div></div>
 <div class="pe-grid" id="pe-bands"></div>
 <details class="pe-paste"><summary>粘贴群消息，让DeepSeek整理为草稿</summary><p class="muted">只发送下面粘贴的内容；解析结果需要你核对，不会自动发布。</p><textarea id="pe-text" rows="4" maxlength="8000" placeholder="例如：接近4120↑，接近4180↓，4170（小压力），小区间4120—4180"></textarea><div class="actions"><button id="pe-parse">整理消息</button><button id="pe-use-parse" disabled>加入编辑区</button></div><div id="pe-parsed"></div></details>
