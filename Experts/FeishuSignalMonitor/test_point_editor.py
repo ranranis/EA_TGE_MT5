@@ -22,6 +22,10 @@ class EditorTests(unittest.TestCase):
     reply=preview_fixture.PreviewTests.reply
 
     def export(self, paused=False):
+        with self.db:
+            set_state(self.db,'teacher_analysis',dict(market_ok=True,
+                quote=dict(symbol=self.c['symbols'][self.c['teacher_symbol']],bid=4174.9,ask=4175.1,at=time.time()),
+                bars=[dict(at=int(self.now//300)*300-300)]))
         export_teacher_levels(self.db,self.c,paused,self.now)
         return snapshot(self.home,self.c)['execution_reference']
 
@@ -153,8 +157,9 @@ class EditorTests(unittest.TestCase):
         with self.assertRaises(AIError):self.apply()
         with self.db:set_state(self.db,'last_sync_ok',True)
         ingest(self.db,'test',[dict(self.message,message_id='cancel',content='4175多取消',create_time=self.now+2)])
-        self.now+=3;plans=self.export()['plans'];self.assertTrue(plans)
-        self.assertTrue(all(p['kind']=='WATCH' for p in plans if p['price']==4175))
+        self.now+=3;plans=self.export()['plans']
+        self.assertFalse(any(p['price']==4175 for p in plans))
+        self.assertTrue(any(p['price']==4175 and p['state']=='CANCELLED' for p in state(self.db,'point_lifecycle')['points']))
 
     def test_disabled_manual_and_changed_symbol_block_apply(self):
         self.export();self.save(self.draft());self.c['manual_points_enabled']=False

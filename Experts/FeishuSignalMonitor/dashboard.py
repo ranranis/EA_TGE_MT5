@@ -92,7 +92,7 @@ def snapshot(home,c):
                     follows=member_follow_snapshots(db,c,now,status.get('paused',False)),
                     execution_reference=published_reference(c,now,status),
                     point_editor=editor_view(db,c),
-                    point_lifecycle=state(db,'point_lifecycle',{}),levels=state(db,'teacher_levels',{}),analysis=state(db,'teacher_analysis',{}),
+                    point_selection=state(db,'point_selection',{}),point_lifecycle=state(db,'point_lifecycle',{}),levels=state(db,'teacher_levels',{}),analysis=state(db,'teacher_analysis',{}),
                     preview=public_preview(state(db,'plan_preview',{})),scene=scene_view(db,c),ai=state(db,'deepseek_status',{}),ai_setup=state(db,'deepseek_setup',{}),
                     ai_recent=state(db,'deepseek_recent',[]),ai_review=state(db,'deepseek_review',{}),
                     events=state(db,'analysis_events',[]),last_sync=state(db,'last_sync_at',0),

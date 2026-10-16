@@ -113,8 +113,14 @@ bool ReadAISetups()
          }
       bool mapped=false;
       for(int j=0;j<ArraySize(map);j++) if(MathAbs(map[j]-level)<TickSize()*0.5) mapped=true;
-      bool visible=(incoming[i].feedState=="READY" &&
-         (incoming[i].expires==0 || TimeGMT()<incoming[i].expires)) || incoming[i].feedState=="WATCH";
+      bool visible=(incoming[i].feedState=="READY" || incoming[i].feedState=="WATCH") &&
+         (incoming[i].expires==0 || TimeGMT()<incoming[i].expires);
+      if(visible)
+      {
+         if(ArraySize(map)>=6) return InvalidAI("点位超过6个：请更新监控筛选");
+         for(int j=0;j<ArraySize(map);j++)
+            if(MathAbs(map[j]-level)<5.0-1e-8) return InvalidAI("点位间距不足5.00：等待监控重新筛选");
+      }
       if(!mapped && visible)
       {
          int n=ArraySize(map); ArrayResize(map,n+1); map[n]=level; mapAt=MathMax(mapAt,incoming[i].created);

@@ -135,10 +135,23 @@ test('其他计划的目标不串到已有持仓',()=>{const e=env({plans:[plan(
 test('断流时离区计时清零，停机时间不算重新触价',()=>{const {x}=env();x.MergeOpportunity(1,4175);x.sharedVisits[0].left=990;x.fastLast=900000;x.RememberFastTick({time_msc:1000000,bid:4179,ask:4179.1});assert.equal(x.sharedVisits[0].left,0);});
 // 由真实Python导出函数构造合成快照，送入生产MQL读取函数。
 const csv=require('node:child_process').execFileSync('python',['-X','utf8','-c',
- 'from test_execution_feed import ExecutionTests; import csv,io; t=ExecutionTests(); t.setUp(); t.c["symbols"][t.c["teacher_symbol"]]="XAUUSD.c"; t.scene(); t.feed(); rows=list(csv.reader(io.StringIO((t.home/\"common/FeishuMT5SignalMonitor/tge_execution_v9.csv\").read_text(encoding=\"utf-8\")))); s=io.StringIO(newline=""); w=csv.writer(s,lineterminator="\\n"); w.writerows(rows); print(s.getvalue(),end=""); t.tearDown()'],
+ 'from test_execution_feed import ExecutionTests; import csv,io; t=ExecutionTests(); t.setUp(); t.c["symbols"][t.c["teacher_symbol"]]="XAUUSD.c"; t.scene(); from store import set_state; set_state(t.db,"teacher_analysis",dict(market_ok=True,quote=dict(symbol="XAUUSD.c",bid=4180,ask=4180.1,at=t.now))); t.feed(); rows=list(csv.reader(io.StringIO((t.home/\"common/FeishuMT5SignalMonitor/tge_execution_v9.csv\").read_text(encoding=\"utf-8\")))); s=io.StringIO(newline=""); w=csv.writer(s,lineterminator="\\n"); w.writerows(rows); print(s.getvalue(),end=""); t.tearDown()'],
  {cwd:path.join(root,'FeishuSignalMonitor'),encoding:'utf8'}).trim().split(/\r?\n/);
 function file(x,lines){let at=0;x.FileOpen=()=>1;x.FileSize=()=>lines.join('\n').length;x.FileIsEnding=()=>at>=lines.length;x.FileReadString=()=>lines[at++];x.FileClose=()=>{};}
-test('Python TGA9 -> MQL读取生命周期字段与优先级',()=>{const {x,setNow}=env();setNow(Number(csv[0].split(',')[2]));file(x,csv);assert(x.ReadAISetups());assert.equal(x.aiPlans.length,5);assert.equal(x.aiPlans.filter(p=>[90,95,100].includes(p.priority)).length,2);assert(x.aiPlans.every(p=>p.expires>p.confirmed&&p.evidenceCount>=1));});
+test('Python TGA9 -> MQL读取生命周期字段与优先级',()=>{const {x,setNow}=env();setNow(Number(csv[0].split(',')[2]));file(x,csv);assert(x.ReadAISetups());assert.equal(x.aiPlans.length,5);assert.equal(x.aiPlans.filter(p=>[90,95,100].includes(p.priority)).length,1);assert(x.aiPlans.every(p=>p.expires>p.confirmed&&p.evidenceCount>=1));});
+test('EA拒绝超过6个或不足5点的快照，5.00恰好合法',()=>{
+ const make=prices=>{
+  const row=csv[1].split(','),header=csv[0].split(',');
+  row[2]='MAP';row[3]='40';row[4]='AUTO';row[10]=row[11]=row[12]=row[13]='0';row[15]='REFERENCE';row[18]='READY';
+  header[5]=String(prices.length);header[3]='1';
+  return [header.join(','),...prices.map((p,i)=>{const r=[...row];r[1]='point'+i;r[5]=String(p);return r.join(',');}),'END,'+prices.length];
+ };
+ const {x,setNow}=env();const now=Number(csv[0].split(',')[2]);setNow(now);x.healthBeat=x.healthSync=x.healthCheckpoint=now;
+ file(x,make([4170,4175,4180,4185,4190,4195]));assert(x.ReadAISetups());assert.equal(x.levels.length,6);
+ file(x,make([4170,4175,4180,4185,4190,4195,4200]));assert(!x.ReadAISetups());assert(!x.AIChannelReady());
+ file(x,make([4180,4184.99]));assert(!x.ReadAISetups());assert(!x.AIChannelReady());
+ file(x,make([4180,4185]));assert(x.ReadAISetups());assert(x.AIChannelReady());
+});
 test('重复心跳更新新鲜度但内容不变不重画点位线',()=>{
  const {x,setNow}=env();setNow(Number(csv[0].split(',')[2]));let draws=0;x.DrawLevels=()=>draws++;
  file(x,csv);assert(x.ReadAISetups());file(x,csv);assert(x.ReadAISetups());assert.equal(draws,1);

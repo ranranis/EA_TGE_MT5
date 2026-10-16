@@ -189,6 +189,8 @@ PaperDetail paperDetails[];
 bool paperShowDetails=false;
 int paperListPage=0;
 const int PAPER_PAGE_SIZE=5;
+long paperRowIds[5],paperReviewId=0,paperPressedId=0;
+string paperReviewStamp="";
 int PaperDetailFind(const long id)
 {
    for(int i=0;i<ArraySize(paperDetails);i++)
@@ -224,11 +226,62 @@ void PaperRemember(const PaperEvent &e)
 int PaperDetailCount()
 {
    int count=0;
-   for(int i=0;i<ArraySize(paperDetails);i++) if(paperDetails[i].entryEvent.arm==paperDetailArm) count++;
+   for(int i=0;i<ArraySize(paperDetails);i++) if(paperDetails[i].entryEvent.arm==paperDetailArm && paperDetails[i].endEvent.kind!="GAP") count++;
    return count;
+}
+void PaperClearReview()
+{
+   if(paperReviewId>0)
+   {
+      ObjectsDeleteAll(0,VIEW+"PAPER_REVIEW_");
+      ReviewReturnLive();
+   }
+   paperReviewId=0; paperPressedId=0; paperReviewStamp="";
+}
+void PaperSyncReview()
+{
+   if(paperReviewId<=0) return;
+   int i=PaperDetailFind(paperReviewId);
+   if(i<0 || paperDetails[i].endEvent.kind=="GAP") { PaperClearReview(); return; }
+   PaperEvent e=paperDetails[i].entryEvent,end=paperDetails[i].endEvent;
+   string stamp=IntegerToString(e.id)+"|"+end.kind+"|"+IntegerToString(end.msc);
+   if(stamp==paperReviewStamp) return;
+   ObjectsDeleteAll(0,VIEW+"PAPER_REVIEW_");
+   string entry=VIEW+"PAPER_REVIEW_IN",exit=VIEW+"PAPER_REVIEW_OUT";
+   ReviewMark(entry,(datetime)(e.msc/1000),e.entry,"入",C'46,99,142');
+   ObjectSetString(0,entry,OBJPROP_FONT,"Microsoft YaHei");
+   ObjectSetInteger(0,entry,OBJPROP_FONTSIZE,9);
+   if(end.kind=="CLOSE" || end.kind=="REPAIR")
+   {
+      ReviewMark(exit,(datetime)(end.msc/1000),end.exit,"出",C'151,103,45');
+      ObjectSetString(0,exit,OBJPROP_FONT,"Microsoft YaHei");
+      ObjectSetInteger(0,exit,OBJPROP_FONTSIZE,9);
+      ObjectSetInteger(0,exit,OBJPROP_ANCHOR,ANCHOR_LEFT_UPPER);
+      string path=VIEW+"PAPER_REVIEW_PATH";
+      ObjectCreate(0,path,OBJ_TREND,0,(datetime)(e.msc/1000),e.entry,(datetime)(end.msc/1000),end.exit);
+      ObjectSetInteger(0,path,OBJPROP_RAY_RIGHT,false); ObjectSetInteger(0,path,OBJPROP_RAY_LEFT,false);
+      ObjectSetInteger(0,path,OBJPROP_COLOR,C'107,116,125'); ObjectSetInteger(0,path,OBJPROP_STYLE,STYLE_DOT);
+      ObjectSetInteger(0,path,OBJPROP_WIDTH,1); ObjectSetInteger(0,path,OBJPROP_BACK,true);
+      ObjectSetInteger(0,path,OBJPROP_SELECTABLE,false);
+   }
+   paperReviewStamp=stamp; ChartRedraw(0);
 }
 void PaperDetailAction(const int action)
 {
+   if(action==218) { PaperClearReview(); return; }
+   if(action>=220 && action<220+PAPER_PAGE_SIZE)
+   {
+      long id=paperRowIds[action-220];
+      // 刷新导致行号换单时，不把按下的旧行误当成另一单。
+      if(id<=0 || (paperPressedId>0 && id!=paperPressedId)) { paperPressedId=0; return; }
+      if(id==paperReviewId) { PaperClearReview(); return; }
+      PaperClearReview(); ReviewReturnLive(false);
+      int i=PaperDetailFind(id); if(i<0 || paperDetails[i].endEvent.kind=="GAP") return;
+      paperReviewId=id; PaperSyncReview();
+      reviewNavTime=(datetime)(paperDetails[i].entryEvent.msc/1000); reviewNavAttempts=0; ReviewNavigate();
+      return;
+   }
+   PaperClearReview();
    if(action==215) { paperShowDetails=!paperShowDetails; paperListPage=0; return; }
    int last=MathMax(0,(PaperDetailCount()-1)/PAPER_PAGE_SIZE);
    if(action==216) paperListPage=MathMax(0,paperListPage-1);
@@ -246,12 +299,12 @@ void PaperDetailPanel()
       UIButton(PaperName(arm),12+arm*108,132,104,210+arm,paperDetailArm==arm);
    int count=PaperDetailCount(),pages=MathMax(1,(count+PAPER_PAGE_SIZE-1)/PAPER_PAGE_SIZE);
    paperListPage=MathMax(0,MathMin(paperListPage,pages-1));
-   UIText("共 "+IntegerToString(count)+" 笔 · 新单在前 · "+IntegerToString(paperListPage+1)+"/"+IntegerToString(pages)+" 页 · 券商时间",16,172,528,9,UI_MUTED);
-   int seen=0,shown=0;
+   UIText("有效 "+IntegerToString(count)+" 笔 · 点击行看入/出 · "+IntegerToString(paperListPage+1)+"/"+IntegerToString(pages)+" 页 · 券商时间",16,172,528,9,UI_MUTED);
+   int seen=0,shown=0; ArrayInitialize(paperRowIds,0);
    for(int i=ArraySize(paperDetails)-1;i>=0 && shown<PAPER_PAGE_SIZE;i--)
    {
       PaperEvent e=paperDetails[i].entryEvent,end=paperDetails[i].endEvent;
-      if(e.arm!=paperDetailArm) continue;
+      if(e.arm!=paperDetailArm || end.kind=="GAP") continue;
       if(seen++<paperListPage*PAPER_PAGE_SIZE) continue;
       bool closed=end.kind=="CLOSE" || end.kind=="REPAIR",gap=end.kind=="GAP";
       int live=PaperFind(e.id),y=198+shown*72;
@@ -265,7 +318,10 @@ void PaperDetailPanel()
          if(FreshQuote(q) && OrderCalcProfit(e.sign>0 ? ORDER_TYPE_BUY : ORDER_TYPE_SELL,_Symbol,e.volume,e.entry,e.sign>0 ? q.bid : q.ask,floating))
             result="浮动 "+(floating>0 ? "+" : "")+DoubleToString(floating,2);
       }
-      UICard(12,y,536,66,UI_ROW);
+      UICard(12,y,536,66,paperReviewId==e.id ? UI_HEADER : UI_ROW);
+       paperRowIds[shown]=e.id;
+       int hit=ArraySize(uiHits); ArrayResize(uiHits,hit+1);
+       uiHits[hit].x=12; uiHits[hit].y=y; uiHits[hit].w=536; uiHits[hit].h=66; uiHits[hit].action=220+shown;
       UIText((e.sign>0 ? "BUY" : "SELL")+" #"+IntegerToString(e.id)+" · "+DoubleToString(e.volume,2)+"手",24,y+6,230,10,UI_TEXT);
       UIText(status,256,y+7,128,9,gap ? UI_WARN : UI_MUTED);
       UIText(result,382,y+5,150,11,closed ? (net>0 ? UI_GAIN : net<0 ? UI_LOSS : UI_MUTED) : UI_TEXT,true);
@@ -284,9 +340,9 @@ void PaperDetailPanel()
       UIText(paperStatus[paperDetailArm],26,245,500,9,UI_MUTED);
    }
    UIButton("上一页",12,568,108,216); UIButton("下一页",130,568,108,217);
-   UIText("每页5笔 · 最近200笔 · 浮动未扣费用",250,575,294,9,UI_MUTED);
+   UIButton(paperReviewId>0 ? "清除标记 / 回到实时" : "图上标记：未选择",250,568,294,218,paperReviewId>0);
    UIText(paperHealth,16,612,528,9,UI_MUTED);
-   UIText("仅模拟 · 补算保留原开仓与旧缺失记录，不重建当时未开出的单",16,636,528,8,UI_DIM);
+   UIText("仅模拟 · 作废记录已隐藏；点击只显示这一单，再点取消",16,636,528,8,UI_DIM);
    panelCanvas.Update();
 }
 void PaperSettle(const PaperEvent &e)
@@ -652,7 +708,7 @@ void PaperPanel()
    UIText("结果 / "+AccountInfoString(ACCOUNT_CURRENCY),198,233,88,9,UI_MUTED);
    UIText("已平/持有",290,233,80,9,UI_MUTED);
    UIText("赢/亏",374,233,65,9,UI_MUTED);
-   UIText("回撤/待补",444,233,100,9,UI_MUTED);
+   UIText("最大回撤",444,233,100,9,UI_MUTED);
    for(int arm=0;arm<PAPER_ARMS;arm++)
    {
       int y=255+arm*41;
@@ -661,11 +717,11 @@ void PaperPanel()
       UIText(DoubleToString(paperScores[arm].net,2),198,y+8,88,11,UI_ACCENT);
       UIText(IntegerToString(paperScores[arm].closed)+"/"+IntegerToString(PaperCount(arm)),290,y+9,80,9,UI_TEXT);
       UIText(IntegerToString(paperScores[arm].wins)+"/"+IntegerToString(paperScores[arm].losses),374,y+9,65,9,UI_TEXT);
-      UIText(DoubleToString(paperScores[arm].drawdown,1)+" / "+IntegerToString(paperScores[arm].invalid),444,y+9,100,9,UI_MUTED);
+      UIText(DoubleToString(paperScores[arm].drawdown,2),444,y+9,100,9,UI_MUTED);
    }
    UIText(PaperName(paperDetailArm)+"："+paperStatus[paperDetailArm],16,472,528,9,UI_TEXT);
    UIButton("查看本组模拟单",16,501,190,215);
-   UIText("持仓样式 · 分页查看",220,506,324,9,UI_MUTED);
+   UIText("有效单列表 · 点选查看入/出",220,506,324,9,UI_MUTED);
    UIText(模拟每手往返费用>0 ? "已扣设置费用，不含隔夜费；仍为模拟估算" :
       "费用尚未配置：金额未扣佣金，不可当作净收益",16,533,528,9,UI_WARN);
    UIText("每秒采样试做；历史归档另存收到的报价，不保证完整逐笔。",16,560,528,8.5,UI_DIM);
@@ -675,6 +731,7 @@ void PaperPanel()
 }
 void StopPaper()
 {
+   PaperClearReview();
    PaperReleaseHistory();
    if(paperPending && paperFile!=INVALID_HANDLE && PaperWrite(paperFrozen))
    { PaperApply(paperFrozen); paperPending=false; }

@@ -82,7 +82,9 @@
     else{if(overridden){txt('pe-status','请先移除对应手动修正，再停用原价格。');return;}draft.disabled.push(price);}
     if(draft.mode==='auto')draft.mode='merge';changed();editRows();renderAuto();
    }),button('删除',()=>removePrice(price)));
-   const life=(latest?.point_lifecycle?.points||[]).find(p=>p.price===price);
+   const picked=(latest?.point_selection?.items||[]).find(p=>p.price===price);
+    if(picked)actions.append(el('p',picked.reason,picked.selected?'':'muted'));
+    const life=(latest?.point_lifecycle?.points||[]).find(p=>p.price===price);
    if(life){
     const details=el('details'),summary=el('summary',life.reason+' · 来源记录');details.append(summary);
     for(const source of life.sources||[])details.append(el('p',source.kind+' / '+source.side+' · '+tm(source.confirmed)+' · 到期 '+(source.expires?tm(source.expires):'仅观察')+' · '+source.reason+' · '+source.text));
@@ -99,7 +101,7 @@
   const before=new Set((latest?.execution_reference?.plans||[]).map(encode));
   const after=new Set((view.preview_rows||[]).map(r=>encode({kind:r[2],side:r[4],price:r[5]})));
   const add=[...after].filter(v=>!before.has(v)).length,remove=[...before].filter(v=>!after.has(v)).length;
-  txt('pe-diff',view.preview_error||`相对当前导出：新增/改后 ${add} 项，移除/改前 ${remove} 项。下方是完整应用预览。`);
+  txt('pe-diff',view.preview_error||`相对当前导出：新增/改后 ${add} 项，移除/改前 ${remove} 项。最多6个，间距至少5.00；下方是筛选后的应用预览。`);
  }
  window.renderPointEditor=d=>{
   const next=d.point_editor;if(!next)return;view=next;
@@ -108,7 +110,7 @@
   txt('pe-badge',dirty?'未保存草稿':remoteConflict?'另一页面已修改':'草稿已载入');
   txt('pe-source',remoteConflict?'另一页面已修改，请重新载入后操作。':next.changed?'自动点位已有新版本。你的手动修正仍保留；核对左侧新来源后，可保留修正应用，或逐条恢复自动。':!next.initialized?'首次应用网页清单后，将接管旧手动文件入口；目前执行计划不变。':`当前已应用：${{auto:'全部自动',merge:'自动＋手动修正',manual:'全部手动'}[next.applied?.draft.mode]} · ${tm(next.applied?.at)}`);
   $('pe-source').classList.toggle('pe-warn',next.changed||remoteConflict);
-  const stamp=(next.auto?.revision||'')+JSON.stringify(d.point_lifecycle?.points||[]);if(autoSeen!==stamp){autoSeen=stamp;renderAuto();}
+  const stamp=(next.auto?.revision||'')+JSON.stringify([d.point_lifecycle?.points,d.point_selection?.items]);if(autoSeen!==stamp){autoSeen=stamp;renderAuto();}
   preview();controls();
  };
  async function post(url,body){const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json','X-Local-Token':actionToken},body:JSON.stringify(body)});const result=await r.json();if(!r.ok)throw Error(result.error||'操作失败');return result;}

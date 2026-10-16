@@ -192,17 +192,18 @@ def editor_view(db, c):
     value = state(db, 'point_editor', {})
     auto = state(db, 'point_editor_auto', {})
     applied = value.get('applied')
-    preview=[]; error=''
+    preview=[]; selection={}; error=''
     if auto:
         try:
             candidate=prepare_applied(value.get('draft',empty_draft()),auto,applied,time.time())
             preview=cancel_manual_rows(db,c,merge_rows(auto['rows'],candidate),time.time())
-            from point_lifecycle import lifecycle_rows
+            from point_lifecycle import lifecycle_rows, select_rows
             preview=lifecycle_rows(db,c,preview,time.time(),applied_override=candidate,persist=False)
+            preview,selection=select_rows(db,c,preview,time.time(),persist=False)
         except (ValueError,KeyError) as ex: error=str(ex)
     return dict(revision=value.get('revision', 0), draft=dict(empty_draft(), **value.get('draft', {})), applied=applied, saved='draft' in value,
                 auto=auto, can_undo='previous' in value,
-                preview_rows=preview,preview_error=error,
+                preview_rows=preview,preview_error=error,preview_selection=selection,
                 changed=bool(applied and applied['auto_revision'] != auto.get('revision')),
                 enabled=c.get('manual_points_enabled', False), initialized='applied' in value)
 

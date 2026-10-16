@@ -1,5 +1,5 @@
 #property strict
-#property version "1.77"
+#property version "1.78"
 #property description "T哥点位：积极入场、分级保护、结构化退出；固定0.02手，独立Magic。"
 #include <Trade/Trade.mqh>
 #include <Canvas/Canvas.mqh>
@@ -1091,12 +1091,12 @@ bool UIIndicatorSet(const int index,const bool enabled)
    bool overlay=!UIIsOscillator(index);
    int kind=overlay ? (index>=10 ? index-7 : index==2 ? 2 : index==0 ? 0 : 1) : index>=14 ? index-11 : index-3;
    ENUM_MA_METHOD method=index==0 ? 看盘主均线算法 : 看盘辅助均线算法;
-   color lineInk=index==0 ? C'0,83,138' : index==6 ? C'153,76,0' : index==1 ? C'105,52,139' :
+   color lineInk=index==0 ? C'46,99,142' : index==6 ? C'153,76,0' : index==1 ? C'151,103,45' :
                   index==10 ? C'20,55,85' : index==11 ? C'112,62,0' : index==7 ? C'45,45,45' :
                   index==8 ? C'70,63,116' : C'70,83,96';
-   ENUM_LINE_STYLE lineStyle=index==7 || index==10 ? STYLE_DASH :
+   ENUM_LINE_STYLE lineStyle=index==1 || index==7 || index==10 ? STYLE_DASH :
                               index==8 || index==11 ? STYLE_DOT : STYLE_SOLID;
-   int lineWidth=lineStyle==STYLE_SOLID ? (index==0 || index==9 ? 3 : 2) : 1;
+   int lineWidth=index==0 || index==1 ? 1 : lineStyle==STYLE_SOLID ? (index==9 ? 3 : 2) : 1;
    int handle=index>=16 ?
        iCustom(_Symbol,ChartPeriod(0),"::Include\\View\\TgeChartStructure.ex5",index-16,UIIndicatorName(index),
                看盘框体周期,看盘近期框根数,看盘震荡最少根数,看盘震荡ATR倍数,看盘ATR周期,
@@ -1423,6 +1423,7 @@ void ViewAction(const int action)
 {
    int before=UIViewMask();
    bool recordUndo=action==27 || (action>=50 && action<=75) || (action>=82 && action<=90) || action==93 || (action>=100 && action<=103);
+   if((action>=2 && action<=5) || action==205 || (action>=210 && action<=214)) PaperClearReview();
    if(action>=2 && action<=5) uiObserver=false;
    if(action==1) uiCollapsed=!uiCollapsed;
     else if(action==2) { uiStatistics=false; uiIndicators=false; uiPositions=false; }
@@ -1443,7 +1444,7 @@ void ViewAction(const int action)
    }
    else if(action==9) { uiObserver=true; uiStatistics=false; uiIndicators=false; uiPositions=false; }
    else if(action>=210 && action<210+PAPER_ARMS) { paperDetailArm=action-210; paperListPage=0; }
-   else if(action>=215 && action<=217) PaperDetailAction(action);
+   else if(action>=215 && action<=224) PaperDetailAction(action);
    else if(action==205) uiPaperSummary=!uiPaperSummary;
    else if(action>=200 && action<=204) ObserverAction(action);
    else if(action==29) ToggleTradeMode();
@@ -1726,7 +1727,7 @@ void Panel()
    panelCanvas.FillRectangle(0,0,UIXPx(559),UIPx(39),UIInk(UI_HEADER));
    string pageTitle=uiObserver ? "入场研判" : uiPositions ? "持仓明细" : uiStatistics ? "交易统计" : uiIndicators ? "看盘设置" : "T哥点位计划";
    UIText(_Symbol+" · "+pageTitle,16,10,222,11,UI_TEXT);
-   UIText("v1.77",242,13,40,8,UI_DIM);
+   UIText("v1.78",242,13,40,8,UI_DIM);
    UIText(TimeToString(TimeGMT()+8*3600,TIME_SECONDS),286,12,100,10,UI_MUTED,true);
    UIButton(uiCollapsed ? "+" : "−",396,7,30,1);
    UIButton(tradeMode ? "交易模式" : "观察模式",434,7,110,29,tradeMode);
@@ -1822,7 +1823,7 @@ void Panel()
       y+=8;
    }
     UIText("全部参考点位",28,y,220,9,UI_MUTED);
-    UIText("中性40 · "+IntegerToString(ArraySize(levels))+" 个价格",280,y,252,8,UI_DIM,true);
+    UIText(IntegerToString(ArraySize(levels))+"/6 个 · 间距≥5.00",280,y,252,8,UI_DIM,true);
    y+=28;
    for(int row=0;row<pointRows;row++)
    {
@@ -1965,7 +1966,7 @@ void OnTimer()
    if(fresh) for(int i=0;i<ArraySize(aiPlans);i++) TeacherEntryAllowed(i,q);
    Reconcile();
    SyncTeacherLimits(); Manage();
-   LifePoll(); ReviewNavigate(); RefreshObserver(); PaperPoll(); ReplayPoll();
+   LifePoll(); ReviewNavigate(); RefreshObserver(); PaperPoll(); PaperSyncReview(); ReplayPoll();
    checkingMinute=iTime(_Symbol,PERIOD_M1,1);
    DecisionLog("EVALUATE",reason);
    SyncTgeMobileMarkers(); SyncHistoryLayer(); Panel(); busy=false;
@@ -2003,6 +2004,7 @@ void OnChartEvent(const int id,const long &lparam,const double &dparam,const str
       if(pressed)
       {
          uiPressedAction=HitAction(mx,my);
+         paperPressedId=(uiPressedAction>=220 && uiPressedAction<220+PAPER_PAGE_SIZE) ? paperRowIds[uiPressedAction-220] : 0;
          statsPressedId=uiPressedAction>=1000 && uiPressedAction-1000<ArraySize(statsTrades) ?
                         statsTrades[uiPressedAction-1000].id : 0;
          if(uiPressedAction==0 && mx>=uiX && mx<uiX+UIXPx(275) && my>=uiY && my<uiY+UIPx(40))

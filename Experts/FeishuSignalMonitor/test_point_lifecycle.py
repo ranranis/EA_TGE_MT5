@@ -2,7 +2,7 @@
 import copy
 import unittest
 from store import state,set_state,ingest
-from point_lifecycle import lifecycle_rows,expiry
+from point_lifecycle import lifecycle_rows,expiry,select_rows
 from point_editor import prepare_applied,empty_draft,merge_rows,validate_draft
 import test_deepseek_ai as fixtures
 
@@ -23,7 +23,7 @@ class PointLifecycleTests(unittest.TestCase):
     def test_same_side_one_candidate_with_two_independent_expiries(self):
         old=self.row(age=86000);new=self.row('new','ROLE',age=10)
         feed=self.feed([old,new]);self.assertEqual(len(feed),1)
-        self.assertEqual(feed[0][2],'DIRECT');self.assertEqual(feed[0][17],2)
+        self.assertEqual(feed[0][2],'ROLE');self.assertEqual(feed[0][17],2)
         after=self.feed([old,new],self.now+500)
         self.assertEqual(after[0][2],'ROLE')
         sources=state(self.db,'point_lifecycle')['points'][0]['sources']
@@ -94,5 +94,97 @@ class PointLifecycleTests(unittest.TestCase):
         r=self.row()
         self.feed([r]);self.assertEqual(self.feed([]),[])
         self.assertEqual(state(self.db,'point_lifecycle')['events'][-1]['state'],'REMOVED')
+
+class PointSelectionTests(unittest.TestCase):
+    setUp=PointLifecycleTests.setUp
+    tearDown=PointLifecycleTests.tearDown
+    seed=PointLifecycleTests.seed
+    row=PointLifecycleTests.row
+    feed=PointLifecycleTests.feed
+    def select(self,rows,mid=4176,now=None,bar=100,market=True,persist=True):
+        now=self.now if now is None else now
+        with self.db:
+            set_state(self.db,'teacher_analysis',dict(market_ok=market,
+                quote=dict(symbol=self.c['symbols'][self.c['teacher_symbol']],bid=mid-.1,ask=mid+.1,at=now),
+                bars=[dict(at=bar)]))
+        return select_rows(self.db,self.c,self.feed(rows,now,persist=persist),now,persist)
+
+    def test_new_near_price_wins_without_chain_merge(self):
+        rows=[self.row(str(p),kind='MAP',side='AUTO',price=p,age=60) for p in (4170,4175,4180,4190)]
+        rows.append(self.row('new',kind='ROLE',price=4182,age=1))
+        selected,value=self.select(rows)
+        self.assertEqual([float(r[5]) for r in selected],[4170,4175,4182,4190])
+        self.assertIn('不足5点',next(p for p in value['items'] if p['price']==4180)['reason'])
+
+    def test_total_limit_two_sides_and_overflow(self):
+        rows=[self.row(str(p),'MAP','AUTO',p) for p in range(4130,4231,10)]
+        picked,_=self.select(rows,4181)
+        self.assertEqual([float(r[5]) for r in picked],[4160,4170,4180,4190,4200,4210])
+        picked,_=self.select(rows,mid=4300,bar=200)
+        self.assertEqual(len(picked),6)
+        self.assertTrue(all(float(b[5])-float(a[5])>=5 for a,b in zip(picked,picked[1:])))
+
+    def test_authority_manual_and_equal_time_conflict(self):
+        teacher=self.row('teacher','ROLE','BUY',4180,age=100)
+        group=self.row('group','DIRECT','SELL',4182,age=1,sender='member')
+        self.assertEqual([float(r[5]) for r in self.select([teacher,group])[0]],[4180])
+        manual=list(group);manual[1]='manual';manual[6]='MANUAL'
+        self.assertEqual([float(r[5]) for r in self.select([teacher,manual])[0]],[4182])
+        other=self.row('other','ROLE','SELL',4182,age=100)
+        picked,value=self.select([teacher,other])
+        self.assertEqual(picked,[])
+        self.assertTrue(all('冲突' in p['reason'] for p in value['items']))
+
+    def test_heartbeat_restart_and_m5_hysteresis(self):
+        rows=[self.row(str(p),'MAP','AUTO',p) for p in range(4130,4231,10)]
+        first,value=self.select(rows,4181,bar=100)
+        saved=state(self.db,'point_selection')
+        second,_=self.select(rows,4182,now=self.now+1,bar=100)
+        self.assertEqual(first,second);self.assertEqual(saved,state(self.db,'point_selection'))
+        # 跨到下一价位附近，但新点仅近2点：不在新M5立即来回换。
+        third,_=self.select(rows,4191,now=self.now+2,bar=200)
+        self.assertEqual(first,third)
+        fourth,_=self.select(rows,4194,now=self.now+3,bar=300)
+        self.assertEqual([float(r[5]) for r in fourth],[4170,4180,4190,4200,4210,4220])
+        self.assertTrue(state(self.db,'point_selection')['events'])
+
+    def test_expiry_watch_and_no_quote(self):
+        watch=self.row('watch','WATCH','AUTO',4175,age=90000);watch[3]=0
+        fresh=self.row('fresh','ROLE','BUY',4180,age=1)
+        picked,_=self.select([watch,fresh],market=False)
+        self.assertEqual(picked,[])
+        picked,_=self.select([watch,fresh])
+        self.assertEqual([float(r[5]) for r in picked],[4180])
+        self.assertEqual(expiry(watch,'',None),watch[14]+86400)
+        picked,_=self.select([watch,fresh],now=self.now+86401,market=False)
+        self.assertEqual(picked,[])
+
+    def test_new_message_during_quote_loss_selects_on_first_return_same_bar(self):
+        old=self.row('old',price=4180,age=60)
+        new=self.row('new',price=4182,age=1)
+        self.select([old],bar=100)
+        picked,_=self.select([old,new],bar=100,market=False)
+        self.assertEqual(picked,[])
+        picked,_=self.select([old,new],bar=100)
+        self.assertEqual([float(r[5]) for r in picked],[4182])
+        self.assertFalse(state(self.db,'point_selection')['pending'])
+
+    def test_manual_correction_resolves_older_near_conflict(self):
+        a=self.row('a','ROLE','BUY',4180,age=60)
+        b=self.row('b','ROLE','SELL',4182,age=60)
+        override=self.row('manual','ROLE','BUY',4181,age=1);override[6]='MANUAL'
+        picked,_=self.select([a,b,override])
+        self.assertEqual([float(r[5]) for r in picked],[4181])
+
+    def test_large_candidate_pool_retires_to_six_not_whole_feed_error(self):
+        rows=[self.row(str(p),'MAP','AUTO',p) for p in range(4000,4400,5)]
+        picked,_=self.select(rows,mid=4180)
+        self.assertEqual(len(picked),6)
+
+    def test_preview_does_not_change_selection_or_log(self):
+        row=self.row();self.select([row])
+        before=state(self.db,'point_selection')
+        self.select([row,self.row('new',price=4182,age=1)],persist=False)
+        self.assertEqual(state(self.db,'point_selection'),before)
 
 if __name__=='__main__':unittest.main()
