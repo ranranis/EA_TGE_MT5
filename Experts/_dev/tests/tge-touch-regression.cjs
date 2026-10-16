@@ -10,7 +10,7 @@ function body(name){
  return src.slice(start+1,end-1);
 }
 function install(x,name,args='',ref=false){
- let s=body(name).replace(/\((?:int|long|uint|ulong|double|datetime|ENUM_ORDER_TYPE)\)/g,'')
+ let s=body(name).replace('static double lastPriceMin=0,lastPriceMax=0;','').replace(/CTrade (\w+);/g,'let $1=new CTrade();').replace(/\((?:int|long|uint|ulong|double|datetime|ENUM_ORDER_TYPE)\)/g,'')
  .replace(/\b(?:string|double|bool|AIPlan|MqlRates) (\w+)\[\],(\w+)\[\];/g,'let $1=[], $2=[];')
  .replace(/\b(?:string|double|bool|AIPlan|MqlRates) (\w+)\[\];/g,'let $1=[];')
  .replace(/\b(?:MqlTick|Candidate) (\w+);/g,'let $1={};')
@@ -22,16 +22,17 @@ function install(x,name,args='',ref=false){
  if(ref)s=s.replace(/return false;/g,'return {ok:false,speed,oneway,pullback};').replace(/return true;/g,'return {ok:true,speed,oneway,pullback};');
  vm.runInContext(`function ${name}(${args}){${s}}`,x);
 }
-function plan(o={}){return {id:'direct-a',kind:'DIRECT',priority:8,sign:1,approach:0,level:4175,source:'teacher-a',created:990,confirmed:990,mode:'REACTION',group:'one',lifeReason:'',sl:0,first:0,tp:0,breakeven:0,status:'',...o};}
+function plan(o={}){const confirmed=o.confirmed??990;const mode=o.mode??'REACTION';return {id:'direct-a',kind:'DIRECT',priority:8,sign:1,approach:0,level:4175,source:'teacher-a',created:confirmed,confirmed,expires:confirmed+(mode==='MARKET'?180:86400),evidenceCount:1,feedState:'READY',feedNote:'',sleeping:false,hardStopped:false,brokenAt:0,pierceUntil:0,structureUntil:0,loggedLife:'',mode,group:'one',lifeReason:'',sl:0,first:0,tp:0,breakeven:0,status:'',...o};}
 function env(options={}){
  let now=1000;const memory=options.memory||{},calls=[];
  const x=vm.createContext({
+   启用积极持单:false,adaptiveATR:0,持单策略:0,TGE_HOLD_FIXED:2,启用点位结构失效:false,点位破位缓冲ATR倍数:.25,点位破位确认根数:2,点位刺穿冷却秒数:60,点位破位冷却秒数:180,
   aiPlans:options.plans||[plan()],aiReady:true,aiGenerated:now,aiReason:'',aiMode:'SETUP',identity:'',aiIdentity:'TGA6',aiSource:'',aiSourceTime:990,
   DIRECT_MAX_AGE:86400,MARKET_MAX_AGE:180,healthOK:true,healthPaused:false,healthBeat:now,healthSync:now,healthCheckpoint:now,healthMaxAge:120,读取AI即时策略:true,
-  每次开仓手数:.02,最大同时持仓:3,最大点差价格:.5,挂单最大离价:50,保险价格距离:10,首批止盈价格距离:5,尾仓目标价格距离:10,
+   每次开仓手数:.02,最大同时持仓:3,最大点差价格:.5,挂单最大离价:50,保险价格距离:10,首批止盈价格距离:5,尾仓目标价格距离:10,连亏区域冷却分钟:30,
   允许同机会重入:true,TEACHER_BAND:1,REARM_DISTANCE:4,REARM_SECONDS:5,冲击短窗毫秒:3000,逆向冲击速度:.6,冲击单向比例:.85,恢复回拉价格:.35,
   reason:'',entryView:{},pending:{kind:0},levels:[],sourceTime:0,sourceKind:'',sourceSender:'',feedStatus:'',feedTime:0,feedActive:false,
-  fastTicks:Array.from({length:256},()=>({})),fastCount:0,fastCursor:0,fastLast:0,fastStarted:0,sharedVisits:[],teacherLimits:Array.from({length:4},()=>({state:0})),
+   fastTicks:Array.from({length:256},()=>({})),fastCount:0,fastCursor:0,fastLast:0,fastStarted:0,sharedVisits:[],teacherLimits:Array.from({length:4},()=>({state:0})),adaptiveBars:Array.from({length:16},(_,i)=>({time:900-i*60,open:4175,close:4175,low:4174,high:4176})),adaptiveATR:1,adaptiveMarketReady:true,adaptiveMarketAt:now,adaptiveHistoryReady:true,adaptiveHistoryDirty:false,adaptiveResults:[],AdaptiveMarketFresh:()=>true,
   TickSize:()=>.01,TimeCurrent:()=>now,TimeGMT:()=>now,MathMax:Math.max,MathMin:Math.min,MathAbs:Math.abs,MathIsValidNumber:Number.isFinite,
   DBL_MAX:Number.MAX_VALUE,_Digits:2,_Symbol:'XAUUSD.c',EA魔法号:560056,
   Hash:s=>{let h=2166136261;for(const c of s)h=Math.imul(h^c.charCodeAt(0),16777619)>>>0;return h;},
@@ -39,17 +40,25 @@ function env(options={}){
   StringToInteger:Number,StringToDouble:Number,StringSplit:(s,sep,out)=>{out.splice(0,out.length,...s.split(sep));return out.length;},
   StringFind:(s,t)=>s.indexOf(t),StringSubstr:(s,n)=>s.slice(n),ArraySize:a=>a.length,ArrayResize:(a,n)=>{while(a.length<n)a.push({});a.length=n;},
   ArrayCopy:(a,b)=>a.splice(0,a.length,...b),ArraySort:a=>a.sort((a,b)=>a-b),
-  Load:k=>memory[k]||0,Store:(k,v)=>{memory[k]=v;return true;},GlobalVariablesFlush:()=>{},DrawLevels:()=>{},Print:()=>{},
+  lastPriceMin:0,lastPriceMax:0,CHART_PRICE_MIN:1,CHART_PRICE_MAX:2,ChartGetDouble:(id,k)=>k===1?4100:4200,Load:k=>memory[k]||0,Store:(k,v)=>{memory[k]=v;return true;},GlobalVariablesFlush:()=>{},DrawLevels:()=>{},Print:()=>{},
   ZeroMemory:p=>{for(const k of Object.keys(p))delete p[k];Object.assign(p,{kind:0,exitSL:0,exitFirst:0,exitTP:0,exitBE:0,valid:false});},
   FreshQuote:q=>Object.assign(q,{bid:4174.9,ask:4175,time_msc:now*1000}),
   CanExecute:()=>true,ExecutionBlock:()=>'',ExactLot:()=>true,Align:v=>v,Stops:()=>true,
   OrderCalcMargin:()=>true,AccountInfoDouble:()=>1000,ACCOUNT_MARGIN_FREE:1,ORDER_TYPE_BUY:1,ORDER_TYPE_SELL:2,
-  SavePending:()=>{},DecisionLog:()=>{},EntryTag:()=>'TGsynthetic',RecordResult:()=>{},
+  SavePending:()=>true,DecisionLog:()=>{},EntryTag:()=>'TGsynthetic',RecordResult:()=>{},
   PositionSelectByTicket:()=>true,OwnSelected:()=>true,LimitEntryPending:()=>false,OrdersTotal:()=>0,PositionsTotal:()=>0,
   POSITION_VOLUME:'volume',POSITION_IDENTIFIER:'id',POSITION_TIME:'time',POSITION_TYPE:'type',POSITION_TYPE_BUY:0,
   POSITION_PRICE_OPEN:'open',POSITION_SL:'sl',POSITION_TP:'tp',POSITION_COMMENT:'comment',
   SymbolInfoDouble:()=>.01,SYMBOL_VOLUME_MIN:1,LotDown:v=>Math.floor(v*100+1e-7)/100,
   PERIOD_M1:1,PERIOD_M5:5,ArraySetAsSeries:()=>{},
+  ExplicitReject:()=>false,PrintFormat:()=>{},HistoryDealSelect:()=>false,
+  CTrade:function(){return {
+    SetExpertMagicNumber:()=>{},SetDeviationInPoints:()=>{},SetTypeFillingBySymbol:()=>{},SetAsyncMode:()=>{},
+    PositionOpen:(...a)=>calls.push(['open',...a]),
+    PositionClose:(...a)=>{calls.push(['close',...a]);return true;},
+    PositionClosePartial:(...a)=>{calls.push(['partial',...a]);return true;},
+    ResultRetcode:()=>10009,ResultOrder:()=>700,ResultDeal:()=>0,ResultComment:()=>'synthetic'
+  };},
   execution:{PositionOpen:(...a)=>calls.push(['open',...a]),PositionClose:(...a)=>calls.push(['close',...a]),PositionClosePartial:(...a)=>calls.push(['partial',...a])},
   INVALID_HANDLE:-1,CP_UTF8:65001,FILE_READ:1,FILE_TXT:2,FILE_ANSI:4,FILE_COMMON:8,FILE_SHARE_READ:16,
  });
@@ -57,7 +66,7 @@ function env(options={}){
  ['Number','text,decimal=false'],['AIChannelReady',''],['InvalidAI','why'],['ReadAISetups',''],
  ['RememberFastTick','q'],['TickImpact','sign,now',true],['AIKeyFromHash','hash,level,sign'],
  ['SharedVisitKey','level,sign'],['SameOpportunity','sign,level'],['RememberSharedVisit','level,sign'],['UpdateSharedVisit','q'],['MergeOpportunity','sign,level'],
- ['PlanLifeKey','i'],['PlanLifeReason','i'],['PlanExecutable','i'],['StopPlanReference','i,why'],['RefreshPlanValidity','q,quoteOK'],['InTeacherBand','entry,level'],['PlanSign','i'],['PlanNear','i,q'],['ZonePriority','q'],['UpdateTeacherVisits','q'],['TeacherEntryAllowed','i,q'],
+  ['PlanLifeKey','i'],['PlanLifeReason','i'],['PlanExecutable','i'],['StopPlanReference','i,why'],['RefreshPlanValidity','q,quoteOK,persist=false'],['RefreshPointStructure',''],['InTeacherBand','entry,level'],['PlanSign','i'],['PlanNear','i,q'],['ZonePriority','q'],['UpdateTeacherVisits','q'],['TeacherEntryAllowed','i,q'],
  ['AIMarketSignal','out'],['Open','signal'],['ExitCandles','bars,sign,opened,period,now'],['ExitRhythm','sign,opened'],
  ['ExitKey','id'],['FirstExit','id,sign,open,tp'],['PartialRemaining','initial,closed,remaining'],['RefreshEntryExits','key,sign'],['RequestExit','ticket,id,volume,full,why'],['Manage',''],['LegacyLimitsClear','']])install(x,name,args,ref);
  return {x,memory,calls,setNow:n=>now=n};
@@ -118,43 +127,50 @@ test('其他计划的目标不串到已有持仓',()=>{const e=env({plans:[plan(
 test('断流时离区计时清零，停机时间不算重新触价',()=>{const {x}=env();x.MergeOpportunity(1,4175);x.sharedVisits[0].left=990;x.fastLast=900000;x.RememberFastTick({time_msc:1000000,bid:4179,ask:4179.1});assert.equal(x.sharedVisits[0].left,0);});
 // 由真实Python导出函数构造合成快照，送入生产MQL读取函数。
 const csv=require('node:child_process').execFileSync('python',['-X','utf8','-c',
- 'from test_execution_feed import ExecutionTests; import csv,io; t=ExecutionTests(); t.setUp(); t.c["symbols"][t.c["teacher_symbol"]]="XAUUSD.c"; t.scene(); rows=t.feed(protocol=7); s=io.StringIO(newline=""); w=csv.writer(s,lineterminator="\\n"); w.writerows(rows); print(s.getvalue(),end=""); t.tearDown()'],
+ 'from test_execution_feed import ExecutionTests; import csv,io; t=ExecutionTests(); t.setUp(); t.c["symbols"][t.c["teacher_symbol"]]="XAUUSD.c"; t.scene(); t.feed(); rows=list(csv.reader(io.StringIO((t.home/\"common/FeishuMT5SignalMonitor/tge_execution_v9.csv\").read_text(encoding=\"utf-8\")))); s=io.StringIO(newline=""); w=csv.writer(s,lineterminator="\\n"); w.writerows(rows); print(s.getvalue(),end=""); t.tearDown()'],
  {cwd:path.join(root,'FeishuSignalMonitor'),encoding:'utf8'}).trim().split(/\r?\n/);
 function file(x,lines){let at=0;x.FileOpen=()=>1;x.FileSize=()=>lines.join('\n').length;x.FileIsEnding=()=>at>=lines.length;x.FileReadString=()=>lines[at++];x.FileClose=()=>{};}
-test('Python TGA7 -> MQL读取真实字段与优先级',()=>{const {x,setNow}=env();setNow(Number(csv[0].split(',')[2]));file(x,csv);assert(x.ReadAISetups());assert.equal(x.aiPlans.length,6);assert.equal(x.aiPlans.filter(p=>p.priority===8).length,2);assert.equal(x.aiPlans.filter(p=>p.priority===6).length,4);});
+test('Python TGA9 -> MQL读取生命周期字段与优先级',()=>{const {x,setNow}=env();setNow(Number(csv[0].split(',')[2]));file(x,csv);assert(x.ReadAISetups());assert.equal(x.aiPlans.length,5);assert.equal(x.aiPlans.filter(p=>[90,95,100].includes(p.priority)).length,2);assert(x.aiPlans.every(p=>p.expires>p.confirmed&&p.evidenceCount>=1));});
+test('重复心跳更新新鲜度但内容不变不重画点位线',()=>{
+ const {x,setNow}=env();setNow(Number(csv[0].split(',')[2]));let draws=0;x.DrawLevels=()=>draws++;
+ file(x,csv);assert(x.ReadAISetups());file(x,csv);assert(x.ReadAISetups());assert.equal(draws,1);
+ x.ChartGetDouble=(id,k)=>k===1?4090:4200;file(x,csv);assert(x.ReadAISetups());assert.equal(draws,2);
+ const paused=csv.map((r,i)=>{if(i!==0)return r;const f=r.split(',');f[3]='0';return f.join(',');});
+ file(x,paused);assert(x.ReadAISetups());assert.equal(draws,3);
+});
 test('截断、错品种、错优先级快照停用且不替换旧计划',()=>{
- for(const lines of [csv.slice(0,-1),csv.map((r,i)=>i===0?r.replace('XAUUSD','EURUSD'):r),csv.map((r,i)=>i===1?r.replace('DIRECT,8','DIRECT,6'):r)]){
+ for(const lines of [csv.slice(0,-1),csv.map((r,i)=>i===0?r.replace('XAUUSD','EURUSD'):r),csv.map((r,i)=>i===1?r.replace(/DIRECT,(90|95|100)/,'DIRECT,70'):r)]){
  const {x,setNow}=env();setNow(Number(csv[0].split(',')[2]));file(x,lines);assert(!x.ReadAISetups());assert(!x.aiReady);assert.equal(x.aiPlans[0].id,'direct-a');}
 });
-test('完整空快照替换取消，不保留旧活动方向',()=>{const {x}=env();file(x,['TGA,7,1000,1,XAUUSD.c,0,已取消','END,0']);assert(x.ReadAISetups());assert.equal(x.aiPlans.length,0);});
+test('完整空快照替换取消，不保留旧活动方向',()=>{const {x}=env();file(x,['TGA,9,1000,1,XAUUSD.c,0,已取消','END,0']);assert(x.ReadAISetups());assert.equal(x.aiPlans.length,0);});
 
 test('即时计划24小时边界过期，引用仍保留且不抢低优先级',()=>{
- const e=env({plans:[plan({created:1,confirmed:1}),plan({id:'map',kind:'MAP',priority:5,sign:0,approach:1,confirmed:1,created:1})]});
+ const e=env({plans:[plan({created:1,confirmed:1}),plan({id:'map',kind:'MAP',priority:5,sign:0,approach:1,confirmed:1,created:1,expires:172801})]});
  e.setNow(86401);for(const k of ['aiGenerated','healthBeat','healthSync','healthCheckpoint'])e.x[k]=86401;
  ticks(e.x,[4175,4175,4175,4175]);const c={};assert(e.x.AIMarketSignal(c));assert.equal(c.originHash,e.x.Hash('map'));
- assert.equal(e.x.aiPlans.length,2);assert.match(e.x.aiPlans[0].status,/24小时/);
+  assert.equal(e.x.aiPlans.length,2);assert.match(e.x.aiPlans[0].status,/期限/);
 });
-test('时间正常但距离超过50持久失效，返回/重启/刷新心跳不复活',()=>{
- const e=env();e.x.RefreshPlanValidity({bid:4226,ask:4226.1},true);assert(!e.x.PlanExecutable(0));
- ticks(e.x,[4175,4175,4175,4175]);assert(!e.x.AIMarketSignal({}));
- const r=env({memory:e.memory});ticks(r.x,[4175,4175,4175,4175]);assert(!r.x.AIMarketSignal({}));
- r.x.aiPlans[0].confirmed=1001;r.setNow(1002);ticks(r.x,[4175,4175,4175,4175]);assert(r.x.AIMarketSignal({}));
-});
+test('时间正常但距离超过50进入休眠，回近后可重新评估',()=>{
+  const e=env();e.x.RefreshPlanValidity({bid:4226,ask:4226.1},true);assert(!e.x.PlanExecutable(0));
+  assert.match(e.x.PlanLifeReason(0),/休眠/);ticks(e.x,[4175,4175,4175,4175]);assert(e.x.AIMarketSignal({}));
+  const r=env({memory:e.memory});ticks(r.x,[4175,4175,4175,4175]);assert(r.x.AIMarketSignal({}));
+  r.x.aiPlans[0].confirmed=1001;r.setNow(1002);ticks(r.x,[4175,4175,4175,4175]);assert(r.x.AIMarketSignal({}));
+ });
 test('距离恰好50不过期，51过期；SELL使用bid',()=>{
  const e=env({plans:[plan({sign:-1})]});e.x.RefreshPlanValidity({bid:4225,ask:4225.1},true);assert(e.x.PlanExecutable(0));
  e.x.RefreshPlanValidity({bid:4226,ask:4226.1},true);assert(!e.x.PlanExecutable(0));
 });
-test('整张地图内部远端点不失效，离开整体50才整组停止',()=>{
+test('整张地图内部远端点不失效，离开整体50进入休眠，回近后整组恢复',()=>{
  const e=env({plans:[4150,4160,4175,4190,4200,4220].map(p=>plan({id:'m'+p,kind:'MAP',priority:5,sign:0,level:p,group:'map',created:1,confirmed:1}))});
  e.x.RefreshPlanValidity({bid:4210,ask:4210.1},true);assert(e.x.aiPlans.every((_,i)=>e.x.PlanExecutable(i)));
  e.x.RefreshPlanValidity({bid:4271,ask:4271.1},true);assert(e.x.aiPlans.every((_,i)=>!e.x.PlanExecutable(i)));
- e.x.RefreshPlanValidity({bid:4175,ask:4175.1},true);assert(e.x.aiPlans.every((_,i)=>!e.x.PlanExecutable(i)));
+  e.x.RefreshPlanValidity({bid:4175,ask:4175.1},true);assert(e.x.aiPlans.every((_,i)=>e.x.PlanExecutable(i)));
 });
-test('新区间独立恢复；旧地图与旧方向不能借别人的新消息续期',()=>{
+test('新区间确认独立刷新；各点回近后按当前行情重新评估',()=>{
  const e=env({plans:[plan({id:'direct'}),plan({id:'range',kind:'INNER',priority:6,group:'r',level:4175}),plan({id:'range2',kind:'INNER',priority:6,group:'r',level:4200,sign:-1})]});
  e.x.RefreshPlanValidity({bid:4251,ask:4251.1},true);assert(!e.x.PlanExecutable(0));assert(!e.x.PlanExecutable(1));
  e.x.aiPlans[1].confirmed=1001;e.setNow(1002);e.x.RefreshPlanValidity({bid:4175,ask:4175.1},true);
- assert(e.x.PlanExecutable(1));assert(!e.x.PlanExecutable(0));assert(!e.x.PlanExecutable(2));
+  assert(e.x.PlanExecutable(0));assert(e.x.PlanExecutable(1));assert(e.x.PlanExecutable(2));
 });
 test('坏报价/同步断开/异常点差不写永久失效记录',()=>{
  for(const mode of ['quote','health','spread']){
@@ -175,7 +191,7 @@ test('过期相反方向不造成同级冲突，近期同价计划正常',()=>{
 });
 test('市价提示仍仅3分钟；不延长为24小时',()=>{
  const e=env({plans:[plan({mode:'MARKET',created:820,confirmed:820})]});ticks(e.x,[4175,4175,4175,4175]);
- assert(!e.x.AIMarketSignal({}));assert.match(e.x.PlanLifeReason(0),/3分钟/);
+ assert(!e.x.AIMarketSignal({}));assert.match(e.x.PlanLifeReason(0),/期限/);
 });
 test('提交前恰好到期阻断；已有仓位继续原分批管理',()=>{
  const e=env({plans:[plan({created:1,confirmed:1})]});ticks(e.x,[4175,4175,4175,4175]);const c={};assert(e.x.AIMarketSignal(c));
@@ -184,7 +200,7 @@ test('提交前恰好到期阻断；已有仓位继续原分批管理',()=>{
  position(e);e.x.Manage();assert.equal(e.calls[0][0],'partial');
 });
 test('篡改重申为未来/早于原消息、旧协议都拒绝',()=>{
- for(const lines of [csv.map((r,i)=>i===0?r.replace('TGA,7','TGA,6'):r),csv.map((r,i)=>{if(i!==1)return r;const a=r.split(',');a[14]=Number(csv[0].split(',')[2])+100;return a.join(',');}),
+  for(const lines of [csv.map((r,i)=>i===0?r.replace('TGA,9','TGA,8'):r),csv.map((r,i)=>{if(i!==1)return r;const a=r.split(',');a[14]=Number(csv[0].split(',')[2])+100;return a.join(',');}),
  csv.map((r,i)=>{if(i!==1)return r;const a=r.split(',');a[14]=1;return a.join(',');})]){
  const {x,setNow}=env();setNow(Number(csv[0].split(',')[2]));file(x,lines);assert(!x.ReadAISetups());
  }
@@ -196,7 +212,7 @@ function markerEnv(){
  const e=env(),x=e.x;
  Object.assign(x,{
   markerDirty:true,markerLastMs:0,markerStatus:'',markerUnexpectedPosition:false,
-  markerLock:1,启用真实交易:true,启用手机标记挂单:true,uiMobileMarkers:true,
+  tradeMode:true,markerLock:1,启用真实交易:true,启用手机标记挂单:true,uiMobileMarkers:true,
   手机标记挂单Magic:910406,手机标记挂单固定价格:100,TGE_MARKER_VOLUME:.01,TGE_MARKER_DANGER:20,
   GetTickCount64:()=>10000,TgeMarkerCanRequest:()=>true,ReconcileTgeMarkerCreation:()=>true,
   TgeMarkerHasOtherTrade:()=>false,ReconcileMobileMarkerDeletes:()=>true,

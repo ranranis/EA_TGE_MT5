@@ -54,7 +54,9 @@ bool TgeMarkerWrite(const string name,const double value)
 void InitTgeMobileMarkers()
 {
    markerPrefix="TGM."+IntegerToString((long)Hash(accountServer+"|"+IntegerToString(accountLogin)+"|"+_Symbol))+".";
-   if(GlobalVariableCheck(markerPrefix+"enabled")) uiMobileMarkers=GlobalVariableGet(markerPrefix+"enabled")>0;
+   // 新键记录面板的显式选择；升级时不能把旧版被参数遮住的true自动启用。
+   uiMobileMarkers=启用手机标记挂单 && (!GlobalVariableCheck(markerPrefix+"enabled") || GlobalVariableGet(markerPrefix+"enabled")>0);
+   if(GlobalVariableCheck(markerPrefix+"panelEnabled")) uiMobileMarkers=GlobalVariableGet(markerPrefix+"panelEnabled")>0;
    markerSequence=(long)GlobalVariableGet(markerPrefix+"sequence");
    markerCreateAt=(datetime)GlobalVariableGet(markerPrefix+"create");
    markerLock=FileOpen("FeishuMT5SignalMonitor\\"+markerPrefix+"lock",FILE_READ|FILE_WRITE|FILE_BIN|FILE_COMMON);
@@ -62,6 +64,16 @@ void InitTgeMobileMarkers()
    markerTrade.SetExpertMagicNumber(手机标记挂单Magic);
    markerTrade.SetTypeFillingBySymbol(_Symbol); markerTrade.SetAsyncMode(false);
    LoadMobileMarkerDeleteTracking();
+}
+void ToggleTgeMobileMarkers()
+{
+   if(markerPrefix=="") { markerStatus="标记尚未初始化"; return; }
+   bool enabled=!uiMobileMarkers;
+   if(GlobalVariableSet(markerPrefix+"panelEnabled",enabled ? 1 : 0)==0)
+   { markerStatus="开关保存失败，请重试"; return; }
+   GlobalVariablesFlush();
+   uiMobileMarkers=enabled; markerDirty=true;
+   markerStatus=enabled ? "已开启，等待同步" : "已关闭，等待撤销";
 }
 string TgeMarkerCreationTag() { return "TGE_MARK_"+IntegerToString(markerSequence); }
 bool ReconcileTgeMarkerCreation()
@@ -171,7 +183,7 @@ void SyncTgeMobileMarkers()
          if(!exists) { int n=ArraySize(markerLevels); ArrayResize(markerLevels,n+1); markerLevels[n]=aiPlans[i].level; }
       }
    // 手机标记属于展示，不使用策略入场的feedActive/有效期门槛。
-   bool enabled=启用手机标记挂单 && uiMobileMarkers && ArraySize(markerLevels)>0;
+   bool enabled=uiMobileMarkers && ArraySize(markerLevels)>0;
    bool otherTrade=TgeMarkerHasOtherTrade();
    MqlTick q; bool fresh=FreshQuote(q);
    double price=TickSize()>0 ? NormalizeDouble(MathRound(手机标记挂单固定价格/TickSize())*TickSize(),_Digits) : 0;
@@ -183,7 +195,7 @@ void SyncTgeMobileMarkers()
    {
       CancelTgeMobileMarkers();
       bool retired=ReconcileMobileMarkerDeletes();
-      markerStatus=markerUnexpectedPosition ? "标记意外成交，需人工核对" : !retired || !createReady ? "正在撤销/核对标记" : !启用手机标记挂单 || !uiMobileMarkers ? "手机TP开关已关闭" :
+      markerStatus=markerUnexpectedPosition ? "标记意外成交，需人工核对" : !retired || !createReady ? "正在撤销/核对标记" : !uiMobileMarkers ? "手机TP开关已关闭" :
                    ArraySize(markerLevels)==0 ? "等待已校验点位" :
                    otherTrade ? "已有交易，标记已撤" : pending.kind!=0 ? "交易请求待确认" : "品种/价格/手数不适合标记";
       return;

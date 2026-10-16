@@ -20,7 +20,8 @@ struct TgeStatsSummary
 };
 TgeStatsTrade statsTrades[];
 TgeStatsSummary statsSummary;
-bool statsDirty=true,statsOK=false;
+bool statsDirty=true,statsOK=false,statsSeriesDirty=true;
+ulong statsRevision=0;
 datetime statsRangeStart=0,statsRangeEnd=0;
 ulong statsLastAttempt=0;
 int statsSkipped=0;
@@ -138,7 +139,7 @@ void StatsRefresh()
    bool rangeChanged=start!=statsRangeStart || end!=statsRangeEnd;
    if(!rangeChanged && statsLastAttempt>0 && now-statsLastAttempt<(ulong)(statsDirty ? 1000 : 30000)) return;
    statsLastAttempt=now; statsRangeStart=start; statsRangeEnd=end; statsDirty=false;
-   statsOK=false; statsSkipped=0;
+   statsOK=false; statsSkipped=0; statsSeriesDirty=true; statsRevision++;
    ArrayResize(statsTrades,0); ZeroMemory(statsSummary);
    if(!TerminalInfoInteger(TERMINAL_CONNECTED)) { statsStatus="终端离线，统计暂不可核对"; return; }
    if(start>TimeTradeServer()) { statsOK=true; statsStatus="所选区间尚未开始"; return; }
@@ -199,18 +200,23 @@ int StatsSelectedIndex()
 void StatsSelect(const int index)
 {
    if(index<0 || index>=ArraySize(statsTrades)) return;
+   if(statsSelectedId!=statsTrades[index].id) { ReviewClearMarkers(); reviewNavTime=0; }
    statsSelectedId=statsTrades[index].id;
    statsReview=ArraySize(statsTrades)-1-index;
 }
 void StatsBuildSeries()
 {
    int n=ArraySize(statsTrades);
+   if(statsSeriesDirty)
+   {
    ArrayResize(statsCumulative,n); ArrayResize(statsDrawdowns,n);
    double total=0,peak=0;
    for(int i=0;i<n;i++)
    {
       total+=statsTrades[i].net; peak=MathMax(peak,total);
       statsCumulative[i]=total; statsDrawdowns[i]=total-peak;
+   }
+   statsSeriesDirty=false;
    }
    int selected=StatsSelectedIndex();
    if(n==0) { statsSelectedId=0; statsReview=0; }
@@ -237,9 +243,216 @@ void StatsHit(const int x,const int y,const int w,const int h,const int action)
    int n=ArraySize(uiHits); ArrayResize(uiHits,n+1);
    uiHits[n].x=x; uiHits[n].y=y; uiHits[n].w=w; uiHits[n].h=h; uiHits[n].action=action;
 }
+// 复盘记录只在选单/成交/日志变化时加载，不随Canvas每秒重绘读取文件。
+TgeLifeEvent reviewEvents[];
+ulong reviewId=0,reviewStatsRevision=0,reviewLifeRevision=0,reviewRetryAt=0;
+bool reviewProcess=false,reviewReady=false,reviewChartActive=false,reviewOldAuto=false;
+int reviewPage=0,reviewNavAttempts=0;
+datetime reviewNavTime=0;
+string reviewNotice="";
+string ReviewKind(const string kind)
+{
+   if(kind=="DEAL_IN") return "入场成交";
+   if(kind=="DEAL_OUT") return "退出成交";
+   if(kind=="PLAN") return "入场计划";
+   if(kind=="REQUEST_INTENT") return "申请";
+   if(kind=="REQUEST_RESULT") return "请求返回";
+   if(kind=="POSITION_CONFIRMED") return "保护确认";
+   if(kind=="POSITION") return "仓位变化";
+   if(kind=="OBSERVE") return "开始观测";
+   if(kind=="OBSERVE_END") return "结束观测";
+   if(kind=="SAMPLE") return "行情采样";
+   if(kind=="POSITION_CLOSED") return "平仓对账";
+   return "成交对账";
+}
+void ReviewLoad(const TgeStatsTrade &tr)
+{
+   if(reviewId==tr.id && reviewStatsRevision==statsRevision && reviewLifeRevision==lifeRevision &&
+      (reviewReady || GetTickCount64()<reviewRetryAt)) return;
+   if(reviewId!=tr.id) { reviewPage=0; reviewNotice=""; }
+   reviewId=tr.id; reviewStatsRevision=statsRevision; reviewLifeRevision=lifeRevision;
+   reviewReady=false; reviewRetryAt=GetTickCount64()+5000; ArrayResize(reviewEvents,0);
+   if(!HistorySelectByPosition(tr.id)) { reviewNotice="成交历史读取失败，稍后重试"; return; }
+   for(int i=0;i<HistoryDealsTotal();i++)
+   {
+      ulong d=HistoryDealGetTicket(i);
+      if((ulong)HistoryDealGetInteger(d,DEAL_POSITION_ID)!=tr.id || HistoryDealGetString(d,DEAL_SYMBOL)!=_Symbol) continue;
+      long type=HistoryDealGetInteger(d,DEAL_TYPE),entry=HistoryDealGetInteger(d,DEAL_ENTRY);
+      if(type!=DEAL_TYPE_BUY && type!=DEAL_TYPE_SELL) continue;
+      if(entry!=DEAL_ENTRY_IN && entry!=DEAL_ENTRY_OUT && entry!=DEAL_ENTRY_OUT_BY) continue;
+      TgeLifeEvent e; ZeroMemory(e); e.id=tr.id; e.deal=d;
+      e.at=(datetime)HistoryDealGetInteger(d,DEAL_TIME); e.order=(ulong)HistoryDealGetInteger(d,DEAL_ORDER);
+      e.kind=entry==DEAL_ENTRY_IN ? "DEAL_IN" : "DEAL_OUT";
+      e.price=HistoryDealGetDouble(d,DEAL_PRICE); e.volume=HistoryDealGetDouble(d,DEAL_VOLUME);
+      double net=HistoryDealGetDouble(d,DEAL_PROFIT)+HistoryDealGetDouble(d,DEAL_COMMISSION)+
+                 HistoryDealGetDouble(d,DEAL_SWAP)+HistoryDealGetDouble(d,DEAL_FEE);
+      e.detail=DoubleToString(e.volume,2)+"手 @ "+DoubleToString(e.price,_Digits)+" · "+
+               StatsExitText((int)HistoryDealGetInteger(d,DEAL_REASON))+" · 净额 "+StatsMoney(net)+
+               " · Deal #"+IntegerToString((long)d);
+      int n=ArraySize(reviewEvents); ArrayResize(reviewEvents,n+1); reviewEvents[n]=e;
+   }
+   TgeLifeEvent saved[];
+   if(!LifeRead(tr.id,saved)) { reviewNotice="生命周期文件暂不可读；已展示成交，5秒后重试"; return; }
+   for(int i=0;i<ArraySize(saved);i++)
+   {
+      int n=ArraySize(reviewEvents); ArrayResize(reviewEvents,n+1); reviewEvents[n]=saved[i];
+   }
+   // 日志尚在内存队列时亦可见，同key只显示一次。
+   for(int i=0;i<ArraySize(lifeQueue);i++)
+   {
+      if(lifeQueue[i].id!=tr.id) continue;
+      bool exists=false;
+      for(int j=0;j<ArraySize(reviewEvents);j++)
+         if(reviewEvents[j].key!="" && reviewEvents[j].key==lifeQueue[i].key) { exists=true; break; }
+      if(!exists) { int n=ArraySize(reviewEvents); ArrayResize(reviewEvents,n+1); reviewEvents[n]=lifeQueue[i]; }
+   }
+   for(int i=1;i<ArraySize(reviewEvents);i++)
+   {
+      TgeLifeEvent e=reviewEvents[i]; int j=i-1;
+      while(j>=0 && (reviewEvents[j].at>e.at ||
+         (reviewEvents[j].at==e.at && reviewEvents[j].deal>e.deal)))
+      { reviewEvents[j+1]=reviewEvents[j]; j--; }
+      reviewEvents[j+1]=e;
+   }
+   double remaining=0;
+   for(int i=0;i<ArraySize(reviewEvents);i++)
+   {
+      if(reviewEvents[i].kind=="DEAL_IN") remaining+=reviewEvents[i].volume;
+      else if(reviewEvents[i].kind=="DEAL_OUT") remaining-=reviewEvents[i].volume;
+      else continue;
+      reviewEvents[i].detail+=" · 余 "+DoubleToString(MathMax(0,remaining),2)+"手";
+   }
+   reviewPage=MathMin(reviewPage,MathMax(0,(ArraySize(reviewEvents)-1)/4));
+   reviewReady=true;
+}
+void ReviewClearMarkers()
+{
+   ObjectsDeleteAll(0,VIEW+"REVIEW_");
+}
+void ReviewMark(const string name,const datetime at,const double price,const string text,const color ink)
+{
+   if(at<=0 || price<=0) return;
+   ObjectCreate(0,name,OBJ_TEXT,0,at,price); ObjectMove(0,name,0,at,price);
+   ObjectSetString(0,name,OBJPROP_TEXT,text); ObjectSetString(0,name,OBJPROP_FONT,"Arial");
+   ObjectSetInteger(0,name,OBJPROP_COLOR,ink); ObjectSetInteger(0,name,OBJPROP_FONTSIZE,10);
+   ObjectSetInteger(0,name,OBJPROP_ANCHOR,ANCHOR_LEFT_LOWER);
+   ObjectSetInteger(0,name,OBJPROP_BACK,true); ObjectSetInteger(0,name,OBJPROP_SELECTABLE,false);
+   ObjectSetString(0,name,OBJPROP_TOOLTIP,TimeToString(at,TIME_DATE|TIME_SECONDS)+" · "+DoubleToString(price,_Digits));
+}
+void ReviewNavigate()
+{
+   if(reviewNavTime<=0) return;
+   // CopyRates触发缺失K线加载；失败只提示并有限重试，不阻塞交易线程等待。
+   MqlRates bar[];
+   int copied=CopyRates(_Symbol,(ENUM_TIMEFRAMES)_Period,reviewNavTime,1,bar);
+   int shift=iBarShift(_Symbol,(ENUM_TIMEFRAMES)_Period,reviewNavTime,false);
+   if(copied!=1 || shift<0 || bar[0].time>reviewNavTime ||
+      reviewNavTime>=bar[0].time+PeriodSeconds((ENUM_TIMEFRAMES)_Period))
+   {
+      reviewNotice="正在加载该时刻K线（当前图表周期）";
+      if(++reviewNavAttempts>=10) { reviewNavTime=0; reviewNotice="该时刻K线尚不可用，请加载历史后重试"; }
+      return;
+   }
+   if(!reviewChartActive)
+   {
+      reviewOldAuto=ChartGetInteger(0,CHART_AUTOSCROLL)!=0;
+      reviewChartActive=true;
+   }
+   ChartSetInteger(0,CHART_AUTOSCROLL,false);
+   int width=(int)ChartGetInteger(0,CHART_WIDTH_IN_PIXELS);
+   int visible=(int)ChartGetInteger(0,CHART_VISIBLE_BARS);
+   // 目标落在面板右侧可视区域中央，避免跳到了面板背后。
+   double fraction=width>0 ? MathMin(0.90,MathMax(0.55,(uiX+panelWidth+width)*0.5/width)) : 0.75;
+   int desired=shift+(int)MathRound(visible*fraction);
+   // MT5仅支持CHART_BEGIN/CHART_END；先读取末端基准以兼容用户图表右移比例。
+   if(!ChartNavigate(0,CHART_END,0)) { reviewNotice="图表末端定位失败"; reviewNavTime=0; return; }
+   ChartRedraw(0);
+   int first=(int)ChartGetInteger(0,CHART_FIRST_VISIBLE_BAR);
+   if(!ChartNavigate(0,CHART_END,first-desired))
+   { reviewNotice="图表定位失败，请重试"; reviewNavTime=0; return; }
+   string name=VIEW+"REVIEW_TIME";
+   ObjectCreate(0,name,OBJ_VLINE,0,reviewNavTime,0); ObjectMove(0,name,0,reviewNavTime,0);
+   ObjectSetInteger(0,name,OBJPROP_COLOR,C'40,85,150'); ObjectSetInteger(0,name,OBJPROP_STYLE,STYLE_DASH);
+   ObjectSetInteger(0,name,OBJPROP_WIDTH,1); ObjectSetInteger(0,name,OBJPROP_BACK,true);
+   ObjectSetInteger(0,name,OBJPROP_SELECTABLE,false);
+   ObjectSetString(0,name,OBJPROP_TOOLTIP,"复盘 "+TimeToString(reviewNavTime,TIME_DATE|TIME_SECONDS));
+   reviewNotice="历史K线 "+TimeToString(reviewNavTime,TIME_DATE|TIME_SECONDS)+" · EA仍按实时行情运行";
+   reviewNavTime=0; ChartRedraw(0);
+}
+void ReviewJump(const datetime at)
+{
+   if(at<=0) return;
+   ReviewClearMarkers();
+   for(int i=0;i<ArraySize(reviewEvents);i++)
+   {
+      TgeLifeEvent e=reviewEvents[i];
+      if(e.kind!="DEAL_IN" && e.kind!="DEAL_OUT") continue;
+      ReviewMark(VIEW+"REVIEW_"+IntegerToString((long)e.deal),e.at,e.price,
+                 (e.kind=="DEAL_IN" ? "E 入 " : "X 出 ")+DoubleToString(e.volume,2),
+                 e.kind=="DEAL_IN" ? C'0,90,160' : C'145,75,0');
+   }
+   reviewNavTime=at; reviewNavAttempts=0; ReviewNavigate();
+}
+void ReviewReturnLive(const bool navigate=true)
+{
+   reviewNavTime=0;
+   if(reviewChartActive) ChartSetInteger(0,CHART_AUTOSCROLL,reviewOldAuto);
+   if(navigate && reviewChartActive) ChartNavigate(0,CHART_END,0);
+   reviewChartActive=false; ReviewClearMarkers(); reviewNotice="";
+}
+void ReviewProcessPanel(const TgeStatsTrade &tr)
+{
+   int n=ArraySize(reviewEvents),pages=MathMax(1,(n+3)/4);
+   double mfe=0,mae=0; int observations=0;
+   for(int i=0;i<n;i++)
+   {
+      mfe=MathMax(mfe,reviewEvents[i].mfe); mae=MathMax(mae,reviewEvents[i].mae);
+      if(reviewEvents[i].kind=="OBSERVE") observations++;
+   }
+   UIRound(12,352,536,50,UI_ROW);
+   UIText(observations>0 ? "在线采样：最大有利 "+DoubleToString(mfe,2)+" / 最大不利 "+DoubleToString(mae,2)+" 价差" :
+          "旧单/未记录：仅还原服务器真实成交",26,361,506,10,UI_TEXT);
+   UIText("采样间隔1秒；离线区间未知，不等于完整逐tick浮盈/浮亏",26,384,506,8,UI_DIM);
+   int first=reviewPage*4;
+   for(int row=0;row<4 && first+row<n;row++)
+   {
+      int at=first+row,y=411+row*43; TgeLifeEvent e=reviewEvents[at];
+      UIRound(12,y,536,39,row%2==0 ? UI_CARD : UI_ROW);
+      UIText(TimeToString(e.at,TIME_SECONDS)+" · "+ReviewKind(e.kind),24,y+3,410,9,UI_ACCENT);
+      string detail=e.detail;
+      if(e.kind=="POSITION" || e.kind=="OBSERVE")
+         detail=DoubleToString(e.volume,2)+"手 · SL "+DoubleToString(e.sl,_Digits)+" · TP "+DoubleToString(e.tp,_Digits)+" · "+detail;
+      else if(e.kind=="POSITION_CONFIRMED")
+         detail="已对齐请求 SL "+DoubleToString(e.sl,_Digits)+" · TP "+DoubleToString(e.tp,_Digits);
+      else if(e.kind=="REQUEST_INTENT" || e.kind=="REQUEST_RESULT")
+         detail=(e.sl>0 || e.tp>0 ? "请求SL "+DoubleToString(e.sl,_Digits)+" / TP "+DoubleToString(e.tp,_Digits) :
+                 "请求量 "+DoubleToString(e.volume,2)+"手")+" · "+detail;
+      UIText(detail,24,y+22,440,8,UI_MUTED);
+      UIButton("定位",480,y+5,56,130+row);
+   }
+   UIButton("前页",12,588,70,120); UIButton("后页",90,588,70,121);
+   UIText(IntegerToString(reviewPage+1)+"/"+IntegerToString(pages)+"页 · "+IntegerToString(n)+"条记录",176,596,220,9,UI_MUTED);
+   UIText(reviewReady ? "申请 ≠ 成交 · E入 / X出" : "记录尚未完整加载",366,596,168,8,UI_DIM,true);
+}
 void StatsAction(const int action)
 {
+   if(action==117) { ReviewReturnLive(); return; }
    if(!statsOK || ArraySize(statsTrades)==0) return;
+   int chosen=StatsSelectedIndex();
+   if(chosen>=0 && action>=115 && action<=133)
+   {
+      ReviewLoad(statsTrades[chosen]);
+      if(action==115 || action==116) ReviewJump(action==115 ? statsTrades[chosen].openTime : statsTrades[chosen].closeTime);
+      else if(action==118 || action==119) reviewProcess=action==119;
+      else if(action==120) reviewPage=MathMax(0,reviewPage-1);
+      else if(action==121) reviewPage=MathMin(MathMax(0,(ArraySize(reviewEvents)-1)/4),reviewPage+1);
+      else if(action>=130 && action<=133)
+      {
+         int row=reviewPage*4+action-130;
+         if(row<ArraySize(reviewEvents)) ReviewJump(reviewEvents[row].at);
+      }
+      return;
+   }
    if(action>=1000)
    {
       int index=action-1000;
@@ -402,12 +615,12 @@ void StatsDrawCurve()
          double value=bottom+tick*step;
          if(value>upper+step*0.001) break;
          int y=plotY+(int)MathRound((maximum-value)/(maximum-minimum)*plotH);
-         panelCanvas.Line(UIPx(82),UIPx(y),UIPx(524),UIPx(y),UIInk(MathAbs(value)<step*0.001 ? UI_DIM : UI_BORDER));
+         panelCanvas.Line(UIXPx(82),UIPx(y),UIXPx(524),UIPx(y),UIInk(MathAbs(value)<step*0.001 ? UI_DIM : UI_BORDER));
          UIText(DoubleToString(value,step>=1 ? 0 : step>=0.1 ? 1 : 2),20,y-5,52,8,UI_DIM,true);
       }
       int zero=plotY+(int)MathRound(maximum/(maximum-minimum)*plotH);
       int sx=StatsPointX(selected,n);
-      panelCanvas.Line(UIPx(sx),UIPx(plotY),UIPx(sx),UIPx(plotY+plotH),UIInk(UI_MUTED));
+      panelCanvas.Line(UIXPx(sx),UIPx(plotY),UIXPx(sx),UIPx(plotY+plotH),UIInk(UI_MUTED));
       int px=82,py=zero;
       for(int i=0;i<n;i++)
       {
@@ -415,16 +628,16 @@ void StatsDrawCurve()
          int x=StatsPointX(i,n),y=plotY+(int)MathRound((maximum-value)/(maximum-minimum)*plotH);
          if(chart==0)
          {
-            panelCanvas.LineAA(UIPx(px),UIPx(py),UIPx(x),UIPx(y),UIInk(UI_ACCENT));
-            if(n<45 || i==selected) panelCanvas.FillCircle(UIPx(x),UIPx(y),UIPx(i==selected ? 4 : 2),UIInk(UI_ACCENT));
-            if(i==selected) panelCanvas.FillCircle(UIPx(x),UIPx(y),UIPx(2),UIInk(UI_ROW));
+            panelCanvas.LineAA(UIXPx(px),UIPx(py),UIXPx(x),UIPx(y),UIInk(UI_ACCENT));
+            if(n<45 || i==selected) panelCanvas.FillCircle(UIXPx(x),UIPx(y),UIPx(i==selected ? 4 : 2),UIInk(UI_ACCENT));
+            if(i==selected) panelCanvas.FillCircle(UIXPx(x),UIPx(y),UIPx(2),UIInk(UI_ROW));
             px=x; py=y;
          }
          else
          {
             int half=MathMax(1,(int)MathMin(7,442.0/(n+1)*0.32));
-            if(i==selected) panelCanvas.FillRectangle(UIPx(x-half-2),UIPx(MathMin(y,zero)-2),UIPx(x+half+2),UIPx(MathMax(y,zero)+2),UIInk(UI_TEXT));
-            panelCanvas.FillRectangle(UIPx(x-half),UIPx(MathMin(y,zero)),UIPx(x+half),UIPx(MathMax(y,zero)),UIInk(StatsInk(value)));
+            if(i==selected) panelCanvas.FillRectangle(UIXPx(x-half-2),UIPx(MathMin(y,zero)-2),UIXPx(x+half+2),UIPx(MathMax(y,zero)+2),UIInk(UI_TEXT));
+            panelCanvas.FillRectangle(UIXPx(x-half),UIPx(MathMin(y,zero)),UIXPx(x+half),UIPx(MathMax(y,zero)),UIInk(StatsInk(value)));
          }
       }
       UIText(chart==0 ? "起点0" : "第1笔",82,plotY+plotH+10,80,8,UI_DIM);
@@ -456,14 +669,19 @@ void StatsReviewPanel()
    string origin=tr.mixed ? "混合来源" : (ulong)tr.magic==EA魔法号 ? "本EA" : tr.magic==0 ? "手动入场" : "其他EA";
    UIText(origin+" · 已完整平仓",26,290,280,8.5,UI_DIM);
 
+   ReviewLoad(tr);
+   UIButton("入场K线",12,320,92,115); UIButton("退出K线",112,320,92,116);
+   UIButton("回到实时",212,320,92,117);
+   UIButton("详情",370,320,82,118,!reviewProcess); UIButton("过程",460,320,88,119,reviewProcess);
+   if(reviewProcess) { ReviewProcessPanel(tr); return; }
    double entry=tr.entryValue/tr.entryVolume,exit=tr.exitValue/tr.exitVolume;
-   UIRound(12,322,260,110,UI_ROW); UIRound(284,322,264,110,UI_ROW);
-   UIText("入场 · 加权成交价",26,334,230,9,UI_MUTED);
-   UIText(DoubleToString(entry,_Digits),26,358,230,17,UI_TEXT);
-   UIText(TimeToString(tr.openTime,TIME_DATE|TIME_SECONDS),26,400,230,9,UI_MUTED);
-   UIText("退出 · 加权成交价",298,334,236,9,UI_MUTED);
-   UIText(DoubleToString(exit,_Digits),298,358,236,17,UI_TEXT);
-   UIText(TimeToString(tr.closeTime,TIME_DATE|TIME_SECONDS),298,400,236,9,UI_MUTED);
+   UIRound(12,356,260,76,UI_ROW); UIRound(284,356,264,76,UI_ROW);
+   UIText("入场 · 加权成交价",26,361,230,9,UI_MUTED);
+   UIText(DoubleToString(entry,_Digits),26,380,230,15,UI_TEXT);
+   UIText(TimeToString(tr.openTime,TIME_DATE|TIME_SECONDS),26,411,230,9,UI_MUTED);
+   UIText("退出 · 加权成交价",298,361,236,9,UI_MUTED);
+   UIText(DoubleToString(exit,_Digits),298,380,236,15,UI_TEXT);
+   UIText(TimeToString(tr.closeTime,TIME_DATE|TIME_SECONDS),298,411,236,9,UI_MUTED);
 
    UIRound(12,442,536,98,UI_ROW);
    double move=(tr.direction==POSITION_TYPE_BUY ? 1 : -1)*(exit-entry);
@@ -505,7 +723,8 @@ void StatsPanel()
    else if(statsDetail==2) StatsDrawCurve();
    else StatsReviewPanel();
 
-   string note=statsDetail==3 ? "浮盈/浮亏及SL调整轨迹未记录 · 此页仅展示成交历史" :
+   string note=statsDetail==3 ? (lifeStatus!="" ? lifeStatus : reviewNotice!="" ? reviewNotice :
+                "可定位历史K线 · 图上其他点位/指标是当前设置，非当时信号快照") :
                statsDetail==2 ? "点击双图选择交易 · 完整平仓累计 · 不含浮动权益" :
                "完整平仓 · 净收益含费用 · 回撤不含浮动权益";
    if(statsSkipped>0) note=IntegerToString(statsSkipped)+"笔缺失/反转未计入 · "+note;

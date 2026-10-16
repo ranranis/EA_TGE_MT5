@@ -22,7 +22,7 @@ function env(memory=new Map()){
   ArrayInitialize:(a,v)=>a.fill(v),TimeCurrent:()=>cx.now,GetTickCount64:()=>cx.now*1000,
   now:1000,_Symbol:'XAUUSD.c',_Point:.01,_Digits:2,TickSize:()=>.01,
   markerLock:1,markerPrefix:'TGM.77.',markerStatus:'',markerSequence:0,markerCreateAt:0,markerStateOK:true,
-  markerDirty:true,markerLastMs:0,markerUnexpectedPosition:false,uiMobileMarkers:true,启用手机标记挂单:true,启用真实交易:true,
+  markerDirty:true,markerLastMs:0,markerUnexpectedPosition:false,uiMobileMarkers:true,启用手机标记挂单:true,启用真实交易:true,tradeMode:true,
   手机标记挂单Magic:910406,手机标记挂单固定价格:100,TGE_MARKER_VOLUME:.01,TGE_MARKER_DANGER:20,
   EA魔法号:560056,accountServer:'test',accountLogin:7,Hash:()=>77,
   pending:{kind:0},levels:[3900,4000,4100],feedActive:true,
@@ -30,7 +30,7 @@ function env(memory=new Map()){
   老师点位最近错误码:0,老师点位最近错误:'',
   permission:true,connected:true,fresh:true,exactLot:true,bid:4050,ask:4050.2,stops:50,orderMode:63,expirationMode:1,
   createAcknowledged:true,deleteAcknowledged:true,createCode:10009,deleteCode:10009,historyReadable:true,
-  CanExecute:()=>cx.permission&&cx.connected&&cx.启用真实交易,TerminalInfoInteger:()=>cx.connected,
+  CanExecute:()=>cx.permission&&cx.connected&&cx.tradeMode,TerminalInfoInteger:()=>cx.connected,
   FreshQuote:q=>cx.connected&&cx.fresh&&Object.assign(q,{bid:cx.bid,ask:cx.ask}),
   ExactLot:v=>cx.exactLot&&v===.01,
   SYMBOL_TRADE_STOPS_LEVEL:'stops',SYMBOL_ORDER_MODE:'orderMode',SYMBOL_EXPIRATION_MODE:'expirationMode',
@@ -93,7 +93,7 @@ function env(memory=new Map()){
   ['IsTradeRetcodeAccepted','code'],['PrintRateLimited','key,seconds,message'],
   ['MobileMarkerDeletePrefix',''],['LoadMobileMarkerDeleteTracking',''],['RequestMobileMarkerDelete','ticket'],
   ['MobileMarkerOrderRetired','ticket'],['ReconcileMobileMarkerDeletes',''],
-  ['TgeMarkerCanRequest',''],['TgeMarkerWrite','name,value'],['InitTgeMobileMarkers',''],
+  ['TgeMarkerCanRequest',''],['TgeMarkerWrite','name,value'],['InitTgeMobileMarkers',''],['ToggleTgeMobileMarkers',''],
   ['TgeMarkerCreationTag',''],['ReconcileTgeMarkerCreation',''],['CancelTgeMobileMarkers',''],
   ['TgeMarkerHasOtherTrade',''],['TgeMarkerMatches','level,price'],['SubmitTgeMobileMarker','price,target'],
   ['SyncTgeMobileMarkers',''],['StopTgeMobileMarkers','']])
@@ -101,6 +101,20 @@ function env(memory=new Map()){
  const sync=()=>{cx.now+=5;cx.SyncTgeMobileMarkers();};
  return {cx,orders,history,positions,allDeals,calls,memory,row,retire,sync};
 }
+check('legacy hidden preference stays off until explicit panel toggle; toggle survives restart',()=>{
+ const x=env(new Map([['TGM.77.enabled',1]]));x.cx.启用手机标记挂单=false;x.cx.InitTgeMobileMarkers();
+ assert.equal(x.cx.uiMobileMarkers,false);x.sync();assert.equal(x.calls.length,0);
+ x.cx.ToggleTgeMobileMarkers();assert.equal(x.cx.uiMobileMarkers,true);assert.equal(x.calls.length,0);
+ assert.equal(x.memory.get('TGM.77.panelEnabled'),1);x.sync();assert.equal(x.orders.length,3);
+ const y=env(x.memory);y.cx.启用手机标记挂单=false;y.cx.InitTgeMobileMarkers();assert.equal(y.cx.uiMobileMarkers,true);
+ x.cx.ToggleTgeMobileMarkers();assert.equal(x.cx.uiMobileMarkers,false);x.sync();assert.equal(x.orders.length,0);
+ const z=env(x.memory);z.cx.InitTgeMobileMarkers();assert.equal(z.cx.uiMobileMarkers,false);
+});
+check('failed switch persistence leaves state and requests unchanged',()=>{
+ const x=env();x.cx.uiMobileMarkers=false;x.cx.GlobalVariableSet=()=>0;
+ x.cx.ToggleTgeMobileMarkers();assert.equal(x.cx.uiMobileMarkers,false);assert.equal(x.calls.length,0);
+ assert.equal(x.cx.markerStatus,'开关保存失败，请重试');
+});
 check('100-price .01 Buy Limits draw one TP per teacher level using independent Magic',()=>{
  const {cx,orders,calls,sync}=env();sync();assert.equal(orders.length,3);assert.equal(cx.markerStatus,'已同步3/3');
  assert.deepEqual(orders.map(o=>o.ORDER_TP),[3900,4000,4100]);
@@ -166,7 +180,7 @@ check('danger distance withdraws all owned marks before they can approach trigge
  assert.equal(x.calls.filter(c=>c[0]==='create').length,3);
 });
 check('disconnection, stale quote, disabled permissions and observation cannot create markers',()=>{
- for(const change of [x=>x.connected=false,x=>x.fresh=false,x=>x.permission=false,x=>{x.启用真实交易=false;x.InitTgeMobileMarkers();}]){
+ for(const change of [x=>x.connected=false,x=>x.fresh=false,x=>x.permission=false,x=>{x.tradeMode=false;x.InitTgeMobileMarkers();}]){
   const x=env();change(x.cx);x.sync();assert.equal(x.calls.length,0);
  }
 });

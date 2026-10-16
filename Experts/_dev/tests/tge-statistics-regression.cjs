@@ -9,11 +9,11 @@ function convert(s){
  return s.replace('},filters[3]={','}; string filters[3]={').replace(/\bstring (\w+)\[\d+\]=\{([\s\S]*?)\};/g,'let $1=[$2];')
  .replace('datetime start,end; StatsRange(start,end);','let [start,end]=StatsRange();')
  .replace(/MqlDateTime (\w+);/g,'let $1={};').replace(/TgeStatsTrade (\w+);/g,'let $1=trade();')
- .replace(/\bTgeStatsTrade\s+/g,'let ')
+ .replace(/\b(?:TgeStatsTrade|TgeLifeEvent)\s+/g,'let ')
  .replace(/\b(?:ulong|double|int) (\w+)\[\];/g,'let $1=[];')
  .replace(/\((?:datetime|int|double|ulong|long)\)/g,'')
  .replace(/\b(?:datetime|ulong|long|double|int|bool|string|color)\s+/g,'let ')
- .replace('(n+1)/2','Math.trunc((n+1)/2)').replace('months/12','Math.trunc(months/12)')
+ .replace('(n+3)/4','Math.trunc((n+3)/4)').replace('(n+1)/2','Math.trunc((n+1)/2)').replace('months/12','Math.trunc(months/12)')
  .replace(/\bMathPow\b/g,"Math.pow").replace(/\bMathFloor\b/g,"Math.floor").replace(/\bMathCeil\b/g,"Math.ceil").replace(/\bMathLog10\b/g,"Math.log10").replace(/\bMathMod\b/g,"((a,b)=>a%b)")
  .replace(/\bMathMax\b/g,'Math.max').replace(/\bMathMin\b/g,'Math.min').replace(/\bMathAbs\b/g,'Math.abs').replace(/\bMathRound\b/g,'Math.round');
 }
@@ -27,7 +27,7 @@ function deal(id,entry,time,volume=.02,price=4100,opts={}){
 function add(id,entry,time,volume=.02,price=4100,opts={}){const d=deal(id,entry,time,volume,price,opts);history.push(d);return d;}
 const integers={DEAL_POSITION_ID:'id',DEAL_TYPE:'type',DEAL_ENTRY:'entry',DEAL_MAGIC:'magic',DEAL_TIME:'time',DEAL_REASON:'reason'};
 const doubles={DEAL_VOLUME:'volume',DEAL_PRICE:'price',DEAL_PROFIT:'profit',DEAL_COMMISSION:'commission',DEAL_SWAP:'swap',DEAL_FEE:'fee'};
-const cx=vm.createContext({Math,trade,statsPeriod:0,statsOffsets:[0,0,0],statsFilter:0,statsReview:0,statsDirty:true,statsOK:false,
+const cx=vm.createContext({Math,trade,statsSeriesDirty:true,statsRevision:0,statsPeriod:0,statsOffsets:[0,0,0],statsFilter:0,statsReview:0,statsDirty:true,statsOK:false,
  statsRangeStart:0,statsRangeEnd:0,statsLastAttempt:0,statsSkipped:0,statsStatus:'',statsTrades:[],statsSummary:summary(),EA魔法号:560056,_Symbol:'XAUUSD.c',
  POSITION_TYPE_BUY:0,POSITION_TYPE_SELL:1,DEAL_TYPE_BUY:0,DEAL_TYPE_SELL:1,
  DEAL_ENTRY_IN:0,DEAL_ENTRY_OUT:1,DEAL_ENTRY_INOUT:2,DEAL_ENTRY_OUT_BY:3,SYMBOL_VOLUME_STEP:'step',TERMINAL_CONNECTED:1,
@@ -141,14 +141,14 @@ const main=fs.readFileSync('EA_T哥点位跟单.mq5','utf8');
 for(const m of main.matchAll(/(UI_[A-Z]+)=C'(\d+),(\d+),(\d+)'/g))cx[m[1]]=[+m[2],+m[3],+m[4]];
 function format(s,...a){let i=0;return s.replace(/%([-+]?)(?:\.(\d+))?([sdf])/g,(_,sign,p,t)=>{const v=a[i++];return t==='s'?String(v):t==='d'?String(Math.trunc(v)):Number(v).toFixed(Number(p||6));});}
 Object.assign(cx,{
- statsSelectedId:0,statsPressedId:0,statsCumulative:[],statsDrawdowns:[],uiHits:[],
+ ReviewClearMarkers:()=>{},reviewNavTime:0,statsSelectedId:0,statsPressedId:0,statsCumulative:[],statsDrawdowns:[],uiHits:[],
  DEAL_REASON_CLIENT:0,DEAL_REASON_MOBILE:1,DEAL_REASON_WEB:2,DEAL_REASON_EXPERT:3,DEAL_REASON_SL:4,DEAL_REASON_TP:5,DEAL_REASON_SO:6,
  TIME_SECONDS:4,
- _Digits:2,TIME_DATE:1,TIME_MINUTES:2,ACCOUNT_CURRENCY:0,
+ _Digits:2,TIME_DATE:1,TIME_MINUTES:2,TIME_SECONDS:4,ACCOUNT_CURRENCY:0,
  DoubleToString:(v,d)=>Number(v).toFixed(d),StringFormat:format,
  StringFind:(s,t)=>s.indexOf(t),StringSubstr:(s,i,n)=>n===undefined?s.slice(i):s.slice(i,i+n),
- TimeToString:(s,flags)=>{const iso=new Date(s*1000).toISOString();return flags===1?iso.slice(0,10):flags===2?iso.slice(11,16):iso.slice(0,flags&4?19:16).replace('T',' ');},
- AccountInfoString:()=>'USC',UIPx:v=>Math.round(v),UIInk:v=>v,
+ TimeToString:(s,flags)=>{const iso=new Date(s*1000).toISOString();return flags===1?iso.slice(0,10):flags===2?iso.slice(11,16):flags===4?iso.slice(11,19):iso.slice(0,flags&4?19:16).replace('T',' ');},
+ ReviewLoad:()=>{},reviewProcess:false,reviewNotice:'',lifeStatus:'',UIXPx:v=>Math.round(v),AccountInfoString:()=>'USC',UIPx:v=>Math.round(v),UIInk:v=>v,
  UIRound:(x,y,w,h,c)=>ops.push({op:'rect',x,y,w,h,color:c,r:8}),
  UICard:(x,y,w,h,c)=>ops.push({op:'rect',x,y,w,h,color:c,r:8}),
  UIText:(text,x,y,w,size,color,right=false)=>ops.push({op:'text',text:String(text),x,y,w,size,color,right}),
@@ -171,7 +171,7 @@ function sample(values){
  cx.statsTrades=values.map((net,i)=>({...trade(),id:820100+i,net,gross:net+.2,commission:-.2,direction:i%2,entryVolume:.02,exitVolume:.02,
   entryValue:82,exitValue:(4100+(i%2===0?1:-1)*(net+.2)/2)*.02,entryDeals:1,exitDeals:2,exitReason:net>0?5:4,openTime:start+i*600,closeTime:start+i*600+300}));
  cx.statsSummary=summary();for(const t of cx.statsTrades)cx.StatsAccumulate(t,cx.statsSummary);
- Object.assign(cx,{statsOK:true,statsSkipped:0,statsStatus:values.length?'按完整平仓统计':'此区间没有符合筛选的完整平仓记录',statsRangeStart:start,statsRangeEnd:start+86400,statsReview:0,statsSelectedId:0,statsPressedId:0});
+ Object.assign(cx,{statsSeriesDirty:true,statsOK:true,statsSkipped:0,statsStatus:values.length?'按完整平仓统计':'此区间没有符合筛选的完整平仓记录',statsRangeStart:start,statsRangeEnd:start+86400,statsReview:0,ReviewClearMarkers:()=>{},reviewNavTime:0,statsSelectedId:0,statsPressedId:0});
 }
 function render(detail){
  cx.statsDetail=detail;ops=[];hits=[];cx.uiHits=[];
@@ -219,14 +219,14 @@ check('linked graphs select by position ID and review/back preserve the trade',(
 });
 check('refresh preserves selected ID; stale mouse press cannot select a replacement',()=>{
  sample([2,-4,9]);render(2);cx.StatsSelect(1);const id=cx.statsSelectedId;cx.statsPressedId=id;
- cx.statsTrades.unshift({...cx.statsTrades[0],id:99});cx.StatsBuildSeries();assert.equal(cx.StatsSelectedIndex(),2);
+ cx.statsTrades.unshift({...cx.statsTrades[0],id:99});cx.statsSeriesDirty=true;cx.StatsBuildSeries();assert.equal(cx.StatsSelectedIndex(),2);
  cx.StatsAction(1001);assert.equal(cx.statsSelectedId,id);
- cx.statsTrades=[];cx.StatsBuildSeries();assert.equal(cx.statsSelectedId,0);
+ cx.statsTrades=[];cx.statsSeriesDirty=true;cx.StatsBuildSeries();assert.equal(cx.statsSelectedId,0);
  assert.equal(cx.StatsPointAtX(100,0),-1);
 });
 check('review has seconds, actual exit source and explicit missing process data',()=>{
  sample([8]);cx.statsTrades[0].exitReason=4;render(3);
- assert(ops.some(o=>o.text==='止损 SL'));assert(ops.some(o=>o.text?.includes('轨迹未记录')));
+ assert(ops.some(o=>o.text==='止损 SL'));assert(ops.some(o=>o.text?.includes('非当时信号快照')));
  assert.equal(cx.StatsExitText(1),'手机端操作');assert.equal(cx.StatsExitText(-1),'其他 / 未知');
 });
 
@@ -239,8 +239,8 @@ check('production mouse events link both plots, review and scope reset at multip
  }
  for(const [name,args] of [['HitAction','mouseX,mouseY'],['ViewAction','action'],['OnChartEvent','id,lparam,dparam,sparam']])
   vm.runInContext('function '+name+'('+args+'){'+convert(definition(name))+'}',cx);
- Object.assign(cx,{UIViewMask:()=>0,SaveView:()=>{},Panel:()=>render(cx.statsDetail),panelReady:true,
-  uiX:8,uiY:24,uiDragging:false,uiLeftWasDown:false,uiPressedAction:0,
+ Object.assign(cx,{SyncHistoryLayer:()=>{},uiHistoryNextScan:0,UIViewMask:()=>0,SaveView:()=>{},Panel:()=>render(cx.statsDetail),panelReady:true,
+  UIWidthFactor:()=>1,UIWidth:()=>560,uiLogicalWidth:560,uiX:8,uiY:24,uiDragging:false,uiLeftWasDown:false,uiPressedAction:0,
   CHARTEVENT_MOUSE_MOVE:1,CHARTEVENT_CHART_CHANGE:2,StringToInteger:Number});
  for(const scale of [.75,1,1.5]){
   sample([10,-20,7]);cx.panelScale=scale;render(2);
@@ -254,11 +254,35 @@ check('production mouse events link both plots, review and scope reset at multip
  cx.Panel=()=>{};cx.ViewAction(41);assert.equal(cx.statsSelectedId,0);assert.equal(cx.statsFilter,1);assert(cx.statsDirty);
  cx.Panel=()=>render(cx.statsDetail);
 });
+
+for(const [name,args]of [['ReviewKind','kind'],['ReviewProcessPanel','tr']])
+ vm.runInContext('function '+name+'('+args+'){'+convert(body(name))+'}',cx);
+check('process timeline controls stay inside canvas and navigate each displayed row',()=>{
+ sample([8]);cx.reviewProcess=true;cx.reviewPage=0;cx.reviewReady=true;
+ cx.reviewEvents=[
+ {at:start,kind:'PLAN',detail:'结构持单 · 点位 4120.00 · 初始SL 4116.00',volume:.02,sl:4116,tp:4130,mfe:0,mae:0},
+ {at:start+2,kind:'OBSERVE',detail:'开始在线采样；离线及采样间隔内路径未知',volume:.02,sl:4116,tp:4130,mfe:1,mae:.2},
+ {at:start+60,kind:'POSITION',detail:'实际持仓保护价变化',volume:.01,sl:4120.20,tp:4130,mfe:5,mae:1},
+ {at:start+90,kind:'DEAL_OUT',detail:'0.01手 @ 4126.00 · 手机端操作 · 净额 +6.00',volume:.01,mfe:0,mae:0},
+ ];
+ const page=render(3);assert([130,131,132,133].every(a=>page.hits.some(h=>h.action===a)));
+ assert(page.ops.some(o=>o.text?.includes('最大有利 5.00')));assert(page.ops.some(o=>o.text?.includes('离线区间未知')));
+ cx.reviewProcess=false;
+});
+check('series cache avoids reallocating or recomputing unchanged curves but refreshes after data changes',()=>{
+ sample([2,-4,9]);cx.StatsBuildSeries();const cumulative=cx.statsCumulative.slice();
+ let allocations=0;const resize=cx.ArrayResize;cx.ArrayResize=(...a)=>{allocations++;return resize(...a);};
+ cx.StatsBuildSeries();cx.StatsSelect(0);cx.StatsBuildSeries();
+ assert.equal(allocations,0);assert.deepEqual(Array.from(cx.statsCumulative),Array.from(cumulative));
+ cx.statsTrades[0].net=5;cx.statsSeriesDirty=true;cx.StatsBuildSeries();assert.equal(allocations,2);assert.equal(cx.statsCumulative[0],5);cx.ArrayResize=resize;
+});
 if(process.env.TGE_STATS_PREVIEW){
  fs.mkdirSync(process.env.TGE_STATS_PREVIEW,{recursive:true});
  sample([8.6,-3.4,12.2,-5.8,4.6,9.1,-2.3,6.8,-4.2,11.7,-3.6,5.4]);
  for(const [name,d] of [['overview',0],['performance',1],['trend',2],['review',3]])
   fs.writeFileSync(process.env.TGE_STATS_PREVIEW+'/'+name+'.json',JSON.stringify(render(d),null,2));
+ cx.reviewProcess=true;cx.reviewPage=0;
+ fs.writeFileSync(process.env.TGE_STATS_PREVIEW+'/process.json',JSON.stringify(render(3),null,2));cx.reviewProcess=false;
  sample([]);fs.writeFileSync(process.env.TGE_STATS_PREVIEW+'/empty.json',JSON.stringify(render(2),null,2));
 }
 console.log(checks+' statistics data/render checks passed; native MT5 clicks not exercised.');
