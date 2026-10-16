@@ -1,5 +1,5 @@
 #property strict
-#property version "1.80"
+#property version "1.81"
 #property description "T哥点位：积极入场、分级保护、结构化退出；固定0.02手，独立Magic。"
 #include <Trade/Trade.mqh>
 #include <Canvas/Canvas.mqh>
@@ -357,7 +357,7 @@ void DrawLevels()
    {
       string name=VIEW+"L"+IntegerToString(i);
       string label=VIEW+"PRICE"+IntegerToString(i);
-      if(i>=ArraySize(levels)) { ObjectDelete(0,name); ObjectDelete(0,label); continue; }
+      if(!uiPointLines || i>=ArraySize(levels)) { ObjectDelete(0,name); ObjectDelete(0,label); continue; }
       if(ObjectFind(0,name)<0) ObjectCreate(0,name,OBJ_HLINE,0,0,levels[i]);
       ObjectMove(0,name,0,0,levels[i]);
       ObjectSetInteger(0,name,OBJPROP_COLOR,feedActive ? C'38,83,145' : C'145,151,160');
@@ -366,7 +366,7 @@ void DrawLevels()
       // 点位属于行情背景层，已有对象也更新，避免重新开启后盖住前景Canvas面板。
       ObjectSetInteger(0,name,OBJPROP_BACK,true);
       ObjectSetInteger(0,name,OBJPROP_SELECTABLE,false);
-      ObjectSetInteger(0,name,OBJPROP_TIMEFRAMES,uiPointLines ? OBJ_ALL_PERIODS : OBJ_NO_PERIODS);
+      ObjectSetInteger(0,name,OBJPROP_TIMEFRAMES,OBJ_ALL_PERIODS);
       ObjectSetString(0,name,OBJPROP_TEXT,"T点位 "+DoubleToString(levels[i],_Digits));
       int px=0,py=0;
       bool shown=uiPointLines && ChartTimePriceToXY(0,0,iTime(_Symbol,_Period,0),levels[i],px,py) &&
@@ -966,7 +966,7 @@ double panelScale=1.0;
 struct UIHit { int x,y,w,h,action; };
 UIHit uiHits[];
 string uiPrefix="";
-bool uiInitialized=false,uiOldMouseMove=false,uiDragging=false,uiOldScroll=false,uiLeftWasDown=false;
+bool uiInitialized=false,uiOldMouseMove=false,uiDragging=false,uiOldScroll=false,uiLeftWasDown=false,uiClickTracked=false;
 int uiDragDX=0,uiDragDY=0,uiPressedAction=0;
 // 统计页状态属于显示偏好，不参与交易管理。
 bool uiStatistics=false,uiIndicators=false,uiPositions=false;
@@ -1490,7 +1490,7 @@ void ViewAction(const int action)
    else return;
    if(recordUndo && UIViewMask()!=before) uiUndoMask=before;
    // 先完成图表命令，再按实际状态画工具栏。
-   Panel(); uiHistoryNextScan=0; SyncHistoryLayer(); SaveView();
+   Panel(); uiHistoryNextScan=0; SyncHistoryLayer(); SaveView(); ChartRedraw(0);
 }
 // MT5原生交易历史对象使用autotrade前缀。面板外以裁切副本保持前景可见，不改原始坐标/颜色/历史开关。
 // 保留本次实际修改过的对象，卸载时恢复；不触碰其他指标或用户手动画线。
@@ -1727,7 +1727,7 @@ void Panel()
    panelCanvas.FillRectangle(0,0,UIXPx(559),UIPx(39),UIInk(UI_HEADER));
    string pageTitle=uiObserver ? "入场研判" : uiPositions ? "持仓明细" : uiStatistics ? "交易统计" : uiIndicators ? "看盘设置" : "T哥点位计划";
    UIText(_Symbol+" · "+pageTitle,16,10,222,11,UI_TEXT);
-   UIText("v1.80",242,13,40,8,UI_DIM);
+   UIText("v1.81",242,13,40,8,UI_DIM);
    UIText(TimeToString(TimeGMT()+8*3600,TIME_SECONDS),286,12,100,10,UI_MUTED,true);
    UIButton(uiCollapsed ? "+" : "−",396,7,30,1);
    UIButton(tradeMode ? "交易模式" : "观察模式",434,7,110,29,tradeMode);
@@ -2003,6 +2003,7 @@ void OnChartEvent(const int id,const long &lparam,const double &dparam,const str
       uiLeftWasDown=leftDown;
       if(pressed)
       {
+         uiClickTracked=true;
          uiPressedAction=HitAction(mx,my);
          paperPressedId=(uiPressedAction>=220 && uiPressedAction<220+PAPER_PAGE_SIZE) ? paperRowIds[uiPressedAction-220] : 0;
          statsPressedId=uiPressedAction>=1000 && uiPressedAction-1000<ArraySize(statsTrades) ?
@@ -2028,11 +2029,22 @@ void OnChartEvent(const int id,const long &lparam,const double &dparam,const str
       }
       else if(released)
       {
-         // MOUSE_MOVE也包含鼠标键变化：每次按下/松开只执行一次。
-         // CLICK/OBJECT_CLICK是同一手势的其他通知，不再重复切换。
-         int action=uiPressedAction; uiPressedAction=0;
-         if(action>0 && action==HitAction(mx,my)) ViewAction(action);
+         // 松开只核对命中，不执行动作；按钮统一由Canvas对象点击事件触发。
+         if(uiPressedAction!=HitAction(mx,my)) uiPressedAction=0;
       }
+   }
+   else if(id==CHARTEVENT_OBJECT_CLICK && sparam==VIEW+"CANVAS")
+   {
+      int action=HitAction((int)lparam,(int)dparam);
+      bool allowed=!uiDragging && action>0 && (!uiClickTracked || action==uiPressedAction);
+      if(!uiClickTracked)
+      {
+         // 即使鼠标状态事件未送达，原生对象点击仍可操作，并锁定当前行身份。
+         paperPressedId=(action>=220 && action<220+PAPER_PAGE_SIZE) ? paperRowIds[action-220] : 0;
+         statsPressedId=action>=1000 && action-1000<ArraySize(statsTrades) ? statsTrades[action-1000].id : 0;
+      }
+      uiClickTracked=false; uiPressedAction=0;
+      if(allowed) ViewAction(action);
    }
     else if(id==CHARTEVENT_CHART_CHANGE) { uiHistoryNextScan=0; DrawLevels(); Panel(); SyncHistoryLayer(); }
 }

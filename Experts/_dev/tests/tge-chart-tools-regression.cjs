@@ -1,7 +1,7 @@
 const fs=require('node:fs'),vm=require('node:vm'),assert=require('node:assert/strict');
-const src=fs.readFileSync(process.argv[2],'utf8');
+const src=fs.readFileSync(process.argv[2]||'EA_T哥点位跟单.mq5','utf8')+'\n'+fs.readFileSync('Include/Trading/TgeMobileMarkers.mqh','utf8');
 function body(name) {
- const def=src.search(new RegExp('^(?:int|uint|bool|void|string) '+name+'\\(','m'));
+ const def=src.search(new RegExp('^(?:int|uint|double|bool|void|string) '+name+'\\(','m'));
  assert(def>=0,name);const start=src.indexOf('{',def);let end=start+1,depth=1;
  for(;depth;end++){if(src[end]==='{')depth++;if(src[end]==='}')depth--;}
  return src.slice(start+1,end-1);
@@ -11,7 +11,7 @@ function convert(s) {
  .replace(/\b(?:string|int) (\w+)\[\d+\]=\{([\s\S]*?)\};/g,'let $1=[$2];')
  .replace(/\b(?:int|string) (\w+)\[\d+\];/g,'let $1=[];')
  .replace(/\b(?:double|MqlRates) (\w+)\[\];/g,'let $1=[];')
- .replace(/\b(?:int|uint|bool|color|ulong|double|string|long|ENUM_TIMEFRAMES|ENUM_MA_METHOD)\s+/g,'let ')
+ .replace(/\b(?:int|uint|bool|color|ulong|double|string|long|datetime|ENUM_LINE_STYLE|ENUM_TIMEFRAMES|ENUM_MA_METHOD)\s+/g,'let ')
  .replace(/\bMathMax\b/g,'Math.max').replace(/\bMathMin\b/g,'Math.min').replace(/\bMathRound\b/g,'Math.round');
 }
 const props=new Map([['scale',3],['follow',true],['grid',false],['shift',true],['mode',1],['scroll',true],['move',false],['width',1000],['height',1000]]);
@@ -22,9 +22,17 @@ const cx=vm.createContext({Math,FollowCaption:()=>'起飞跟随 · 等待消息'
  看盘均线1周期:5,看盘均线2周期:10,看盘均线3周期:20,看盘均线4周期:50,看盘均线5周期:100,看盘均线6周期:200,
  看盘主均线算法:0,看盘辅助均线算法:1,看盘指标计算价格:1,看盘布林周期:20,看盘布林标准差:2,
  看盘ADX周期:14,看盘ADX参考线:25,看盘KD周期:9,看盘KD平滑:3,看盘KD信号:3,看盘RSI周期:14,看盘MACD快线:12,看盘MACD慢线:26,看盘MACD信号线:9,看盘ATR周期:14,
- MODE_SMA:0,MODE_EMA:1,MODE_SMMA:2,MODE_LWMA:3,
+ STYLE_SOLID:0,STYLE_DASH:1,STYLE_DOT:2,MODE_SMA:0,
+ 看盘面板宽度:560,看盘框体周期:5,看盘近期框根数:5,看盘震荡最少根数:12,看盘震荡ATR倍数:1.5,看盘收缩比较根数:100,看盘收缩低位百分比:20,
+ EnumToString:()=> 'PERIOD_M5',StringReplace:()=>0,
+ uiObserver:false,uiPositions:false,uiPositionPage:0,uiClickTracked:false,uiPaperSummary:true,
+ paperPressedId:0,paperRowIds:[1,2,3,4,5],PAPER_PAGE_SIZE:5,PAPER_ARMS:5,paperDetailArm:0,paperListPage:0,
+ statsPressedId:0,statsSelectedId:0,PaperClearReview:()=>{},PaperDetailAction:()=>{},ObserverAction:()=>{},ToggleTradeMode:()=>{},
+ uiHistoryNextScan:0,SyncHistoryLayer:()=>{},
+ StatsAction:a=>{if(a===43)cx.statsReview=Math.min(cx.statsTrades.length-1,cx.statsReview+1);if(a===44)cx.statsReview=Math.max(0,cx.statsReview-1);},
+MODE_EMA:1,MODE_SMMA:2,MODE_LWMA:3,
  clrWhite:'white',clrOrangeRed:'red',clrGold:'gold',clrOrange:'orange',clrMediumTurquoise:'teal',clrDeepSkyBlue:'blue',clrMediumPurple:'purple',clrHotPink:'pink',uiX:8,uiY:24,panelWidth:560,panelHeight:565,panelScale:1,uiPrefix:'TGUI.42.',
- uiIndicatorLabels:['MA5','EMA20','布林','RSI','MACD','ATR','MA10','MA50','MA100','MA200','M5·MA5','M15·MA5','确认拐点','昨高低','ADX','随机KD'],uiIndicatorHandles:Array(16).fill(-1),uiIndicatorNotice:'',INVALID_HANDLE:-1,
+ uiIndicatorLabels:['MA5','EMA20','布林','RSI','MACD','ATR','MA10','MA50','MA100','MA200','M5·MA5','M15·MA5','确认拐点','昨高低','ADX','随机KD','近期K线框','震荡箱体','波动收缩','框宽/ATR'],uiIndicatorHandles:Array(20).fill(-1),uiIndicatorNotice:'',INVALID_HANDLE:-1,
  uiWatchTab:0,uiUndoMask:-1,uiCollapsed:false,uiPointLines:true,uiStatistics:false,uiIndicators:false,statsPeriod:0,statsOffsets:[0,0,0],statsFilter:0,statsDetail:0,statsReview:0,statsDirty:true,statsLastAttempt:0,statsTrades:[],uiHits:[],uiPeriods:[1,5,15,30,16385,16388,16408],
  uiInitialized:false,uiOldMouseMove:false,uiDragging:false,uiOldScroll:false,uiLeftWasDown:false,uiPressedAction:0,uiDragDX:0,uiDragDY:0,panelReady:true,
  读取AI即时策略:false,每次开仓手数:.02,aiReady:false,aiMode:'WAIT',aiPlans:[],aiSourceTime:0,AIPlanCaption:()=>'AI等待',VIEW:'TGE_',_Symbol:'XAUUSD.c',UI_HEADER:0,UI_ACCENT:1,UI_MUTED:2,UI_DIM:3,
@@ -40,7 +48,7 @@ const cx=vm.createContext({Math,FollowCaption:()=>'起飞跟随 · 等待消息'
  CHART_CANDLES:1,CHART_BARS:0,CHART_LINE:2,CHART_END:3,OBJPROP_XDISTANCE:'x',OBJPROP_YDISTANCE:'y',
  CHARTEVENT_CLICK:1,CHARTEVENT_OBJECT_CLICK:2,CHARTEVENT_MOUSE_MOVE:3,CHARTEVENT_CHART_CHANGE:4,
  ChartGetInteger:(_,p)=>p==='windows'?indicatorWindows.length:props.get(p),ChartSetInteger:(_,p,v)=>{props.set(p,v);return true;},ChartPeriod:()=>5,
- ChartID:()=>42,ChartSetSymbolPeriod:(_,symbol,period)=>{periods.push([symbol,period]);return true;},
+ ObjectsDeleteAll:()=>0,ChartID:()=>42,ChartSetSymbolPeriod:(_,symbol,period)=>{periods.push([symbol,period]);return true;},
  ChartNavigate:(_,mode,pos)=>{navigation.push([mode,pos]);return true;},ChartRedraw:()=>{},
  ObjectGetInteger:(_,name,p)=>objects.get(p)||0,ObjectSetInteger:(_,name,p,v)=>{objects.set(p,v);return true;},
  GlobalVariableSet:(k,v)=>{globals.set(k,v);return 1;},GlobalVariableCheck:k=>globals.has(k),GlobalVariableGet:k=>globals.get(k)||0,
@@ -48,9 +56,9 @@ const cx=vm.createContext({Math,FollowCaption:()=>'起飞跟随 · 等待消息'
  UIRound:()=>{},UICard:()=>{},UIText:()=>{},Panel:()=>paint++,DrawLevels:()=>drawLevels++,
  ArraySize:a=>a.length,ArrayResize:(a,n)=>{while(a.length<n)a.push({});a.length=n;}
 });
-for(const [name,args] of [['UIViewMask',''],['UIPresetMask','preset'],['UIPresetLabel','preset'],['UICombinationText','mask'],['UISetMask','mask'],['UIApplyMask','mask'],['UIFavorite','slot,save'],['UIIndicatorPeriod','index'],['UIIsMovingAverage','index'],['UIIsOscillator','index'],['UIIndicatorLabel','index'],['UIMovingAverageGroup','trendGroup'],['UIIndicatorName','index'],['UIIndicatorWindow','index'],['UIIndicatorSet','index,enabled'],['CloseViewIndicators',''],['UIPx','value'],['SaveView',''],['InitView',''],['MovePanel',''],
+for(const [name,args] of [['UIWidthFactor',''],['UIXPx','value'],['UIIndicatorBit','index'],['UIViewMask',''],['UIPresetMask','preset'],['UIPresetLabel','preset'],['UICombinationText','mask'],['UISetMask','mask'],['UIApplyMask','mask'],['UIFavorite','slot,save'],['UIIndicatorPeriod','index'],['UIIsMovingAverage','index'],['UIIsOscillator','index'],['UIIndicatorLabel','index'],['UIMovingAverageGroup','trendGroup'],['UIIndicatorName','index'],['UIIndicatorWindow','index'],['UIIndicatorSet','index,enabled'],['CloseViewIndicators',''],['UIPx','value'],['SaveView',''],['InitView',''],['MovePanel',''],
  ['UIButton','text,x,y,w,action,active=false'],['ChartTools','y'],['HitAction','mouseX,mouseY'],
- ['ViewAction','action'],['OnChartEvent','id,lparam,dparam,sparam']])
+ ['ToggleTgeMobileMarkers',''],['ViewAction','action'],['OnChartEvent','id,lparam,dparam,sparam']])
  vm.runInContext('function '+name+'('+args+'){'+convert(body(name))+'}',cx);
 function check(name,fn){fn();checks++;console.log('PASS '+name);}
 check('removed timeframe and generic chart actions do not change chart state',()=>{
@@ -85,7 +93,7 @@ check('hit mapping follows panel position and DPI in both layouts',()=>{
 });
 
 function resetHits(){
- cx.panelScale=1;cx.uiX=8;cx.uiY=24;cx.uiDragging=false;cx.uiLeftWasDown=false;cx.uiPressedAction=0;
+ cx.panelScale=1;cx.uiX=8;cx.uiY=24;cx.uiDragging=false;cx.uiLeftWasDown=false;cx.uiPressedAction=0;cx.uiClickTracked=false;
  cx.uiHits=[];cx.UIButton('-',396,7,30,1);cx.UIButton('点位线',462,49,82,27);cx.ChartTools(88);
 }
 function point(action){const h=cx.uiHits.find(h=>h.action===action);return [cx.uiX+h.x+10,cx.uiY+h.y+10];}
@@ -107,10 +115,26 @@ check('notification order before/after release cannot reverse a toggle',()=>{
 check('rapid separate clicks remain separate without debounce delay',()=>{
  resetHits();cx.uiPointLines=false;gesture(27);gesture(27);assert.equal(cx.uiPointLines,false);
 });
+check('native Canvas clicks work without mouse state notifications',()=>{
+ resetHits();cx.uiPointLines=true;const [x,y]=point(27);
+ cx.OnChartEvent(2,x,y,'TGE_CANVAS');assert.equal(cx.uiPointLines,false);
+ cx.OnChartEvent(1,x,y,'');assert.equal(cx.uiPointLines,false);
+ cx.OnChartEvent(2,x,y,'TGE_CANVAS');assert.equal(cx.uiPointLines,true);
+ cx.OnChartEvent(2,x,y,'user.drawing');assert.equal(cx.uiPointLines,true);
+});
+check('all rendered button hit areas follow panel width and display scaling',()=>{
+ for(const width of [560,760,1000])for(const scale of [.45,1,1.5]){
+  cx.看盘面板宽度=width;cx.panelScale=scale;cx.uiHits=[];
+  for(let action=1;action<=8;action++)cx.UIButton('button',12+(action-1)*66,49,58,action);
+  for(const h of cx.uiHits)
+   assert.equal(cx.HitAction(cx.uiX+(h.x+h.w/2)*scale*width/560,cx.uiY+(h.y+13)*scale),h.action);
+ }
+ cx.看盘面板宽度=560;cx.panelScale=1;
+});
 check('holding mouse and repeated movements do not repeatedly execute button',()=>{
  resetHits();cx.uiPointLines=true;const [x,y]=point(27);
  cx.OnChartEvent(3,x,y,'1');for(let i=0;i<20;i++)cx.OnChartEvent(3,x+1,y+1,'1');
- assert.equal(cx.uiPointLines,true);cx.OnChartEvent(3,x,y,'0');assert.equal(cx.uiPointLines,false);
+ assert.equal(cx.uiPointLines,true);cx.OnChartEvent(3,x,y,'0');assert.equal(cx.uiPointLines,true);
  cx.OnChartEvent(1,x,y,'');cx.OnChartEvent(2,x,y,'TGE_CANVAS');assert.equal(cx.uiPointLines,false);
 });
 check('release outside pressed button cancels operation',()=>{
@@ -143,8 +167,8 @@ check('monitor, statistics and watch pages are mutually exclusive',()=>{
 check('phone TP button saves preference once and defers requests to timer',()=>{
  resetHits();cx.UIButton('手机TP开',240,49,100,28);cx.uiMobileMarkers=true;cx.markerDirty=false;
  gesture(28);assert.equal(cx.uiMobileMarkers,false);assert.equal(cx.markerDirty,true);
- assert.equal(globals.get('TGM.test.enabled'),0);
- gesture(28);assert.equal(cx.uiMobileMarkers,true);assert.equal(globals.get('TGM.test.enabled'),1);
+ assert.equal(globals.get('TGM.test.panelEnabled'),0);
+ gesture(28);assert.equal(cx.uiMobileMarkers,true);assert.equal(globals.get('TGM.test.panelEnabled'),1);
  assert(!/CancelTgeMobileMarkers|SubmitTgeMobileMarker|SyncTgeMobileMarkers/.test(body('ViewAction')));
 });
 check('statistics dates, periods, filters and review arrows stay within display state',()=>{
@@ -186,15 +210,15 @@ check('configured periods methods prices and colors reach native display compone
  cx.看盘布林周期=25;cx.看盘布林标准差=2.5;cx.看盘RSI周期=8;
  cx.看盘MACD快线=8;cx.看盘MACD慢线=21;cx.看盘MACD信号线=5;cx.看盘ATR周期=10;
  for(const i of [0,6,1,7,8,9,2,3,4,5])cx.UIIndicatorSet(i,true);
- assert.deepEqual(indicatorHandles.get(cx.uiIndicatorHandles[6]).parameters,[13,2,5,2.5,'orange']);
- assert.deepEqual(indicatorHandles.get(cx.uiIndicatorHandles[0]).parameters,[5,0,5,2.5,'gold']);
- assert.deepEqual(indicatorHandles.get(cx.uiIndicatorHandles[2]).parameters,[25,2,5,2.5,'pink']);
+ assert.deepEqual(JSON.parse(JSON.stringify(indicatorHandles.get(cx.uiIndicatorHandles[6]).parameters)),[13,2,5,2.5,[153,76,0],0,2]);
+ assert.deepEqual(JSON.parse(JSON.stringify(indicatorHandles.get(cx.uiIndicatorHandles[0]).parameters)),[5,0,5,2.5,[46,99,142],0,1]);
+ assert.deepEqual(JSON.parse(JSON.stringify(indicatorHandles.get(cx.uiIndicatorHandles[2]).parameters)),[25,2,5,2.5,[70,83,96],0,2]);
  // Replaced oscillator handles are released; recorded creation arguments still prove each native input.
  for(const [kind,p] of [[0,8],[1,10],[2,10]]){
   const d=[...indicatorHandles.values()].find(d=>d.path.includes('Oscillator')&&d.kind===kind);
   assert.deepEqual(d.parameters,[p,8,21,5,5,3,3,25]);
  }
- assert.equal(new Set([0,6,1,7,8,9].map(i=>indicatorHandles.get(cx.uiIndicatorHandles[i]).parameters[4])).size,6);
+ assert.equal(new Set([0,6,1,7,8,9].map(i=>JSON.stringify(indicatorHandles.get(cx.uiIndicatorHandles[i]).parameters[4]))).size,6);
  cx.看盘均线2周期=10;cx.看盘辅助均线算法=1;cx.看盘指标计算价格=1;
  cx.看盘布林周期=20;cx.看盘布林标准差=2;cx.看盘RSI周期=14;
  cx.看盘MACD快线=12;cx.看盘MACD慢线=26;cx.看盘MACD信号线=9;cx.看盘ATR周期=14;
@@ -310,9 +334,9 @@ for(const file of ['TgeChartOverlay.mq5','TgeChartOscillator.mq5']){
  const implementation=indicator.slice(begin+1,indicator.lastIndexOf('}',end));
  const calls=[];
  const x=vm.createContext({viewHandle:1,ViewKind:0,line0:[],line1:[],line2:[],INVALID_HANDLE:-1,
-  calculated:100,copyFailure:false,BarsCalculated:()=>x.calculated,
+  time:[],ArraySetAsSeries:()=>{},PaintNames:()=>{},calculated:100,copyFailure:false,BarsCalculated:()=>x.calculated,
   CopyBuffer:(_handle,buffer,start,count)=>{calls.push([buffer,start,count]);return x.copyFailure?-1:count;}});
- vm.runInContext('function calculate(rates_total,prev_calculated){'+convert(implementation)+'}',x);
+ vm.runInContext('function calculate(rates_total,prev_calculated,time=Array(rates_total).fill(0)){'+convert(implementation)+'}',x);
  check(file+' waits for native data and rebuilds full history after reset',()=>{
   x.calculated=99;assert.equal(x.calculate(100,80),80);assert.equal(calls.length,0);
   x.calculated=100;assert.equal(x.calculate(100,0),100);assert.deepEqual(calls.pop(),[0,0,100]);
@@ -373,7 +397,7 @@ for(const file of ['TgeChartOverlay.mq5','TgeChartOscillator.mq5']){
 
 check('six exact presets replace EA indicators without accumulating or deleting manual indicators',()=>{
  resetIndicators();cx.uiPointLines=false;
- const expected=[[5,10,11,12],[0,1,3,6],[1,7,9,14],[2,3,13],[0,1,4],[10,12,13,15]];
+ const expected=[[0,1,13],[0,1,3,6],[1,7,9,14],[2,3,13],[0,1,4],[10,12,13,15]];
  for(let p=0;p<6;p++){
   cx.ViewAction(82+p);
   assert.deepEqual(Array.from({length:16},(_,i)=>i).filter(i=>cx.UIIndicatorWindow(i)>=0),expected[p]);
@@ -409,123 +433,53 @@ check('combo captions follow configured MA periods and templates never set chart
   assert(!/\bexecution\s*\.|\b(?:Open|Manage|Store|OrderSend|ChartSetSymbolPeriod)\s*\(/.test(body(name)));
 });
 
-// 使用生产Panel与IndicatorPage，分别记录内存绘制和Update发布，防止“画了但没显示”。
-resetIndicators();resetHits();props.set('width',1000);props.set('height',1000);
-let backBuffer=[],frames=[];
-Object.assign(cx,{
- uiCollapsed:false,uiIndicators:false,uiStatistics:false,levels:[],启用真实交易:false,followMembers:[],aiSource:'',TEACHER_BAND:2,
- FollowMemberCaption:i=>cx.followMembers[i].name+' · 独立学生状态',
- UI_ROOT:3,UI_CARD:4,UI_ROW:5,UI_TEXT:6,UI_DIM:7,UI_WARN:8,UI_BORDER:9,UI_GAIN:10,UI_LOSS:11,UI_SELL:12,
- PositionsTotal:()=>0,EnsurePanel:h=>{cx.panelHeight=h;return true;},UIInk:v=>v,UIRound:()=>{},
- panelCanvas:{Erase:()=>{backBuffer=[];},FillRectangle:()=>{},Update:()=>{frames.push(backBuffer.slice());}},
- UIText:text=>backBuffer.push(String(text)),ObjectSetString:()=>true,OBJPROP_TOOLTIP:0,
- TimeGMT:()=>0,TimeToString:()=>'',TIME_SECONDS:1,TIME_DATE:2,TIME_MINUTES:4,
- feedStatus:'等待',sourceSender:'',identity:'',healthBeat:0,healthSync:0,sourceTime:0,sourceKind:'',
- feedActive:false,dayStopped:false,entryView:{ready:false},trend:0,reason:'等待点位',
- pending:{kind:0},每日权益回撤上限百分比:1,最大点差价格:0.5,_Digits:2,
- DoubleToString:(v,n)=>v.toFixed(n),AccountInfoString:()=>'USD',ACCOUNT_CURRENCY:0,
- StringFormat:(s,...values)=>s.replace(/%\.\df|%d|%s/g,()=>String(values.shift())),
- SyncStatus:()=>'等待同步',ExecutionBlock:()=>'观察模式'
+// Current page layouts and statistics/replay controls are checked by their dedicated suites.
+check('native clicks retain the pressed simulated-order identity across a refresh',()=>{
+ resetHits();cx.uiHits=[];cx.UIButton('paper row',12,400,400,220);cx.paperRowIds[0]=11;
+ const [x,y]=point(220);cx.OnChartEvent(3,x,y,'1');cx.paperRowIds[0]=22;
+ cx.OnChartEvent(3,x,y,'0');let captured;
+ cx.PaperDetailAction=()=>captured=cx.paperPressedId;
+ cx.OnChartEvent(2,x,y,'TGE_CANVAS');assert.equal(captured,11);
+ // A native-only click captures the row actually visible at click time.
+ cx.OnChartEvent(2,x,y,'TGE_CANVAS');assert.equal(captured,22);
 });
-for(const [name,args] of [['PageTabs','y'],['IndicatorPage',''],['Panel','']]){
- const code=convert(body(name)).replace(/let (\w+)\[\];/g,'let $1=[];').replace(/MqlTick (\w+);/g,'let $1={};');
- vm.runInContext('function '+name+'('+args+'){'+code+'}',cx);
-}
-const displayed=()=>frames.at(-1)||[];
-check('actual watch-tab click publishes the new bitmap before returning',()=>{
- cx.Panel();assert(displayed().includes('当前没有本EA持仓'));
- const before=frames.length;gesture(4);
- assert.equal(cx.uiIndicators,true);assert.equal(cx.uiStatistics,false);
- assert.equal(frames.length,before+1,'watch page must call Canvas.Update');
- assert(displayed().includes('看盘工作台'));assert(displayed().includes('T哥点位'));
- assert(!displayed().includes('当前没有本EA持仓'));
- assert.equal(cx.uiHits.length,22);assert.equal(globals.get(cx.uiPrefix+'page'),2);
- gesture(81);assert.equal(cx.uiWatchTab,1);assert(displayed().includes('MA5关'));
-});
-check('watch indicator clicks and redraws publish matching state without toggling back',()=>{
- const before=frames.length;gesture(50);
- assert.equal(frames.length,before+1);assert.equal(cx.UIIndicatorWindow(0),0);
- assert(displayed().includes('MA5开'));assert(!displayed().includes('MA5关'));
- cx.OnChartEvent(4,0,0,'');cx.Panel();
- assert.equal(cx.uiIndicators,true);assert.equal(cx.UIIndicatorWindow(0),0);assert(displayed().includes('MA5开'));
- gesture(50);assert.equal(cx.UIIndicatorWindow(0),-1);assert(displayed().includes('MA5关'));
-});
-check('returning from monitor or restored watch page publishes only current-page buttons',()=>{
- for(let i=0;i<3;i++){
-  gesture(2);assert(displayed().includes('当前没有本EA持仓'));assert.equal(cx.uiHits.length,6);
-  gesture(4);assert(displayed().includes('看盘工作台'));assert.equal(cx.uiHits.length,28);
+check('all five primary pages remain mutually exclusive through native clicks',()=>{
+ resetHits();cx.uiHits=[];
+ for(const [action,x] of [[2,12],[5,78],[3,144],[4,210],[9,276]])cx.UIButton('page',x,210,58,action);
+ for(const action of [2,5,3,4,9,2]){
+  gesture(action);
+  assert.equal(cx.uiPositions,action===5);assert.equal(cx.uiStatistics,action===3);
+  assert.equal(cx.uiIndicators,action===4);assert.equal(cx.uiObserver,action===9);
  }
- cx.SaveView();cx.uiIndicators=false;cx.uiStatistics=true;cx.InitView();
- const before=frames.length;cx.Panel();assert.equal(frames.length,before+1);
- assert.equal(cx.uiIndicators,true);assert.equal(cx.uiStatistics,false);assert(displayed().includes('看盘工作台'));
-});
-check('collapsed watch page removes hidden indicator hit targets and expands with refreshed state',()=>{
- gesture(1);assert.equal(cx.uiCollapsed,true);assert.equal(cx.uiHits.length,6);
- assert(!displayed().includes('MA5关'));assert(displayed().includes('看盘页 · 指标显示设置'));
- gesture(1);assert.equal(cx.uiCollapsed,false);assert.equal(cx.uiHits.length,28);assert(displayed().includes('MA5关'));
 });
 
-check('monitor page presents AI reference independently of the old map and daily-limit caption',()=>{
- cx.读取AI即时策略=true;cx.aiReady=true;cx.AIPlanCaption=()=>'AI即时：BUY 4160 / SELL 4175';
- cx.ViewAction(2);assert(displayed().includes('AI即时：BUY 4160 / SELL 4175'));
- assert(!displayed().some(v=>v.includes('日亏损上限')));
-});
-check('instant references precede positions and map, with clear empty/active states',()=>{
- cx.aiMode='SETUP';cx.aiSourceTime=1000;cx.aiPlans=[{sign:1,level:4160,market:false},{sign:-1,level:4175,market:false}];
- cx.Panel();const frame=displayed();
- assert(frame.includes('4160.00'));assert(frame.includes('4175.00'));
- assert(frame.indexOf('T哥即时参考')<frame.indexOf('持仓明细'));
- assert(frame.indexOf('持仓明细')<frame.indexOf('完整点位地图'));
- assert(!frame.includes('可评估'));assert(!frame.includes('风险'));
-});
-console.log(checks+' production-source chart UI checks passed; native MT5 clicks not exercised.');
-
-// 可选：导出生产Panel的绘图调用，供Pillow离线排版预览；示例数据不连接终端。
-if(process.env.TGE_UI_PREVIEW){
- const out=process.env.TGE_UI_PREVIEW;fs.mkdirSync(out,{recursive:true});
- for(const m of src.matchAll(/(UI_[A-Z]+)=C'(\d+),(\d+),(\d+)'/g))cx[m[1]]=[+m[2],+m[3],+m[4]];
- let ops=[],width=560,height=640;
- const rgba=v=>Array.isArray(v)?v:[125,140,155];
- Object.assign(cx,{
-  UIRound:(x,y,w,h,c,r=8)=>ops.push({op:'rect',x,y,w,h,color:rgba(c),r}),
-  UICard:(x,y,w,h,c)=>ops.push({op:'rect',x,y,w,h,color:rgba(c),border:cx.UI_BORDER,r:8}),
-  UIText:(text,x,y,w,size,color,right=false)=>ops.push({op:'text',text:String(text),x,y,w,size,color:rgba(color),right}),
-  EnsurePanel:h=>{height=h;cx.panelHeight=h;return true;},
-  panelCanvas:{Erase:()=>{ops=[];},FillRectangle:(x,y,x2,y2,c)=>ops.push({op:'rect',x,y,w:x2-x+1,h:y2-y+1,color:rgba(c),r:0}),Update:()=>{}},
-  panelScale:1,uiCollapsed:false,uiStatistics:false,uiIndicators:false,uiPointLines:true,uiMobileMarkers:true,
-  读取AI即时策略:true,aiReady:true,aiMode:'SETUP',aiSourceTime:1000,启用真实交易:true,
-  aiPlans:[{sign:1,level:4160,market:false},{sign:-1,level:4175,market:false}],
-  levels:[4175,4185,4200,4220,4245],sourceKind:'teacher',sourceTime:900,feedActive:true,
-  TimeToString:(_,flags)=>flags===4?'22:31':flags===1?'09:42:16':'10.13 09:00',
-  SyncStatus:()=>'飞书同步正常 · 北京时间 09:42:15',ExecutionBlock:()=>'',
-  FreshQuote:q=>Object.assign(q,{bid:4164,ask:4164.2}),markerStatus:'已同步5条',
-  AIPlanCaption:()=> 'AI已校验原文方向 · 参考不等于已成交',
-  AccountInfoString:()=>'USC',trend:1,
-  entryView:{ready:true,reaction:false,direction:1,level:4160,distance:4,bar:1000},
-  reason:'等待点位附近的M1收线反应',
-  uiIndicatorNotice:'已收盘值显示 · 指标不改变交易策略',
-  PositionProgress:()=>'首批 +5.00 减半 · 当前尚未达到首批目标',
-  POSITION_VOLUME:1,POSITION_PROFIT:2,POSITION_SWAP:3,POSITION_SL:4,POSITION_TP:5,
-  POSITION_TYPE:6,POSITION_TYPE_BUY:0,POSITION_PRICE_OPEN:7,POSITION_IDENTIFIER:8,
-  OwnSelected:()=>true,PositionSelectByTicket:()=>true
+check('closing point lines deletes all owned lines and price labels, and timer redraw cannot restore them',()=>{
+ const drawn=new Map([['user.support',{}],['autotrade #1',{}]]);
+ const x=vm.createContext({uiPointLines:true,levels:[4175,4182,4190,4222],VIEW:'TGE_',feedActive:false,
+  _Symbol:'XAUUSD.c',_Period:5,_Digits:2,ArraySize:a=>a.length,IntegerToString:String,DoubleToString:(v,n)=>v.toFixed(n),
+  OBJ_HLINE:1,OBJ_LABEL:2,OBJPROP_COLOR:3,OBJPROP_STYLE:4,STYLE_SOLID:0,OBJPROP_WIDTH:5,
+  OBJPROP_BACK:6,OBJPROP_SELECTABLE:7,OBJPROP_TIMEFRAMES:8,OBJ_ALL_PERIODS:2097151,
+  OBJPROP_TEXT:9,OBJPROP_CORNER:10,CORNER_RIGHT_UPPER:1,OBJPROP_ANCHOR:11,ANCHOR_RIGHT_LOWER:2,
+  OBJPROP_XDISTANCE:12,OBJPROP_YDISTANCE:13,OBJPROP_FONTSIZE:14,OBJPROP_FONT:15,OBJPROP_TOOLTIP:16,
+  CHART_HEIGHT_IN_PIXELS:1,ChartGetInteger:()=>1000,iTime:()=>1,
+  ChartTimePriceToXY:()=>({x:500,y:100,ok:true}),
+  ObjectFind:(_,n)=>drawn.has(n)?0:-1,ObjectCreate:(_,n,t)=>{drawn.set(n,{type:t});return true;},
+  ObjectDelete:(_,n)=>drawn.delete(n),ObjectMove:(_,n,i,t,p)=>{drawn.get(n).price=p;return true;},
+  ObjectSetInteger:(_,n,p,v)=>{drawn.get(n)[p]=v;return true;},
+  ObjectSetString:(_,n,p,v)=>{drawn.get(n)[p]=v;return true;}
  });
- let selected=0,positions=[];
- cx.PositionSelectByTicket=t=>{selected=t-810001;return selected>=0&&selected<positions.length;};
- cx.PositionsTotal=()=>positions.length;
- cx.PositionGetTicket=i=>{selected=i;return 810001+i;};
- cx.PositionGetDouble=k=>({1:.02,2:positions[selected]||0,3:0,4:4150,5:4170,7:4160})[k]||0;
- cx.PositionGetInteger=k=>k===6?0:810001+selected;
- function render(name){cx.Panel();
-  for(const h of cx.uiHits)assert(h.x>=0&&h.y>=0&&h.x+h.w<=width&&h.y+h.h<=height,name+' hit bounds');
-  for(let i=0;i<cx.uiHits.length;i++)for(let j=i+1;j<cx.uiHits.length;j++){
-   const a=cx.uiHits[i],b=cx.uiHits[j];
-   assert(a.x+a.w<=b.x||b.x+b.w<=a.x||a.y+a.h<=b.y||b.y+b.h<=a.y,name+' hit overlap');
-  }
-  fs.writeFileSync(out+'/'+name+'.json',JSON.stringify({width,height,ops,hits:cx.uiHits},null,2));}
- render('monitor');
- positions=[2.48,-1.26,6.42];render('positions');
- positions=[];cx.aiPlans.push({sign:1,level:4140,market:false},{sign:-1,level:4190,market:true});render('four-plans');
- cx.aiReady=false;cx.aiMode='WAIT';cx.aiPlans=[];cx.reason='AI消息待核对，等待有效方向';cx.AIPlanCaption=()=> '来源已编辑 · 等待重新解释';render('waiting');
- cx.uiCollapsed=true;render('compact');cx.uiCollapsed=false;
- cx.uiIndicators=true;cx.uiWatchTab=0;render('presets');cx.uiWatchTab=1;render('indicators');
-}
+ const code=convert(body('DrawLevels')).replace(
+  'ChartTimePriceToXY(0,0,iTime(_Symbol,_Period,0),levels[i],px,py)',
+  '((r)=>{px=r.x;py=r.y;return r.ok;})(ChartTimePriceToXY())');
+ vm.runInContext('function DrawLevels(){'+code+'}',x);
+ x.DrawLevels();assert.equal(drawn.size,10);
+ x.uiPointLines=false;x.DrawLevels();assert.equal(drawn.size,2);
+ x.levels.push(4160);x.DrawLevels();x.DrawLevels();assert.equal(drawn.size,2);
+ x.uiPointLines=true;x.DrawLevels();assert.equal(drawn.size,12);
+ assert(drawn.has('TGE_L4'));assert(drawn.has('TGE_PRICE4'));
+ assert.equal(drawn.get('TGE_L4').price,4160);
+ x.levels=[];x.DrawLevels();assert.equal(drawn.size,2);
+ assert(drawn.has('user.support'));assert(drawn.has('autotrade #1'));
+});
+
+console.log(checks+' production-source chart UI checks passed; native MT5 clicks not exercised.');

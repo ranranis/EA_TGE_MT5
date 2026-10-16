@@ -24,7 +24,7 @@ const cx=vm.createContext({Math,MathMax:Math.max,MathMin:Math.min,MathRound:Math
  {kind:'DIRECT',sign:-1,level:4180,priority:90,confirmed:1,status:'等待触价'},
  {kind:'ROLE',sign:-1,level:4170,priority:55,confirmed:1,status:'等待触价'}],
  levels:[4100,4120,4130,4145,4162,4170,4180,4190,4200,4222],feedActive:true,aiReason:'正常',
- PlanExecutable:()=>true,PlanAgeCaption:()=>'参考',AIChannelReady:()=>true,AIPlanCaption:()=>'同步正常',
+ PlanExecutable:()=>true,PlanAgeCaption:()=>'参考',AIChannelReady:()=>true,AIMapSynced:()=>true,AIPlanCaption:()=>'同步正常',
  PointRoleCaption:()=>'参考',MapLifeCaption:()=>'地图参考',StringFind:(s,q)=>s.indexOf(q),
  TimeToString:()=>'00:40',TimeGMT:()=>0,TIME_SECONDS:1,TIME_MINUTES:2,
  IntegerToString:String,DoubleToString:(v,n)=>v.toFixed(n),StringFormat:()=>'参考点位',
@@ -52,7 +52,7 @@ function render(count,page){positions=Array.from({length:count},(_,i)=>100+i);cx
  return texts.filter(t=>t.startsWith('#')).map(t=>+t.match(/^#(\d+)/)[1]);}
 let planDims;
 for(const count of [0,1,4,5,10]){cx.uiPositions=false;assert.deepEqual(render(count,0),[]);assert(texts.includes('点位计划'));
- assert(buttons.some(b=>b.a===8&&b.s==='编辑点位'));
+ assert(buttons.some(b=>b.a===8&&b.s==='编辑/删除点位'));
  if(planDims)assert.deepEqual(dims,planDims);else planDims=[...dims];
  cx.uiPositions=true;let seen=[];for(let p=0;p<Math.max(1,Math.ceil(count/4));p++){
   seen.push(...render(count,p));assert(!texts.includes('点位计划'));assert.equal(dims[0],654);assert.equal(dims[1],planDims[1]);}

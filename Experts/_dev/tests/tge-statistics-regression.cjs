@@ -241,10 +241,11 @@ check('production mouse events link both plots, review and scope reset at multip
   vm.runInContext('function '+name+'('+args+'){'+convert(definition(name))+'}',cx);
  Object.assign(cx,{SyncHistoryLayer:()=>{},uiHistoryNextScan:0,UIViewMask:()=>0,SaveView:()=>{},Panel:()=>render(cx.statsDetail),panelReady:true,
   UIWidthFactor:()=>1,UIWidth:()=>560,uiLogicalWidth:560,uiX:8,uiY:24,uiDragging:false,uiLeftWasDown:false,uiPressedAction:0,
-  CHARTEVENT_MOUSE_MOVE:1,CHARTEVENT_CHART_CHANGE:2,StringToInteger:Number});
+  uiClickTracked:false,PAPER_ARMS:5,PAPER_PAGE_SIZE:5,paperPressedId:0,paperRowIds:[0,0,0,0,0],PaperClearReview:()=>{},ChartRedraw:()=>{},VIEW:'TGE_',
+  CHARTEVENT_OBJECT_CLICK:3,CHARTEVENT_MOUSE_MOVE:1,CHARTEVENT_CHART_CHANGE:2,StringToInteger:Number});
  for(const scale of [.75,1,1.5]){
   sample([10,-20,7]);cx.panelScale=scale;render(2);
-  const click=(x,y)=>{cx.OnChartEvent(1,8+x*scale,24+y*scale,'1');cx.OnChartEvent(1,8+x*scale,24+y*scale,'0');};
+  const click=(x,y)=>{cx.OnChartEvent(1,8+x*scale,24+y*scale,'1');cx.OnChartEvent(1,8+x*scale,24+y*scale,'0');cx.OnChartEvent(3,8+x*scale,24+y*scale,'TGE_CANVAS');};
   click(cx.StatsPointX(0,3),320);assert.equal(cx.StatsSelectedIndex(),0);
   click(cx.StatsPointX(1,3),470);assert.equal(cx.StatsSelectedIndex(),1);
   click(450,580);assert.equal(cx.statsDetail,3);assert.equal(cx.StatsSelectedIndex(),1);
