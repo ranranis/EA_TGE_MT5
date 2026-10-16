@@ -79,7 +79,7 @@ test('写入失败不发布，重试发布冻结的快照',()=>{
 test('实际研判页面空态/历史态布局和操作不重叠',()=>{
  install('ObserverLabel','r');install('ObserverEvidenceLabel','evidence');install('ObserverPage','');
  let bounds=[],buttons=[],texts=[];
- Object.assign(x,{tradeMode:false,observerOffset:0,observerHealth:'ready',reviewNotice:'',
+ Object.assign(x,{tradeMode:false,uiPaperSummary:false,observerOffset:0,observerHealth:'ready',reviewNotice:'',
    UI_TEXT:0,UI_WARN:1,UI_ACCENT:2,UI_ROW:3,UI_MUTED:4,UI_DIM:5,UI_SELL:6,
    _Digits:2,IntegerToString:String,DoubleToString:(v,n)=>v.toFixed(n),
    TIME_DATE:1,TIME_MINUTES:2,TimeToString:()=> '2026.10.16 12:00',

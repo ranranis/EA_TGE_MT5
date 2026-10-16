@@ -1,5 +1,5 @@
-﻿#property strict
-#property version "1.70"
+#property strict
+#property version "1.71"
 #property description "T哥点位：积极入场、分级保护、结构化退出；固定0.02手，独立Magic。"
 #include <Trade/Trade.mqh>
 #include <Canvas/Canvas.mqh>
@@ -32,6 +32,14 @@ enum TgeHoldingMode
    TGE_HOLD_STRUCTURE=1,// 新版结构：积极入场、分级保护、结构退出
    TGE_HOLD_FIXED=2     // 固定TP5 / SL10：全量止盈，不分批
 };
+enum TgeEntryMode
+{
+   TGE_ENTRY_COMPAT=0,   // 兼容原设置：原来随持单策略变化的入场检查
+   TGE_ENTRY_TOUCH=1,    // 原触价检查；独立于持单策略
+   TGE_ENTRY_ADAPTIVE=2  // 原行情/消息保护检查；独立于持单策略
+};
+input group "实盘入场 · 新研判暂不接管实盘"
+input TgeEntryMode 入场策略=TGE_ENTRY_COMPAT;
 input group "持单策略 · 切换只影响新开仓"
 input TgeHoldingMode 持单策略=TGE_HOLD_STRUCTURE;
 bool 启用积极持单=false; // 由下拉选项派生，兼容既有新策略调用链。
@@ -64,6 +72,12 @@ input int    观察回看分钟=60;           // 连续已收盘M1，20至240
 input int    观察边界最少反应次数=2;    // 上下沿分别满足；反应至少间隔3根K
 input double 观察收回ATR倍数=0.25;      // 实验阈值，尚未验证盈利能力
 input double 观察最小区间ATR倍数=2.0;
+
+input group "自动模拟对比 · 不发送订单"
+input bool   启用自动模拟对比=true;
+input double 模拟每手往返费用=0.0;     // 账户货币/手；0表示费用未配置，不代表免费
+input double 模拟单边滑点价格=0.0;     // 每次进出均作不利滑点，价格差
+// 两组固定使用同一0.02手、TP5/SL10，最长持有60分钟；不继承实盘持单设置。
 
 input group "手机点位 TP 标记"
 input bool   启用手机标记挂单=false;      // 首次默认状态；之后由面板记忆开关，开启会创建真实0.01手标记挂单
@@ -1203,6 +1217,7 @@ void CloseViewIndicators()
 }
 
 #include "Include/View/TgeEntryObserver.mqh"
+#include "Include/Trading/TgePaperTrading.mqh"
 
 void SaveView()
 {
@@ -1422,6 +1437,7 @@ void ViewAction(const int action)
       else reason="无法打开编辑入口，请从监控看板进入点位编辑器";
    }
    else if(action==9) { uiObserver=true; uiStatistics=false; uiIndicators=false; uiPositions=false; }
+   else if(action==205) uiPaperSummary=!uiPaperSummary;
    else if(action>=200 && action<=204) ObserverAction(action);
    else if(action==29) ToggleTradeMode();
    else if(action>=30 && action<=42)
@@ -1703,7 +1719,7 @@ void Panel()
    panelCanvas.FillRectangle(0,0,UIXPx(559),UIPx(39),UIInk(UI_HEADER));
    string pageTitle=uiObserver ? "入场研判" : uiPositions ? "持仓明细" : uiStatistics ? "交易统计" : uiIndicators ? "看盘设置" : "T哥点位计划";
    UIText(_Symbol+" · "+pageTitle,16,10,222,11,UI_TEXT);
-   UIText("v1.70",242,13,40,8,UI_DIM);
+   UIText("v1.71",242,13,40,8,UI_DIM);
    UIText(TimeToString(TimeGMT()+8*3600,TIME_SECONDS),286,12,100,10,UI_MUTED,true);
    UIButton(uiCollapsed ? "+" : "−",396,7,30,1);
    UIButton(tradeMode ? "交易模式" : "观察模式",434,7,110,29,tradeMode);
@@ -1870,13 +1886,18 @@ void Panel()
    string gate=ExecutionBlock();
    if(gate=="") gate=AIChannelReady() ? "按优先级等待触价" : aiReason;
    if(!LegacyLimitsClear()) gate="旧限价单迁移对账中";
-   UIText(启用积极持单 ? AdaptiveCaption() :
-          持单策略==TGE_HOLD_FIXED ? "新开仓：固定TP5 / SL10 · 全量退出" : "新开仓：旧版分批持单",16,height-43,526,8,UI_DIM);
+   UIText("实盘入场："+(EffectiveEntryMethod()==1 ? "原行情保护" : "原触价检查")+
+          (入场策略==TGE_ENTRY_COMPAT ? "（兼容）" : "（独立）")+" · 持单："+
+          (启用积极持单 ? "结构退出" : 持单策略==TGE_HOLD_FIXED ? "TP5/SL10" : "旧版分批"),16,height-43,526,8,UI_DIM);
    UIText("执行 · "+gate,16,height-25,526,9,pending.kind!=0 ? UI_WARN : UI_MUTED);
    panelCanvas.Update();
 }
 int OnInit()
 {
+   if(入场策略!=TGE_ENTRY_COMPAT && 入场策略!=TGE_ENTRY_TOUCH && 入场策略!=TGE_ENTRY_ADAPTIVE)
+      return INIT_PARAMETERS_INCORRECT;
+   if(!MathIsValidNumber(模拟每手往返费用) || 模拟每手往返费用<0 ||
+      !MathIsValidNumber(模拟单边滑点价格) || 模拟单边滑点价格<0) return INIT_PARAMETERS_INCORRECT;
    if(持单策略!=TGE_HOLD_LEGACY && 持单策略!=TGE_HOLD_STRUCTURE && 持单策略!=TGE_HOLD_FIXED)
       return INIT_PARAMETERS_INCORRECT;
    启用积极持单=持单策略==TGE_HOLD_STRUCTURE;
@@ -1921,7 +1942,7 @@ int OnInit()
    InitAdaptive(); RefreshAdaptiveMarket(); RefreshAdaptiveHistory(); RefreshPointStructure(); RefreshAdaptiveCalendar();
    LifePoll();
    MqlTick q; bool fresh=FreshQuote(q); RefreshPlanValidity(q,fresh,true);
-   InitObserver(); RefreshObserver();
+   InitObserver(); RefreshObserver(); InitPaper();
    EventSetTimer(1); Panel(); SyncHistoryLayer();
    return INIT_SUCCEEDED;
 }
@@ -1935,7 +1956,7 @@ void OnTimer()
    if(fresh) for(int i=0;i<ArraySize(aiPlans);i++) TeacherEntryAllowed(i,q);
    Reconcile();
    SyncTeacherLimits(); Manage();
-   LifePoll(); ReviewNavigate(); RefreshObserver();
+   LifePoll(); ReviewNavigate(); RefreshObserver(); PaperPoll();
    checkingMinute=iTime(_Symbol,PERIOD_M1,1);
    DecisionLog("EVALUATE",reason);
    SyncTgeMobileMarkers(); SyncHistoryLayer(); Panel(); busy=false;
@@ -2007,6 +2028,7 @@ void OnChartEvent(const int id,const long &lparam,const double &dparam,const str
 void OnDeinit(const int why)
 {
    EventKillTimer();
+   StopPaper();
    LifePoll(); LifeFlush(); ReviewReturnLive(false);
    RestoreHistoryLayer(); StopTgeMobileMarkers();
    if(uiInitialized)

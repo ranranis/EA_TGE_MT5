@@ -1,4 +1,4 @@
-﻿#ifndef TGE_AI_SIGNALS_MQH
+#ifndef TGE_AI_SIGNALS_MQH
 #define TGE_AI_SIGNALS_MQH
 // TGA7携带原始时间/明确重申时间；有效性由EA计算，不由AI判断行情。
 struct AIPlan
@@ -390,23 +390,63 @@ void UpdateTeacherVisits(const MqlTick &q)
       else if(q.ask<aiPlans[i].level-TEACHER_BAND) aiPlans[i].approach=-1;
    }
 }
-bool TeacherEntryAllowed(const int i,const MqlTick &q)
+// method: 0原触价，1原行情保护，2区间反应（只供模拟）。
+int EffectiveEntryMethod()
 {
+   if(入场策略==TGE_ENTRY_TOUCH) return 0;
+   if(入场策略==TGE_ENTRY_ADAPTIVE) return 1;
+   return 启用积极持单 ? 1 : 0;
+}
+string EntrySourceReason(const int i)
+{
+   if(!AIChannelReady()) return "消息同步中";
+   if(aiPlans[i].kind=="WATCH") return "仅供参考，不作为入场";
+   if(!读取AI即时策略 && aiPlans[i].kind!="MAP") return "即时点位读取关闭";
+   if(aiPlans[i].feedState!="READY") return "点位已撤销、过期或存在冲突";
+   if(aiPlans[i].expires<=TimeGMT()) return "点位已到期";
+   if(aiPlans[i].sleeping || aiPlans[i].hardStopped) return "点位休眠或已触及明确止损";
+   return "";
+}
+string UnifiedEntryStatus(const int i,const MqlTick &q,const int method,const bool live)
+{
+   // 模拟不读取真实单的消费、持仓数量或连亏结果，避免两组被实盘交易污染。
+   if(!live)
+   {
+      string source=EntrySourceReason(i); if(source!="") return source;
+      if(q.ask-q.bid>最大点差价格) return "点差过大";
+      datetime after=0; string news=AdaptiveNewsState(TimeCurrent(),after);
+      if(news!="") return news;
+      if(TimeCurrent()<adaptiveShockUntil) return "急涨急跌，暂等稳定";
+      if(method==2) return ObserverEntryStatus(i,q,after);
+      int side=PlanSign(i);
+      if(side==0) return "等待接近点位";
+      if(!InTeacherBand(side>0 ? q.ask : q.bid,aiPlans[i].level)) return "等待接近点位";
+      // 两组使用相同消息/冲击恢复门槛；不沿用真实仓位的连亏冷却。
+      if(TimeCurrent()<adaptiveRecoverUntil) after=(datetime)MathMax(after,adaptiveShockUntil);
+      if(after>0 && !AdaptiveConfirmed(side,aiPlans[i].level,after)) return "等待消息或冲击后的新反应";
+      return "触价候选";
+   }
+
    int sign=PlanSign(i); double entry=sign>0 ? q.ask : q.bid;
    string status=""; double speed=0,oneway=0,pullback=0;
    if(!AIChannelReady() || (!读取AI即时策略 && aiPlans[i].kind!="MAP")) status="来源未就绪";
-   else if(!PlanExecutable(i)) status=PlanLifeReason(i);
+   else if(live && !PlanExecutable(i)) status=PlanLifeReason(i);
    else if(sign==0) status="等待从点位上方或下方接近";
    else if(!InTeacherBand(entry,aiPlans[i].level)) status="等待进入±1.00区域";
    else if(启用点位结构失效 && aiPlans[i].sign!=0 && AdaptiveMarketFresh() &&
            aiPlans[i].sign*((aiPlans[i].sign>0 ? q.bid : q.ask)-aiPlans[i].level)<-MathMax(TEACHER_BAND,adaptiveATR*点位破位缓冲ATR倍数))
       status="刺穿暂缓：等待收回";
-   else if(aiPlans[i].priority<ZonePriority(q)) status="本区域更高优先级计划优先";
-   else if(SameOpportunity(sign,aiPlans[i].level) || SameOpportunity(-sign,aiPlans[i].level)) status="本次触及已消费，离开4点5秒后重入";
-   else if(Load(SharedVisitKey(aiPlans[i].level,sign)+"r")>TimeGMT()) status="拒绝后短暂冷却";
+   else if(live && aiPlans[i].priority<ZonePriority(q)) status="本区域更高优先级计划优先";
+   else if(live && (SameOpportunity(sign,aiPlans[i].level) || SameOpportunity(-sign,aiPlans[i].level))) status="本次触及已消费，离开4点5秒后重入";
+   else if(live && Load(SharedVisitKey(aiPlans[i].level,sign)+"r")>TimeGMT()) status="拒绝后短暂冷却";
    else if(!TickImpact(sign,q.time_msc,speed,oneway,pullback)) status="采样中：至少4个tick覆盖1秒";
    else if(speed>=逆向冲击速度 && oneway>=冲击单向比例 && pullback<恢复回拉价格) status="逆向连续冲穿暂缓";
-   else status=启用积极持单 ? AdaptiveEntryStatus(i,q) : "触价候选";
+   else status=method==1 ? AdaptiveEntryStatus(i,q) : "触价候选";
+   return status;
+}
+bool TeacherEntryAllowed(const int i,const MqlTick &q)
+{
+   string status=UnifiedEntryStatus(i,q,EffectiveEntryMethod(),true);
    aiPlans[i].status=status;
    return status=="触价候选" || status=="M1确认候选";
 }
@@ -438,7 +478,7 @@ bool AIMarketSignal(Candidate &out)
    out.bar=TimeCurrent(); out.originHash=Hash(aiPlans[best].id); out.aiKey=SharedVisitKey(out.level,out.direction);
    out.exitSL=aiPlans[best].sl; out.exitFirst=aiPlans[best].first; out.exitTP=aiPlans[best].tp; out.exitBE=aiPlans[best].breakeven;
    out.method="优先级"+IntegerToString(aiPlans[best].priority)+" "+aiPlans[best].kind+" ["+aiPlans[best].source+"]";
-   if(启用积极持单) out.method+=" · "+aiPlans[best].status;
+   if(EffectiveEntryMethod()==1) out.method+=" · "+aiPlans[best].status;
    reason=out.method; entryView.level=out.level; entryView.direction=out.direction; entryView.method=out.method;
    return true;
 }

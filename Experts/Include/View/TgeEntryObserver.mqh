@@ -13,7 +13,8 @@ datetime observerLastBar=0,observerRetry=0;
 string observerHealth="等待首次收盘行情";
 bool observerHasPending=false;
 TgeObservation observerPending;
-bool uiObserver=false;
+bool uiObserver=false,uiPaperSummary=true;
+datetime observerLiveFrom=0;
 
 // 全部参数均来自当时快照；bars[0]明确是刚收盘K，绝不用未收盘K或未来行情。
 void ObserverClassify(const MqlRates &bars[],const double lower,const double upper,
@@ -147,6 +148,7 @@ void ObserverMark(const TgeObservation &r)
 }
 void InitObserver()
 {
+   observerLiveFrom=TimeGMT();
    if(!启用入场观察实验) { observerHealth="入场观察实验已关闭"; return; }
    int h=FileOpen(ObserverPath(),FILE_READ|FILE_TXT|FILE_ANSI|FILE_COMMON|FILE_SHARE_READ,0,CP_UTF8);
    if(h==INVALID_HANDLE) return;
@@ -247,6 +249,38 @@ void RefreshObserver()
    ObserverFlush();
 
 }
+// 消息方向只作约束：不支持做多时不能因此自动反手做空。
+int ObserverDirection(const int i)
+{
+   int n=ArraySize(entryObservations); if(n==0) return 0;
+   TgeObservation r=entryObservations[n-1];
+   if(r.sign==0 || r.utc<observerLiveFrom || aiPlans[i].sign*r.sign<0) return 0;
+   double edge=r.sign>0 ? r.lower : r.upper;
+   return MathAbs(aiPlans[i].level-edge)<TickSize()*0.5 ? r.sign : 0;
+}
+string ObserverEntryStatus(const int i,const MqlTick &q,datetime after)
+{
+   if(!启用入场观察实验) return "请开启入场观察实验以运行新方法";
+   int n=ArraySize(entryObservations);
+   if(n==0 || !AdaptiveMarketFresh()) return "等待新的一分钟行情判断";
+   TgeObservation r=entryObservations[n-1];
+   if(observerHasPending || r.utc<observerLiveFrom || q.time<r.bar+60 || q.time>=r.bar+120)
+      return "等待新的已保存判断";
+   if(r.sign==0) return r.why;
+   int sign=ObserverDirection(i);
+   if(sign==0) return "当前点位或消息方向与价格反应不一致";
+   string evidence=aiPlans[i].kind+"/"+IntegerToString(aiPlans[i].sign)+"/"+aiPlans[i].id+"/"+aiPlans[i].source;
+   if(evidence!=(sign>0 ? r.lowerEvidence : r.upperEvidence) ||
+      aiPlans[i].confirmed!=(sign>0 ? r.lowerConfirmed : r.upperConfirmed))
+      return "点位来源已变化，等待重新判断";
+   if(TimeCurrent()<adaptiveRecoverUntil) after=(datetime)MathMax(after,adaptiveShockUntil);
+   if(after>0 && r.bar<after) return "等待消息或冲击结束后的新反应";
+   double entry=sign>0 ? q.ask : q.bid;
+   if(MathAbs(entry-aiPlans[i].level)>TEACHER_BAND+MathMax(TickSize()*2,r.atr*观察收回ATR倍数))
+      return "已离开入场区域，不追价";
+   if(sign*(entry-aiPlans[i].level)<=0) return "价格又越过边界，继续等待";
+   return "区间反应候选";
+}
 string ObserverLabel(const TgeObservation &r)
 {
    if(r.state=="BUY_WATCH") return "↑ 多头观察候选 · 非订单";
@@ -266,6 +300,8 @@ string ObserverEvidenceLabel(const string evidence)
 }
 void ObserverPage()
 {
+   if(uiPaperSummary) { PaperPanel(); return; }
+   UIButton("自动成绩单",420,94,124,205);
    UIText("入场研判 · 只观察",16,94,300,17,UI_TEXT);
    UIText(tradeMode ? "原EA处于交易模式；本页研判不会替它下单或拦单" :
           "原EA处于观察模式；本页只计算和记录",16,125,528,9,tradeMode ? UI_WARN : UI_ACCENT);

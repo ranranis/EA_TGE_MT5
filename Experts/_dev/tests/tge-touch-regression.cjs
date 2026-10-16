@@ -26,7 +26,7 @@ function plan(o={}){const confirmed=o.confirmed??990;const mode=o.mode??'REACTIO
 function env(options={}){
  let now=1000;const memory=options.memory||{},calls=[];
  const x=vm.createContext({
-   启用积极持单:false,adaptiveATR:0,持单策略:0,TGE_HOLD_FIXED:2,启用点位结构失效:false,点位破位缓冲ATR倍数:.25,点位破位确认根数:2,点位刺穿冷却秒数:60,点位破位冷却秒数:180,
+   入场策略:0,TGE_ENTRY_COMPAT:0,TGE_ENTRY_TOUCH:1,TGE_ENTRY_ADAPTIVE:2,启用积极持单:false,adaptiveATR:0,持单策略:0,TGE_HOLD_FIXED:2,启用点位结构失效:false,点位破位缓冲ATR倍数:.25,点位破位确认根数:2,点位刺穿冷却秒数:60,点位破位冷却秒数:180,
   aiPlans:options.plans||[plan()],aiReady:true,aiGenerated:now,aiReason:'',aiMode:'SETUP',identity:'',aiIdentity:'TGA6',aiSource:'',aiSourceTime:990,
   DIRECT_MAX_AGE:86400,MARKET_MAX_AGE:180,healthOK:true,healthPaused:false,healthBeat:now,healthSync:now,healthCheckpoint:now,healthMaxAge:120,读取AI即时策略:true,
    每次开仓手数:.02,最大同时持仓:3,最大点差价格:.5,挂单最大离价:50,保险价格距离:10,首批止盈价格距离:5,尾仓目标价格距离:10,连亏区域冷却分钟:30,
@@ -66,7 +66,7 @@ function env(options={}){
  ['Number','text,decimal=false'],['AIChannelReady',''],['InvalidAI','why'],['ReadAISetups',''],
  ['RememberFastTick','q'],['TickImpact','sign,now',true],['AIKeyFromHash','hash,level,sign'],
  ['SharedVisitKey','level,sign'],['SameOpportunity','sign,level'],['RememberSharedVisit','level,sign'],['UpdateSharedVisit','q'],['MergeOpportunity','sign,level'],
-  ['PlanLifeKey','i'],['PlanLifeReason','i'],['PlanExecutable','i'],['StopPlanReference','i,why'],['RefreshPlanValidity','q,quoteOK,persist=false'],['RefreshPointStructure',''],['InTeacherBand','entry,level'],['PlanSign','i'],['PlanNear','i,q'],['ZonePriority','q'],['UpdateTeacherVisits','q'],['TeacherEntryAllowed','i,q'],
+  ['PlanLifeKey','i'],['PlanLifeReason','i'],['PlanExecutable','i'],['StopPlanReference','i,why'],['RefreshPlanValidity','q,quoteOK,persist=false'],['RefreshPointStructure',''],['InTeacherBand','entry,level'],['PlanSign','i'],['PlanNear','i,q'],['ZonePriority','q'],['UpdateTeacherVisits','q'],['EffectiveEntryMethod',''],['EntrySourceReason','i'],['UnifiedEntryStatus','i,q,method,live'],['TeacherEntryAllowed','i,q'],
  ['AIMarketSignal','out'],['Open','signal'],['ExitCandles','bars,sign,opened,period,now'],['ExitRhythm','sign,opened'],
  ['ExitKey','id'],['FirstExit','id,sign,open,tp'],['PartialRemaining','initial,closed,remaining'],['RefreshEntryExits','key,sign'],['RequestExit','ticket,id,volume,full,why'],['Manage',''],['LegacyLimitsClear','']])install(x,name,args,ref);
  return {x,memory,calls,setNow:n=>now=n};
@@ -79,6 +79,14 @@ function ticks(x,prices,sign=1){
 let checks=0;function test(n,f){f();checks++;console.log('PASS '+n);}
 for(const sign of [1,-1])for(const gap of [-1,1,-1.001,1.001])test(`触价边界 ${sign}/${gap}`,()=>{
  const {x}=env({plans:[plan({sign})]});ticks(x,Array(4).fill(4175+gap),sign);assert.equal(x.AIMarketSignal({}),Math.abs(gap)<=1);
+});
+test('入场和持单独立选择，提交前复核使用相同入场方式',()=>{
+ const e=env();ticks(e.x,[4175,4175,4175,4175]);let checks=0;
+ e.x.AdaptiveEntryStatus=()=>{checks++;return 'M1确认候选';};
+ e.x.入场策略=2;const c={};assert(e.x.AIMarketSignal(c));e.x.Open(c);
+ assert(checks>=2);assert.equal(e.calls[0][0],'open');assert.equal(e.x.pending.adaptive,false);
+ const t=env();ticks(t.x,[4175,4175,4175,4175]);t.x.入场策略=1;t.x.启用积极持单=true;
+ t.x.AdaptiveEntryStatus=()=>{throw Error('触价模式不调用入场行情检查');};assert(t.x.AIMarketSignal({}));
 });
 test('地图从上方跌向下沿做多，不等M1',()=>{const {x}=env({plans:[plan({kind:'MAP',priority:5,sign:0})]});x.UpdateTeacherVisits({bid:4179,ask:4179.1});ticks(x,[4175.8,4175.8,4175.7,4175.7]);const c={};assert(x.AIMarketSignal(c));assert.equal(c.direction,1);});
 test('地图从下方涨向上沿做空',()=>{const {x}=env({plans:[plan({kind:'MAP',priority:5,sign:0})]});x.UpdateTeacherVisits({bid:4171,ask:4171.1});ticks(x,[4174.2,4174.3,4174.3,4174.4],-1);const c={};assert(x.AIMarketSignal(c));assert.equal(c.direction,-1);});

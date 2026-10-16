@@ -19,7 +19,7 @@ const cx=vm.createContext({Math,MathMax:Math.max,MathMin:Math.min,MathRound:Math
  ArraySize:a=>a.length,ArrayResize:(a,n)=>a.length=n,ArraySort:a=>a.sort((a,b)=>a-b),ArrayReverse:a=>a.reverse(),
  uiObserver:false,ObserverPage:()=>{},uiPositionPage:0,uiPositions:false,uiStatistics:false,uiIndicators:false,uiCollapsed:false,uiHits:[],
  uiMobileMarkers:false,uiPointLines:true,markerStatus:'手机TP关',tradeMode:false,
- 启用积极持单:true,持单策略:1,TGE_HOLD_FIXED:2,AdaptiveCaption:()=>'结构持单',
+ 入场策略:0,TGE_ENTRY_COMPAT:0,EffectiveEntryMethod:()=>1,启用积极持单:true,持单策略:1,TGE_HOLD_FIXED:2,AdaptiveCaption:()=>'结构持单',
  aiPlans:[{kind:'DIRECT',sign:1,level:4120,priority:90,confirmed:1,status:'等待触价'},
  {kind:'DIRECT',sign:-1,level:4180,priority:90,confirmed:1,status:'等待触价'},
  {kind:'ROLE',sign:-1,level:4170,priority:55,confirmed:1,status:'等待触价'}],
