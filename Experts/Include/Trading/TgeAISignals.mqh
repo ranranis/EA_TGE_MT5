@@ -15,18 +15,19 @@ struct AIPlan
 AIPlan aiPlans[];
 string aiMode="WAIT",aiReason="等待TGA7执行快照",aiSource="",aiIdentity="";
 datetime aiGenerated=0,aiSourceTime=0;
-bool aiReady=false;
+bool aiReady=false,aiSnapshotValid=false;
 const double TEACHER_BAND=1.00,REARM_DISTANCE=4.00;
 const int REARM_SECONDS=5;
 const int DIRECT_MAX_AGE=86400,MARKET_MAX_AGE=180;
-bool AIChannelReady()
+bool AIMapSynced()
 {
    long now=(long)TimeGMT();
-   return aiReady && healthOK && !healthPaused && aiGenerated>0 && healthBeat>0 && healthSync>0 && healthCheckpoint>0 &&
+   return aiSnapshotValid && healthOK && !healthPaused && aiGenerated>0 && healthBeat>0 && healthSync>0 && healthCheckpoint>0 &&
           aiGenerated<=now+5 && now-aiGenerated<=healthMaxAge && healthBeat<=now+5 && healthSync<=now+5 &&
           healthCheckpoint<=now+5 && now-healthBeat<=healthMaxAge && now-healthSync<=healthMaxAge && now-healthCheckpoint<=healthMaxAge;
 }
-bool InvalidAI(const string why) { aiReady=false; aiReason=why; return false; }
+bool AIChannelReady() { return aiReady && AIMapSynced(); }
+bool InvalidAI(const string why) { aiSnapshotValid=false; aiReady=false; aiReason=why; return false; }
 bool ReadAISetups()
 {
    int h=FileOpen("FeishuMT5SignalMonitor\\tge_execution_v9.csv",FILE_READ|FILE_TXT|FILE_ANSI|FILE_COMMON|FILE_SHARE_READ,0,CP_UTF8);
@@ -130,7 +131,7 @@ bool ReadAISetups()
    // 所有行通过后一次替换；坏文件停新请求，不能发布半组方向。
    ArrayResize(aiPlans,count); aiSourceTime=0;
    for(int i=0;i<count;i++) { aiPlans[i]=incoming[i]; aiSourceTime=MathMax(aiSourceTime,incoming[i].created); }
-   aiReady=head[3]=="1"; aiGenerated=generated; aiReason=head[6]; aiMode=count>0 ? "SETUP" : "WAIT";
+   aiSnapshotValid=true; aiReady=head[3]=="1"; aiGenerated=generated; aiReason=head[6]; aiMode=count>0 ? "SETUP" : "WAIT";
    string nextIdentity="TGA9|"+IntegerToString((long)Hash(signature));
    static double lastPriceMin=0,lastPriceMax=0;
    double priceMin=ChartGetDouble(0,CHART_PRICE_MIN),priceMax=ChartGetDouble(0,CHART_PRICE_MAX);

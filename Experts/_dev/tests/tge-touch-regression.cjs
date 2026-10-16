@@ -27,7 +27,7 @@ function env(options={}){
  let now=1000;const memory=options.memory||{},calls=[];
  const x=vm.createContext({
    入场策略:0,TGE_ENTRY_COMPAT:0,TGE_ENTRY_TOUCH:1,TGE_ENTRY_ADAPTIVE:2,启用积极持单:false,adaptiveATR:0,持单策略:0,TGE_HOLD_FIXED:2,启用点位结构失效:false,点位破位缓冲ATR倍数:.25,点位破位确认根数:2,点位刺穿冷却秒数:60,点位破位冷却秒数:180,
-  aiPlans:options.plans||[plan()],aiReady:true,aiGenerated:now,aiReason:'',aiMode:'SETUP',identity:'',aiIdentity:'TGA6',aiSource:'',aiSourceTime:990,
+  aiPlans:options.plans||[plan()],aiReady:true,aiSnapshotValid:true,aiGenerated:now,aiReason:'',aiMode:'SETUP',identity:'',aiIdentity:'TGA6',aiSource:'',aiSourceTime:990,
   DIRECT_MAX_AGE:86400,MARKET_MAX_AGE:180,healthOK:true,healthPaused:false,healthBeat:now,healthSync:now,healthCheckpoint:now,healthMaxAge:120,读取AI即时策略:true,
    每次开仓手数:.02,最大同时持仓:3,最大点差价格:.5,挂单最大离价:50,保险价格距离:10,首批止盈价格距离:5,尾仓目标价格距离:10,连亏区域冷却分钟:30,
   允许同机会重入:true,TEACHER_BAND:1,REARM_DISTANCE:4,REARM_SECONDS:5,冲击短窗毫秒:3000,逆向冲击速度:.6,冲击单向比例:.85,恢复回拉价格:.35,
@@ -63,7 +63,7 @@ function env(options={}){
   INVALID_HANDLE:-1,CP_UTF8:65001,FILE_READ:1,FILE_TXT:2,FILE_ANSI:4,FILE_COMMON:8,FILE_SHARE_READ:16,
  });
  for(const [name,args,ref] of [
- ['Number','text,decimal=false'],['AIChannelReady',''],['InvalidAI','why'],['ReadAISetups',''],
+ ['Number','text,decimal=false'],['AIMapSynced',''],['AIChannelReady',''],['InvalidAI','why'],['ReadAISetups',''],
  ['RememberFastTick','q'],['TickImpact','sign,now',true],['AIKeyFromHash','hash,level,sign'],
  ['SharedVisitKey','level,sign'],['SameOpportunity','sign,level'],['RememberSharedVisit','level,sign'],['UpdateSharedVisit','q'],['MergeOpportunity','sign,level'],
   ['PlanLifeKey','i'],['PlanLifeReason','i'],['PlanExecutable','i'],['StopPlanReference','i,why'],['RefreshPlanValidity','q,quoteOK,persist=false'],['RefreshPointStructure',''],['InTeacherBand','entry,level'],['PlanSign','i'],['PlanNear','i,q'],['ZonePriority','q'],['UpdateTeacherVisits','q'],['EffectiveEntryMethod',''],['EntrySourceReason','i'],['UnifiedEntryStatus','i,q,method,live'],['TeacherEntryAllowed','i,q'],
@@ -152,6 +152,17 @@ test('EA拒绝超过6个或不足5点的快照，5.00恰好合法',()=>{
  file(x,make([4180,4184.99]));assert(!x.ReadAISetups());assert(!x.AIChannelReady());
  file(x,make([4180,4185]));assert(x.ReadAISetups());assert(x.AIChannelReady());
 });
+test('报价失效快照仍加载点位与价格线，但禁止产生开仓候选',()=>{
+ const {x,setNow,calls}=env(),now=Number(csv[0].split(',')[2]);setNow(now);
+ x.healthBeat=x.healthSync=x.healthCheckpoint=now;
+ const readonly=csv.map((r,i)=>{if(i!==0)return r;const f=r.split(',');f[3]='0';f[6]='点位已同步 报价失效 暂停新单';return f.join(',');});
+ file(x,readonly);assert(x.ReadAISetups());assert(x.AIMapSynced());
+ assert(x.levels.length>0);assert(x.aiPlans.length>0);assert(!x.feedActive);assert(!x.AIChannelReady());
+ ticks(x,[4175,4175,4175,4175]);assert(!x.AIMarketSignal({}));assert.equal(calls.length,0);
+ file(x,csv.slice(0,-1));assert(!x.ReadAISetups());assert(!x.AIMapSynced());
+ file(x,csv);assert(x.ReadAISetups());assert(x.AIChannelReady());
+});
+
 test('重复心跳更新新鲜度但内容不变不重画点位线',()=>{
  const {x,setNow}=env();setNow(Number(csv[0].split(',')[2]));let draws=0;x.DrawLevels=()=>draws++;
  file(x,csv);assert(x.ReadAISetups());file(x,csv);assert(x.ReadAISetups());assert.equal(draws,1);

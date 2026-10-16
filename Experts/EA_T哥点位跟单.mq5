@@ -1,5 +1,5 @@
 #property strict
-#property version "1.79"
+#property version "1.80"
 #property description "T哥点位：积极入场、分级保护、结构化退出；固定0.02手，独立Magic。"
 #include <Trade/Trade.mqh>
 #include <Canvas/Canvas.mqh>
@@ -1727,7 +1727,7 @@ void Panel()
    panelCanvas.FillRectangle(0,0,UIXPx(559),UIPx(39),UIInk(UI_HEADER));
    string pageTitle=uiObserver ? "入场研判" : uiPositions ? "持仓明细" : uiStatistics ? "交易统计" : uiIndicators ? "看盘设置" : "T哥点位计划";
    UIText(_Symbol+" · "+pageTitle,16,10,222,11,UI_TEXT);
-   UIText("v1.79",242,13,40,8,UI_DIM);
+   UIText("v1.80",242,13,40,8,UI_DIM);
    UIText(TimeToString(TimeGMT()+8*3600,TIME_SECONDS),286,12,100,10,UI_MUTED,true);
    UIButton(uiCollapsed ? "+" : "−",396,7,30,1);
    UIButton(tradeMode ? "交易模式" : "观察模式",434,7,110,29,tradeMode);
@@ -1773,7 +1773,7 @@ void Panel()
    bool fallback=AIChannelReady() && StringFind(aiReason,"沿用已确认点位")>=0;
    color syncInk=AIChannelReady() && !fallback ? UI_ACCENT : UI_WARN;
    UIRound(434,heroY+10,98,26,UI_HEADER,5);
-   UIText(AIChannelReady() ? (fallback ? "沿用已确认" : "同步正常") : "已暂停",
+   UIText(AIChannelReady() ? (fallback ? "沿用已确认" : "同步正常") : AIMapSynced() ? "已同步·停单" : "已暂停",
           444,heroY+15,78,9,syncInk,true);
    int y=heroY+44;
    if(directRows>0)

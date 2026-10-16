@@ -25,7 +25,7 @@ class PreviewTests(unittest.TestCase):
         self.db=connect(self.home/'data/monitor.sqlite');initialize_ai(self.db);self.now=time.time()
         with self.db:
             for key,value in dict(live_since=self.now-10000,last_sync_ok=True,last_sync_at=self.now,checkpoint=self.now,
-                                  teacher_analysis={'market_ok':True,'quote':{'at':self.now,'bid':4175,'ask':4175.2},'bars':[]}).items():
+                                  teacher_analysis={'market_ok':True,'quote':{'symbol':self.c['symbols'][self.c['teacher_symbol']],'at':self.now,'bid':4175,'ask':4175.2},'bars':[]}).items():
                 set_state(self.db,key,value)
         (self.home/'status.json').write_text(json.dumps({'at':iso(self.now),'paused':False}),encoding='utf-8')
         self.message=dict(message_id='buy',chat_id='test',sender={'id':'teacher'},create_time=self.now-30,msg_type='text',content='4175做多')

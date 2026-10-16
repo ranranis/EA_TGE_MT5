@@ -35,6 +35,29 @@ class ExecutionTests(unittest.TestCase):
             return value
         process_ai_batch(self.db, self.c, Mock(interpret=reply), self.now)
 
+    def test_v9_display_survives_quote_loss_and_execution_recovers_only_with_fresh_quote(self):
+        self.scene()
+        symbol=self.c['symbols'][self.c['teacher_symbol']]
+        def export(market_ok,at,paused=False):
+            with self.db:
+                set_state(self.db,'teacher_analysis',dict(market_ok=market_ok,
+                    quote=dict(symbol=symbol,bid=4180,ask=4180.1,at=at)))
+            export_teacher_levels(self.db,self.c,paused,self.now)
+            p=self.home/'common/FeishuMT5SignalMonitor/tge_execution_v9.csv'
+            return list(csv.reader(io.StringIO(p.read_text(encoding='utf-8'))))
+        rows=export(False,self.now-3600)
+        self.assertEqual(rows[0][3],'0')
+        self.assertGreater(int(rows[0][5]),0)
+        self.assertIn('报价失效',rows[0][6])
+        self.assertLessEqual(int(rows[0][5]),6)
+        self.assertEqual(rows[-1],['END',rows[0][5]])
+        rows=export(True,self.now-3600)
+        self.assertEqual(rows[0][3],'0')  # 旧报价不能只改market_ok就变新鲜。
+        rows=export(True,self.now)
+        self.assertEqual(rows[0][3],'1')
+        rows=export(True,self.now,True)
+        self.assertEqual(rows[0][3],'0')  # 暂停仍阻断，不能被新报价覆盖。
+
     def test_status_caption_distinguishes_processing_error_and_ready(self):
         from execution_feed import ai_status_note
         with self.db:

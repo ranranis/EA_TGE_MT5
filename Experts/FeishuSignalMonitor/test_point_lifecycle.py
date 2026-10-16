@@ -151,8 +151,10 @@ class PointSelectionTests(unittest.TestCase):
     def test_expiry_watch_and_no_quote(self):
         watch=self.row('watch','WATCH','AUTO',4175,age=90000);watch[3]=0
         fresh=self.row('fresh','ROLE','BUY',4180,age=1)
-        picked,_=self.select([watch,fresh],market=False)
-        self.assertEqual(picked,[])
+        picked,value=self.select([watch,fresh],market=False)
+        self.assertEqual([float(r[5]) for r in picked],[4180])
+        self.assertFalse(value['quote_ready'])
+        self.assertIn('暂停新单',value['items'][1]['reason'])
         picked,_=self.select([watch,fresh])
         self.assertEqual([float(r[5]) for r in picked],[4180])
         self.assertEqual(expiry(watch,'',None),watch[14]+86400)
@@ -163,8 +165,9 @@ class PointSelectionTests(unittest.TestCase):
         old=self.row('old',price=4180,age=60)
         new=self.row('new',price=4182,age=1)
         self.select([old],bar=100)
-        picked,_=self.select([old,new],bar=100,market=False)
-        self.assertEqual(picked,[])
+        picked,value=self.select([old,new],bar=100,market=False)
+        self.assertEqual([float(r[5]) for r in picked],[4182])
+        self.assertFalse(value['quote_ready'])
         picked,_=self.select([old,new],bar=100)
         self.assertEqual([float(r[5]) for r in picked],[4182])
         self.assertFalse(state(self.db,'point_selection')['pending'])
@@ -180,6 +183,29 @@ class PointSelectionTests(unittest.TestCase):
         rows=[self.row(str(p),'MAP','AUTO',p) for p in range(4000,4400,5)]
         picked,_=self.select(rows,mid=4180)
         self.assertEqual(len(picked),6)
+
+    def test_quote_loss_without_new_sources_keeps_display_stable(self):
+        rows=[self.row(str(p),'MAP','AUTO',p) for p in range(4130,4231,5)]
+        original,_=self.select(rows,mid=4150)
+        for i in range(3):
+            shown,value=self.select(rows,mid=4300,now=self.now+i+1,market=False)
+            self.assertEqual(original,shown)
+            self.assertFalse(value['quote_ready'])
+
+    def test_no_quote_first_start_still_displays_six_spaced_current_points(self):
+        rows=[self.row(str(p),'MAP','AUTO',p,age=4400-p) for p in range(4130,4231,5)]
+        picked,value=self.select(rows,mid=1,market=False)
+        prices=[float(r[5]) for r in picked]
+        self.assertEqual(len(prices),6)
+        self.assertEqual(prices,[4205,4210,4215,4220,4225,4230])
+        self.assertTrue(all(b-a>=5 for a,b in zip(prices,prices[1:])))
+        self.assertTrue(value['pending']);self.assertFalse(value['quote_ready'])
+        restored,_=select_rows(self.db,self.c,self.feed(rows),self.now)
+        self.assertEqual(picked,restored)
+        # 恢复报价不必等待下一M5，即按现价重新筛选。
+        after,value=self.select(rows,mid=4150,bar=100)
+        self.assertTrue(value['quote_ready']);self.assertFalse(value['pending'])
+        self.assertNotEqual(prices,[float(r[5]) for r in after])
 
     def test_preview_does_not_change_selection_or_log(self):
         row=self.row();self.select([row])

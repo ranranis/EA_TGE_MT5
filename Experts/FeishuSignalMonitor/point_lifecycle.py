@@ -193,9 +193,13 @@ def select_rows(db,c,rows,now,persist=True):
     bar=bars[-1]['at'] if fresh and bars else (int(quote.get('at',0)//300)*300-300 if fresh else saved.get('bar',0))
     by_price={float(r[5]):r for r in accepted}
     previous=[p for p in saved.get('selected',[]) if p in by_price]
-    changed=signature!=saved.get('signature') or saved.get('pending',False)
+    version_changed=signature!=saved.get('signature')
+    changed=version_changed or saved.get('pending',False)
     if not fresh:
-        selected=previous
+        # 展示不依赖实时行情：新版本按来源/确认排序，最多6个且仍遵守间距。
+        # 无新版本先保留合法展示项，不拿过期报价计算距离。
+        selected=([float(r[5]) for r in accepted] if version_changed else
+                  previous+[float(r[5]) for r in accepted if float(r[5]) not in previous])[:POINT_LIMIT]
     elif not changed and bar==saved.get('bar'):
         selected=previous
     else:
@@ -218,12 +222,13 @@ def select_rows(db,c,rows,now,persist=True):
                     selected[selected.index(old)]=price
     selected=sorted(selected[:POINT_LIMIT])
     for p in by_price:
-        reasons[p]='当前入选' if p in selected else ('等待有效报价后筛选' if not fresh else '名额/距离：暂不采用')
+        reasons[p]=('当前入选' if fresh else '已同步展示：报价失效，暂停新单') if p in selected else (
+            '仅展示名额已满：报价恢复后按距离重排' if not fresh else '名额/距离：暂不采用')
     # 间距淘汰原因不被名额原因覆盖。
     items=[dict(price=float(r[5]),selected=float(r[5]) in selected,reason=reasons.get(float(r[5]),r[19]))
            for r in sorted(rows,key=lambda r:float(r[5]))]
     value=dict(scope=scope,signature=signature,selected=selected,mid=mid if fresh and (changed or bar!=saved.get('bar')) else saved.get('mid',mid),
-               bar=bar if fresh else saved.get('bar',0),pending=bool(changed and not fresh),limit=POINT_LIMIT,gap=POINT_GAP,items=items,events=saved.get('events',[])[:])
+               bar=bar if fresh else saved.get('bar',0),pending=not fresh,quote_ready=bool(fresh),limit=POINT_LIMIT,gap=POINT_GAP,items=items,events=saved.get('events',[])[:])
     if persist and value!=saved:
         value['events']=saved.get('events',[])[:]
         before=set(saved.get('selected',[]));after=set(selected)

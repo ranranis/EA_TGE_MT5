@@ -237,6 +237,9 @@ def execution_csv(db, c, now, paused, context, map_active, levels, ai, protocol=
             rows=lifecycle_rows(db,c,rows,now)
             rows,selection=select_rows(db,c,rows,now)
             note+=' · 点位'+str(len(rows))+'/6 · 间距≥5'
+            if not selection['quote_ready']:
+                active=False
+                note+=' · 报价失效：点位仅展示，暂停新单'
         except ValueError as ex:
             rows=[];active=False;note=str(ex)
     if protocol >= 7 and active and not rows:
