@@ -135,6 +135,7 @@ class EditorTests(unittest.TestCase):
         self.assertEqual(state(self.db,'point_editor',{}),{})
 
     def test_ranges_and_watch_override(self):
+        self.c['point_focus_distance']=500  # 此用例验证人工区间语义；远端筛选另有专门用例。
         self.export();d=empty_draft();d['inner_range']=dict(action='replace',low=4120,high=4180)
         d['outer_range']=dict(action='replace',low=4100,high=4200)
         d['levels']=[dict(id='watch',price=4180,role='watch',note='',replaces=[])]

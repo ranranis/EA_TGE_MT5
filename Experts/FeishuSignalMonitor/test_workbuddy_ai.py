@@ -83,6 +83,19 @@ class WorkBuddyTests(unittest.TestCase):
             with self.assertRaisesRegex(AIError,'未知消息'):
                 self.client.interpret([target], [], 4170, [])
 
+    def test_market_snapshot_reaches_workbuddy_without_changing_message_anchor(self):
+        self.client.current_market=dict(fresh=False,mid=None,quote=dict(bid=4164),bars=[])
+        def run(command,**kwargs):
+            data=json.loads(kwargs['input'])
+            self.assertEqual(data['market_anchor'],4180)
+            self.assertFalse(data['current_market']['fresh'])
+            self.assertIsNone(data['current_market']['mid'])
+            prompt=Path(command[command.index('--system-prompt-file')+1]).read_text(encoding='utf-8')
+            self.assertIn('不能补造点位',prompt)
+            return self.result()
+        with patch('workbuddy_ai.subprocess.run',side_effect=run):
+            self.client.interpret([],[],4180,[])
+
     def test_existing_deepseek_config_keeps_original_provider(self):
         self.assertIsInstance(create_ai_client(self.root, dict(ai_model='deepseek-flash')), DeepSeek)
         self.assertIsInstance(self.client, WorkBuddy)

@@ -148,6 +148,27 @@ POINT_LIMIT=6
 POINT_GAP=5.0
 
 
+def market_context(db,c,now):
+    """行情与消息时点锚点分离；只发送已收盘缓存，不把无效报价冒充现价。"""
+    market=state(db,'teacher_analysis',{})
+    quote=market.get('quote',{})
+    bid,ask=quote.get('bid',0),quote.get('ask',0)
+    fresh=(quote.get('symbol')==c['symbols'][c['teacher_symbol']] and
+           market.get('market_ok',False) and
+           isinstance(bid,(int,float)) and isinstance(ask,(int,float)) and
+           math.isfinite(bid) and math.isfinite(ask) and 0<bid<=ask and
+           -2<=now-quote.get('at',0)<=c.get('quote_max_age_seconds',10))
+    mid=(bid+ask)/2 if fresh else None
+    selected=state(db,'point_selection',{})
+    return dict(as_of=now,fresh=bool(fresh),symbol=c['symbols'][c['teacher_symbol']],
+                quote=quote,mid=mid,reason=market.get('reason',''),
+                timeframe='M5',bars=[b for b in market.get('bars',[])
+                    if b.get('at',now)+300<=now][-60:],
+                atr14=market.get('atr14'),ema20=market.get('ema20'),ema50=market.get('ema50'),
+                focus_distance=c.get('point_focus_distance',50),
+                points=[dict(item,distance=round(abs(item['price']-mid),2) if mid else None)
+                        for item in selected.get('items',[])])
+
 def select_rows(db,c,rows,now,persist=True):
     scope=[c['chat_id'],c['teacher_sender_id'],c['symbols'][c['teacher_symbol']]]
     saved=state(db,'point_selection',{})
@@ -191,10 +212,14 @@ def select_rows(db,c,rows,now,persist=True):
     mid=(bid+ask)/2 if fresh else saved.get('mid',0)
     bars=market.get('bars',[])
     bar=bars[-1]['at'] if fresh and bars else (int(quote.get('at',0)//300)*300-300 if fresh else saved.get('bar',0))
-    by_price={float(r[5]):r for r in accepted}
+    focus=c.get('point_focus_distance',50)
+    distant={float(r[5]) for r in accepted if fresh and abs(float(r[5])-mid)>focus}
+    for price in distant:
+        reasons[price]=f'远端休眠：超出现价±{focus:.0f}点；接近后复核'
+    by_price={float(r[5]):r for r in accepted if float(r[5]) not in distant}
     previous=[p for p in saved.get('selected',[]) if p in by_price]
     version_changed=signature!=saved.get('signature')
-    changed=version_changed or saved.get('pending',False)
+    changed=version_changed or saved.get('pending',False) or saved.get('focus_distance')!=focus
     if not fresh:
         # 展示不依赖实时行情：新版本按来源/确认排序，最多6个且仍遵守间距。
         # 无新版本先保留合法展示项，不拿过期报价计算距离。
@@ -228,7 +253,7 @@ def select_rows(db,c,rows,now,persist=True):
     items=[dict(price=float(r[5]),selected=float(r[5]) in selected,reason=reasons.get(float(r[5]),r[19]))
            for r in sorted(rows,key=lambda r:float(r[5]))]
     value=dict(scope=scope,signature=signature,selected=selected,mid=mid if fresh and (changed or bar!=saved.get('bar')) else saved.get('mid',mid),
-               bar=bar if fresh else saved.get('bar',0),pending=not fresh,quote_ready=bool(fresh),limit=POINT_LIMIT,gap=POINT_GAP,items=items,events=saved.get('events',[])[:])
+               bar=bar if fresh else saved.get('bar',0),pending=not fresh,quote_ready=bool(fresh),focus_distance=focus,limit=POINT_LIMIT,gap=POINT_GAP,items=items,events=saved.get('events',[])[:])
     if persist and value!=saved:
         value['events']=saved.get('events',[])[:]
         before=set(saved.get('selected',[]));after=set(selected)

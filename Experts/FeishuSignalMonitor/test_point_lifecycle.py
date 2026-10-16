@@ -121,7 +121,7 @@ class PointSelectionTests(unittest.TestCase):
         picked,_=self.select(rows,4181)
         self.assertEqual([float(r[5]) for r in picked],[4160,4170,4180,4190,4200,4210])
         picked,_=self.select(rows,mid=4300,bar=200)
-        self.assertEqual(len(picked),6)
+        self.assertEqual(picked,[])
         self.assertTrue(all(float(b[5])-float(a[5])>=5 for a,b in zip(picked,picked[1:])))
 
     def test_authority_manual_and_equal_time_conflict(self):
@@ -214,3 +214,28 @@ class PointSelectionTests(unittest.TestCase):
         self.assertEqual(state(self.db,'point_selection'),before)
 
 if __name__=='__main__':unittest.main()
+
+class MarketContextTests(unittest.TestCase):
+    setUp=PointSelectionTests.setUp
+    tearDown=PointSelectionTests.tearDown
+    seed=PointSelectionTests.seed
+    row=PointSelectionTests.row
+    feed=PointSelectionTests.feed
+    select=PointSelectionTests.select
+
+    def test_distant_points_sleep_and_return_without_renewing_sources(self):
+        rows=[self.row('near',price=4180),self.row('far',price=4260)]
+        picked,value=self.select(rows,mid=4180,bar=100)
+        self.assertEqual([float(r[5]) for r in picked],[4180])
+        self.assertIn('远端休眠',value['items'][1]['reason'])
+        picked,_=self.select(rows,mid=4250,bar=200)
+        self.assertEqual([float(r[5]) for r in picked],[4260])
+        self.assertEqual(picked[0][14],self.feed(rows)[1][14])
+
+    def test_market_context_marks_stale_quote_and_does_not_use_it_for_distance(self):
+        from point_lifecycle import market_context
+        self.select([self.row()],market=False)
+        context=market_context(self.db,self.c,self.now)
+        self.assertFalse(context['fresh'])
+        self.assertIsNone(context['mid'])
+        self.assertIsNone(context['points'][0]['distance'])

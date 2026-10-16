@@ -18,6 +18,7 @@
   "mt5_time_offset_seconds": 0,
   "signal_ttl_seconds": 180,
   "pending_ttl_seconds": 1800,
+  "point_focus_distance": 50,
   "quote_max_age_seconds": 10,
   "sync_max_age_seconds": 120,
   "initial_equity": 10000,

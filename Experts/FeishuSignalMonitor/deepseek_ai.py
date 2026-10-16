@@ -130,10 +130,11 @@ class DeepSeek:
                 return mapping.get(value,value)
             return value
         request_data=translate({'targets':targets,'context':context,'market_anchor':anchor,
-                               'earlier_full_levels':levels,'previous_scene':previous_scene or {}},aliases)
+                               'earlier_full_levels':levels,'previous_scene':previous_scene or {},
+                               'current_market':getattr(self,'current_market',{})},aliases)
         payload = {'model': self.config['ai_model'], 'thinking': {'type':'disabled'}, 'temperature':0,
             'messages': [{'role':'system','content':SYSTEM+(SCENE_PROMPT+(RANGE_INFERENCE_PROMPT if not self.config.get('teacher_only') else '') if scene_requested else '\n本批没有老师新消息，只返回interpretations，不得输出或更新scene。')+
-                          '\n所有消息引用字段必须原样使用本次输入的r001等短编号，不要编造、改写或沿用上次编号。interpretations.id仍使用对应target.id。'},
+                          '\ncurrent_market仅用于理解当前环境，不能补造点位、改写旧消息尾数或刷新旧依据。fresh=false表示历史缓存，不能称为实时行情。K线不得覆盖明确的取消、人工停用或原消息方向；突破后的附加条件不能表达时写summary待确认，不改为碰价下单。\n所有消息引用字段必须原样使用本次输入的r001等短编号，不要编造、改写或沿用上次编号。interpretations.id仍使用对应target.id。'},
                          {'role':'user','content':json.dumps(request_data,ensure_ascii=False)}],
             'response_format': {'type':'json_object'}, 'max_tokens': 4800}
         if self.config.get('teacher_only'):
@@ -702,6 +703,9 @@ def process_ai_batch(db, c, client, now, restore_scene=False, preview=False):
             set_state(db,'deepseek_anchors',anchors)
     try:
         teacher_targets=any(t['source_role'] in ('teacher','group_summary') and not t['historical'] for t in targets)
+        if isinstance(client,DeepSeek):
+            from point_lifecycle import market_context
+            client.current_market=market_context(db,c,now)
         raw_result=client.interpret(targets,context,live_anchor,
             state(db,'teacher_levels',{}).get('levels',[]),previous_scene,**({'rebuild':True} if preview else {})) if targets else {'interpretations':[]}
         if not isinstance(raw_result,dict) or set(raw_result) not in ({'interpretations'},{'interpretations','scene'}):

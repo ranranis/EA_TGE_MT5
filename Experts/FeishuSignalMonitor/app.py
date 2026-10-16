@@ -59,6 +59,7 @@ def config_load(home):
         if type(c[key]) is not int or not low<=c[key]<=high: raise ValueError('AI消息读取数量超出范围：'+key)
     for key in ('poll_seconds','quote_seconds','overlap_seconds','window_seconds','max_pages','reconcile_batch','thread_batch','signal_ttl_seconds','pending_ttl_seconds','quote_max_age_seconds','sync_max_age_seconds','initial_equity','max_spread_points'):
         if type(c[key]) not in (int,float) or c[key]<=0: raise ValueError('配置应为正数：'+key)
+    if type(c['point_focus_distance']) not in (int,float) or not 5<=c['point_focus_distance']<=500: raise ValueError('当前关注距离须为5至500价格点')
     if c['poll_seconds']<5 or c['quote_seconds']<0.5: raise ValueError('轮询周期过短')
     for key in ('max_pages','reconcile_batch','thread_batch'):
         if type(c[key]) is not int: raise ValueError('配置应为整数：'+key)
