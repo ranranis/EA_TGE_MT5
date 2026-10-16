@@ -282,12 +282,12 @@ void PaperDrawReviewChart()
    PaperClearReviewChart();
    paperChartDirty=false;
    string objectPrefix=PaperReviewPrefix();
+   int selectedIndex=PaperSelected();
    for(int i=0;i<ArraySize(paperDetails);i++)
    {
       PaperEvent e=paperDetails[i].entryEvent, end=paperDetails[i].endEvent;
-      if(e.arm!=paperDetailArm || e.msc<=0 || e.entry<=0) continue;
-      bool selected=e.id==paperSelectedId || (paperSelectedId==0 && i==PaperSelected());
-      int width=selected ? 3 : 1;
+      if(e.arm!=paperDetailArm || i!=selectedIndex || e.msc<=0 || e.entry<=0) continue;
+      int width=3;
       color entryInk=e.sign>0 ? C'0,108,180' : C'190,88,35';
       color exitInk=e.sign>0 ? C'0,145,110' : C'175,55,115';
       string base=objectPrefix+IntegerToString(e.id)+"_";
@@ -578,10 +578,10 @@ void PaperPanel()
    UIText(replayHealth,16,179,528,9,UI_MUTED);
    UIText("各组相同0.02手 / TP5 SL10 / 最长60分钟",16,203,528,9,UI_DIM);
    UIText("点选策略查看原因",16,233,176,9,UI_MUTED);
-   UIText("结果 / "+AccountInfoString(ACCOUNT_CURRENCY),198,233,88,9,UI_MUTED);
-   UIText("完成/持有",290,233,80,9,UI_MUTED);
-   UIText("赢/亏",374,233,65,9,UI_MUTED);
-   UIText("回撤 / 缺失",444,233,100,9,UI_MUTED);
+   UIText("净结果 / "+AccountInfoString(ACCOUNT_CURRENCY)+"（完整平仓）",198,233,88,9,UI_MUTED);
+   UIText("已平/当前持有",290,233,80,9,UI_MUTED);
+   UIText("赢/亏（完整）",374,233,65,9,UI_MUTED);
+   UIText("回撤 / 过程缺失",444,233,100,9,UI_MUTED);
    for(int arm=0;arm<PAPER_ARMS;arm++)
    {
       int y=255+arm*41;
