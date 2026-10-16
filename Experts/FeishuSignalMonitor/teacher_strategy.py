@@ -10,6 +10,52 @@ from store import state, set_state, iso
 from mt5_reader import QuoteError, validate_quote, validate_bars
 
 
+def is_group_summary(text):
+    """识别会后整理，而不是把普通群聊里的数字当成点位。"""
+    if not isinstance(text, str) or len(text) > 4000:
+        return False
+    if re.search(r'昨天|前天|历史|晒单|回顾|转发|提示词|system|prompt|BTC|ETH|USOIL|原油|白银|EUR|GBP|USDJPY|比特币', text, re.I):
+        return False
+    markers = re.findall(r'会议|会后|总结|接下来|未来|半个月|大区间|小区间|区间震荡|关键点位|寄存部门|收单位置', text)
+    numbers = re.findall(r'(?<![\d.])\d{3,5}(?:\.\d+)?(?![\d.])', text)
+    return len(numbers) >= 2 and len(markers) >= 2 and bool(re.search(r'会议|会后|总结|大区间|小区间', text))
+
+
+def summary_source(raw, sender, c):
+    return (c.get('allow_group_summaries', True) and raw.get('msg_type') == 'text'
+            and (not c.get('summary_source_senders') or sender in c['summary_source_senders']
+                 or sender == c['teacher_sender_id']) and is_group_summary(raw.get('content', '')))
+
+
+def parse_summary_levels(message, symbol=None):
+    """从会后总结的明确点位段取地图；方向和优先级交给scene解析。"""
+    if message.get('deleted') or message.get('msg_type') != 'text':
+        return None
+    text = message.get('content', '')
+    if not is_group_summary(text):
+        return None
+    if symbol and symbol.upper().startswith(('XAU', 'GOLD')):
+        valid = lambda value: 1000 <= value <= 10000
+    else:
+        valid = lambda value: value > 0
+    section = re.search(r'关键点位\s*[:：]?\s*(.*)', text, re.S)
+    if section:
+        # 关键点位后可能紧接着下一段说明，只取该段的完整数字链。
+        body = re.split(r'\n|【|寄存部门|收单位置|接近|若出现', section.group(1), maxsplit=1)[0]
+        tokens = re.findall(r'(?<![\d.])\d{3,5}(?:\.\d+)?(?![\d.])', body)
+    else:
+        tokens = []
+        for part in re.split(r'[\n；;。]', text):
+            if re.search(r'大区间|小区间|点位|接近|寄存|收单|压力|支撑', part):
+                tokens.extend(re.findall(r'(?<![\d.])\d{3,5}(?:\.\d+)?(?![\d.])', part))
+    levels = []
+    for token in tokens:
+        value = float(token)
+        if valid(value) and math.isfinite(value) and value not in levels:
+            levels.append(value)
+    return sorted(levels) if 3 <= len(levels) <= 20 else None
+
+
 def parse_levels(message, explicit_only=False, symbol=None):
     if message.get('deleted') or message.get('msg_type')!='text':
         return None
@@ -52,9 +98,12 @@ def order_key(row):
 
 
 def source_levels(raw,sender,c):
-    if c.get('teacher_only') and sender!=c['teacher_sender_id']: return None
+    summary = summary_source(raw, sender, c)
+    if c.get('teacher_only') and sender!=c['teacher_sender_id'] and not summary: return None
     if sender==c['teacher_sender_id'] or sender in c.get('point_source_senders',[]):
-        return parse_levels(raw,symbol=c.get('teacher_symbol'))
+        return parse_levels(raw,symbol=c.get('teacher_symbol')) or parse_summary_levels(raw,symbol=c.get('teacher_symbol'))
+    if summary:
+        return parse_summary_levels(raw,symbol=c.get('teacher_symbol'))
     return parse_levels(raw,symbol=c.get('teacher_symbol')) if c.get('allow_group_point_updates',False) else None
 
 

@@ -37,6 +37,27 @@ def example():
 
 
 class LifetimeTests(unittest.TestCase):
+    def test_keep_old_scene_echo_is_normalized_but_new_price_rejected(self):
+        targets,context,scene=example()
+        previous=validate_scene(scene,targets,context,4181)
+        latest=message('watch','冲击4200的意思，昨日直播讲过',9)
+        # 模型回显旧场景，仅action改为KEEP；不能使旧计划重新确认。
+        echo=dict(scene,action='KEEP',as_of='watch')
+        clean=validate_scene(echo,[latest],context+targets,4181,previous)
+        self.assertEqual(clean['action'],'KEEP')
+        self.assertEqual(clean['plans'],[])
+        self.assertEqual(previous['plans'][0]['confirmed_at'],validate_scene(scene,targets,context,4181)['plans'][0]['confirmed_at'])
+        echo=copy.deepcopy(echo);echo['plans'][0]['price']=4275
+        with self.assertRaises(AIError):validate_scene(echo,[latest],context+targets,4181,previous)
+
+    def test_review_discards_payload_without_promoting_it_to_execution(self):
+        targets,context,scene=example()
+        scene['action']='REVIEW'
+        clean=validate_scene(scene,targets,context,4181)
+        self.assertEqual(clean['action'],'REVIEW')
+        self.assertEqual(clean['plans'],[])
+        self.assertIsNone(clean['inner_range'])
+
     def test_target_change_does_not_renew_entry(self):
         targets,context,scene=example()
         first=validate_scene(scene,targets,context,4181)

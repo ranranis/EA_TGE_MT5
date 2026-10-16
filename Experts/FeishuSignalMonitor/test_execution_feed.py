@@ -35,6 +35,28 @@ class ExecutionTests(unittest.TestCase):
             return value
         process_ai_batch(self.db, self.c, Mock(interpret=reply), self.now)
 
+    def test_status_caption_distinguishes_processing_error_and_ready(self):
+        from execution_feed import ai_status_note
+        with self.db:
+            set_state(self.db,'deepseek_status',dict(online=True,last_success=self.now))
+        self.assertIn('AI解析就绪 · 待0条 · 最近成功',ai_status_note(self.db,self.c,self.now,False))
+        self.scene()
+        self.seed(mid='pending',text='4120↑',age=0)
+        for error,label in [('AI正在解释新消息','AI正在解析'),
+                            ('AI场景必须截至最新老师消息','AI解析异常：语义校验'),
+                            ('DeepSeek连接/响应或本机凭证异常：RemoteDisconnected','AI解析异常：连接/响应')]:
+            with self.db:
+                set_state(self.db,'deepseek_status',dict(online=False,error=error,last_success=self.now-60))
+            caption=self.feed(protocol=7)[0][6]
+            self.assertIn(label,caption)
+            self.assertIn('待1条',caption)
+            self.assertIn('最近成功',caption)
+            self.assertIn('沿用已确认点位',caption)
+            self.assertNotIn('RemoteDisconnected',caption)
+        self.seed(mid='cancel',text='取消全部计划',age=0)
+        self.assertEqual(self.feed(protocol=7)[0][3],'0')
+        self.assertIn('撤销',self.feed(protocol=7)[0][6])
+
     def test_complete_snapshot_contains_map_direct_and_ranges(self):
         self.scene()
         self.seed(mid='map', text='4150--4160--4175--4190--4200--4220', age=0)

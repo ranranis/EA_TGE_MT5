@@ -1,0 +1,17 @@
+{
+  "enabled": false,
+  "symbol": "XAUUSD",
+  "confirmed_at": "2026-10-16T00:00:00+08:00",
+  "note": "启用后替换自动点位；填写实际确认时间。buy/sell明确方向，support/resistance支撑压力，minor_较弱角色，neutral中性，watch仅展示。",
+  "inner_range": [4120, 4180],
+  "outer_range": [4100, 4200],
+  "levels": [
+    {"price": 4130, "role": "watch", "note": "原文是4130以下考虑上车，不能等同4130碰价买入"},
+    {"price": 4145, "role": "neutral"},
+    {"price": 4162, "role": "neutral"},
+    {"price": 4170, "role": "minor_resistance", "note": "小压力"},
+    {"price": 4190, "role": "neutral"},
+    {"price": 4200, "role": "watch", "note": "收单位置是退出参考，不单独当成开空"},
+    {"price": 4222, "role": "neutral"}
+  ]
+}

@@ -66,6 +66,10 @@ def config_load(home):
     if not isinstance(c['teacher_sender_id'],str) or c['teacher_sender_id'] and not c['teacher_sender_id'].startswith('ou_'): raise ValueError('老师身份须为open_id')
     if not isinstance(c['point_source_senders'],list) or any(not isinstance(x,str) or not x.startswith('ou_') for x in c['point_source_senders']): raise ValueError('点位来源必须为open_id列表')
     if type(c['allow_group_point_updates']) is not bool: raise ValueError('群友点位更新开关必须为布尔值')
+    if type(c['allow_group_summaries']) is not bool: raise ValueError('群友会议总结开关必须为布尔值')
+    if not isinstance(c['summary_source_senders'],list) or any(not isinstance(x,str) or not x.startswith('ou_') for x in c['summary_source_senders']): raise ValueError('会议总结来源必须为open_id列表')
+    if type(c['manual_points_enabled']) is not bool: raise ValueError('手动点位开关必须为布尔值')
+    if not isinstance(c['manual_points_file'],str) or not c['manual_points_file'].strip(): raise ValueError('手动点位文件路径不能为空')
     if not isinstance(c['follow_sender_id'],str) or c['follow_sender_id'] and not c['follow_sender_id'].startswith('ou_'): raise ValueError('跟随成员身份须为open_id')
     if c['follow_sender_id'] and c['follow_sender_id'] in [c['teacher_sender_id']]+c['point_source_senders']: raise ValueError('跟随成员须与老师点位来源分开配置')
     if not isinstance(c['follow_members'],list) or len(c['follow_members'])>8:
@@ -84,6 +88,10 @@ def config_load(home):
         ids.add(mid)
     if c['teacher_symbol'] not in c['symbols']: raise ValueError('老师点位品种缺少映射')
     if type(c['mt5_time_offset_seconds']) is not int or abs(c['mt5_time_offset_seconds'])>14*3600 or c['mt5_time_offset_seconds']%3600: raise ValueError('行情固定时间偏移须为整小时且不超过14小时')
+    c['_home']=str(home)
+    manual=Path(c['manual_points_file'])
+    if not manual.is_absolute(): manual=home/manual
+    if not manual.exists(): atomic_text(manual,(ROOT/'manual_points.example.json').read_text(encoding='utf-8'))
     return c
 
 def setup(home,log_name='monitor.log'):
@@ -190,6 +198,8 @@ def export_teacher_levels(db,c,paused,now):
     atomic_text(folder/'tge_execution.csv', execution_csv(db,c,now,paused,context,active,selected,ai))
     # v1.43独立协议：保留参考展示；EA按原消息/明确重申时间判定执行资格。
     atomic_text(folder/'tge_execution_v7.csv', execution_csv(db,c,now,paused,context,source_ok,levels or [],ai,protocol=7))
+    atomic_text(folder/'tge_execution_v8.csv', execution_csv(db,c,now,paused,context,source_ok,levels or [],ai,protocol=8))
+    atomic_text(folder/'tge_execution_v9.csv', execution_csv(db,c,now,paused,context,source_ok,levels or [],ai,protocol=9))
     bridge=io.StringIO(newline=''); aw=csv.writer(bridge,lineterminator='\r\n')
     note=str(ai['reason']).replace(',','，').replace('\r',' ').replace('\n',' ')[:160]
     # TGA5明确表示仅老师限价模式；旧市价EA拒绝该协议，避免升级期间误用旧入口。

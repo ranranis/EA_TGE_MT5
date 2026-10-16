@@ -33,7 +33,7 @@ exits各项为价格证据对象或null，sl是绝对止损价，tp1为首批减
 3. 仅有“小区间4175-4200，大区间4150-4220”或“4520-4560区间来回跑”是中性区间，填区间对象用于展示；不能把下沿/上沿推断成老师明确说了BUY/SELL。没有方向原文时不得生成basis=null的plan。区间推导必须另有本次请求的明确授权规则。
 4. “来回跑/区间震荡”可标记RANGE；孤立“压力有效”只是关键位说明；符合上述完整区间证据时，才可生成标注来源的AI条件计划。“多单等到/空单等到/可以行动/可上”不需要箭头，也属于有条件入场。
 5. “现在90可⬆️”之后同一老师说“86了 注意”，若中间没有取消或相反方向且可唯一承接，应更新为BUY4186，price_ref引用86消息，direction_ref引用90做多消息；不要因新句没写多字就丢弃。若只是行情报数、持仓盈亏或无法唯一关联，则不生成。较晚明确改价替换对应旧入场，不能让旧价和新价一起重复占位。
-6. 优先T哥本人。成员晒单、引用、历史回顾、假设、玩笑不能更新scene。source_role=follow_member仍由独立价格区间通道处理，沿用至本人更新/取消。
+6. 优先T哥本人。source_role=group_summary是已授权的会后总结，可从该总结本身提取区间和明确方向，as_of填写该总结ID，不能借用其他人的旧方向。普通成员晒单、历史回顾、假设、玩笑不能更新scene。source_role=follow_member仍由独立价格区间通道处理。数字后的“（小压力）/（支撑）”由本地点位角色通道维护，scene.plans仅输出明确入场方向。“收单位置”是退出参考，不是开空指令。“低于/突破/站稳”是额外条件，本协议不能表达，保留summary，不得缩成无条件碰价计划。
 7. 默认REACTION，持续有效条件计划由EA在目标上下1.00区内用实时tick检查逆向冲击，不等M1/M5收线。只有老师明确现价/市价/直接进且带数字，才能MARKET；前文的市价请求不能在新场景复活。执行方式由EA决定，模型不控制挂单、市价或手数。
 8. previous_scene只帮助记忆，引用必须在context/targets有原文并未撤回。不凭时间自动废掉T哥参考；明确作废、来源失效、新方案覆盖才变。
 9. 普通闲聊且不改变场景用KEEP，plans=[]，regime=UNKNOWN，其他证据字段null。确有变更用UPDATE并返回完整仍有效场景；无法可靠确定新交易指令用REVIEW，不能静默继续旧方向。
@@ -46,7 +46,7 @@ exits各项为价格证据对象或null，sl是绝对止损价，tp1为首批减
 16. previous_scene返回的是完整快照，UPDATE时保留仍有效计划及已有exits；不能因新消息只补目标而清空其他已确认字段。改目标不换入场来源、不生成另一个机会；重复输入应得到同一组计划。计划identity由程序维护，不在JSON中新增内部字段。
 17. 所有price必须是JSON number；尾数缺数量级时可填null由本地复核，不猜百位。每个新入场数字必须确实承担入场角色：压力75、70可空中的75不是入场，止损/目标/突破阈值也不能借其他句方向变成新入场。破位预测保留说明，不填进无条件目标。加仓间距只解释，推算的后续档位不是原文token，不得伪造价格证据生成scene.plans；后续执行映射另行开发。
 18. “以后可以做空的位置”“以后再见可多”“等到/准备/可以/挂”只是在等待价格到达，只要价格和方向明确，就是当前发布的持续有效REACTION参考，不要求此刻已经开仓。多档明确位置各保留一条，不因尚未到价改成WATCH。复盘、假设分支和仅有压力支撑仍需区别。KEEP同样要填写最后老师target的as_of。
-19. 只翻译原文，不判断参考因时间/距离过期；EA负责这些判断。明确重申尽量引用新的点位与方向原文，普通闲聊、仅改目标不能刷新入场时间。取消只影响明确关联的计划；“86空取消”不代表所有空单取消，“挂的多取消”不代表整张地图取消。禁止因行情远离而自行从场景中删掉价格。
+19. 当前支撑/压力和角色转换即使逐条标WATCH也会由本地ROLE通道同步到EA；不能把同价已转支撑的旧做空继续解释为有效，反之亦然。仅说冲击/过了便是某价是目标观察，不是该价入场。KEEP不要复制previous_scene字段；REVIEW同样plans为空、区间为空。\n20. 只翻译原文，不判断参考因时间/距离过期；EA负责这些判断。明确重申尽量引用新的点位与方向原文，普通闲聊、仅改目标不能刷新入场时间。取消只影响明确关联的计划；“86空取消”不代表所有空单取消，“挂的多取消”不代表整张地图取消。禁止因行情远离而自行从场景中删掉价格。
 """
 
 
@@ -143,7 +143,7 @@ def validate_scene(value, targets, context, anchor, previous=None):
         raise AIError('AI场景状态无效')
     if not isinstance(value['summary'],str) or len(value['summary'])>400:
         raise AIError('AI场景说明无效')
-    teacher=[t for t in targets if t.get('source_role')=='teacher' and not t.get('historical')]
+    teacher=[t for t in targets if t.get('source_role') in ('teacher','group_summary') and not t.get('historical')]
     if not teacher:
         if value['as_of']!='' or value['action']!='KEEP':
             raise AIError('无老师新消息不能更新场景')
@@ -160,15 +160,38 @@ def validate_scene(value, targets, context, anchor, previous=None):
         raise AIError('明确新增/取消不能被KEEP忽略')
     if value['action']!='UPDATE':
         if value['plans'] or value['regime']!='UNKNOWN' or any(value[k] is not None for k in ('regime_ref','inner_range','outer_range')):
-            raise AIError('KEEP/REVIEW不能夹带执行计划')
-        return dict(value,created=stamp(latest['time']),sequence=latest['sequence'],
+            # REVIEW永远不执行携带字段。KEEP仅容忍逐字段复述已验证旧场景，
+            # 不能借格式修复接受新价格、新方向或让明确新增/取消失效。
+            def plan_data(p):
+                keys=('side','token','price','mode','price_ref','price_evidence','direction_ref','direction_evidence','exits','basis')
+                if not isinstance(p,dict): return p
+                data={k:p.get(k) for k in keys}
+                data['exits']={k:(p.get('exits') or {}).get(k) for k in ('sl','tp1','tp2','breakeven')}
+                return data
+            echo=bool(previous)
+            if value['plans']:
+                remaining=[plan_data(p) for p in (previous or {}).get('plans',[])]
+                for p in value['plans']:
+                    data=plan_data(p)
+                    if data not in remaining:
+                        echo=False
+                        break
+                    remaining.remove(data)
+                echo=echo and not remaining
+            for key in ('regime','regime_ref','inner_range','outer_range'):
+                if value[key] not in (None,'UNKNOWN'):
+                    echo=echo and value[key]==(previous or {}).get(key)
+            if value['action']=='KEEP' and not echo:
+                raise AIError('KEEP夹带新增或变更计划，等待重新解释')
+            value.update(plans=[],regime='UNKNOWN',regime_ref=None,inner_range=None,outer_range=None)
+        return dict(value,source_role=latest.get('source_role','teacher'),created=stamp(latest['time']),sequence=latest['sequence'],
                     revision=latest['revision'],sender=latest['sender_id'],source_refs=[
                         dict(message_id=latest['message_id'],revision=latest['revision'])])
     items={m['message_id']:m for m in context+targets if m.get('message_id')}
     refs={}
     def evidence(mid, quote):
         item=items.get(mid) if isinstance(mid,str) else None
-        if (not item or item.get('source_role')!='teacher' or item.get('sender_id')!=latest['sender_id'] or
+        if (not item or item.get('source_role') not in ('teacher','group_summary') or item.get('sender_id')!=latest['sender_id'] or
             item.get('historical') or item.get('deleted') or not item.get('revision') or
             (stamp(item['time']),item.get('sequence',0))>(stamp(latest['time']),latest['sequence']) or
             not isinstance(quote,str) or not quote or quote not in item['text']):
@@ -256,7 +279,7 @@ def validate_scene(value, targets, context, anchor, previous=None):
         for mid in (plan['price_ref'],plan['direction_ref']):
             if re.search(r'历史|晒单|转发|假设|昨天|回顾|开玩笑|忽略.{0,10}(规则|指令)',items[mid]['text']):
                 raise AIError('历史/指令文本不能成为场景入场')
-        if re.search(r'取消|作废|撤销|不做|别做|不要|止损|止盈|平仓',plan['direction_evidence']):
+        if re.search(r'取消|作废|撤销|不做|别做|不要|止损|止盈|平仓|收单|低于|高于|突破|跌破|站稳',plan['direction_evidence']):
             raise AIError('取消/退出原文不能成为场景方向')
         if plan['mode']=='MARKET' and (plan['price_ref']!=latest['message_id'] or
             not re.search(r'现价|市价|直接.{0,3}(进|买|卖|多|空)',items[plan['price_ref']]['text'])):
@@ -365,7 +388,7 @@ def validate_scene(value, targets, context, anchor, previous=None):
         if renew_confirmed_plans(clean,item):
             refs[item['message_id']]=dict(message_id=item['message_id'],revision=item['revision'])
     refs[latest['message_id']]=dict(message_id=latest['message_id'],revision=latest['revision'])
-    return dict(value,plans=clean,created=stamp(latest['time']),sequence=latest['sequence'],
+    return dict(value,source_role=latest.get('source_role','teacher'),plans=clean,created=stamp(latest['time']),sequence=latest['sequence'],
                 revision=latest['revision'],sender=latest['sender_id'],source_refs=list(refs.values()),
                 map_only=not clean and (latest.get('interpretation') or {}).get('kind')=='MAP')
 
@@ -416,6 +439,12 @@ def validate_execution_scene(value, targets, context, anchor, previous=None):
 def publish_scene(db, c, scene):
     from deepseek_ai import refs_current
     if not scene:
+        return
+    if scene.get('source_role')=='group_summary':
+        previous=state(db,'meeting_scene',{})
+        if (scene['action'] in ('UPDATE','REVIEW') and refs_current(db,c['chat_id'],scene['source_refs']) and
+            (scene['created'],scene['sequence']) >= (previous.get('created',0),previous.get('sequence',0))):
+            set_state(db,'meeting_scene',scene)
         return
     previous=state(db,'teacher_scene',{})
     if (scene['created'],scene['sequence'])<(previous.get('created',0),previous.get('sequence',0)):

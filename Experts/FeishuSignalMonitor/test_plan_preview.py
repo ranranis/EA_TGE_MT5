@@ -78,10 +78,10 @@ class PreviewTests(unittest.TestCase):
 
     def test_dashboard_uses_published_feed_not_old_ai_directions(self):
         export_teacher_levels(self.db,self.c,False,time.time())
-        path=self.home/'common/FeishuMT5SignalMonitor/tge_execution_v7.csv'
+        path=self.home/'common/FeishuMT5SignalMonitor/tge_execution_v9.csv'
         # 原AI解释仍是BUY4175；实际导出已替换为新地图，网页必须跟随文件。
-        path.write_text(f'TGA,7,{int(self.now)},1,{self.c["symbols"][self.c["teacher_symbol"]]},1,updated\n'
-                        f'PLAN,map,MAP,5,AUTO,4142,source,revision,{int(self.now)-10},group,0,0,0,0,{int(self.now)-10},REFERENCE\nEND,1\n',encoding='utf-8')
+        path.write_text(f'TGA,9,{int(self.now)},1,{self.c["symbols"][self.c["teacher_symbol"]]},1,updated\n'
+                        f'PLAN,map,MAP,40,AUTO,4142,source,revision,{int(self.now)-10},group,0,0,0,0,{int(self.now)-10},REFERENCE,{int(self.now)+86400},1,READY,valid\nEND,1\n',encoding='utf-8')
         result=snapshot(self.home,self.c)
         self.assertEqual(result['ai_setup']['plans'][0]['price'],4175)
         self.assertEqual([p['price'] for p in result['execution_reference']['plans']],[4142])
@@ -96,7 +96,7 @@ class PreviewTests(unittest.TestCase):
         self.assertFalse(published_reference(self.c,self.now,online|{'paused':True})['active'])
         stale=published_reference(self.c,self.now+self.c['sync_max_age_seconds']+1,online)
         self.assertFalse(stale['active']);self.assertTrue(stale['plans'])
-        path=self.home/'common/FeishuMT5SignalMonitor/tge_execution_v7.csv'
+        path=self.home/'common/FeishuMT5SignalMonitor/tge_execution_v9.csv'
         path.write_text(path.read_text(encoding='utf-8').split('END,')[0],encoding='utf-8')
         invalid=published_reference(self.c,self.now,online)
         self.assertFalse(invalid['available']);self.assertEqual(invalid['plans'],[])

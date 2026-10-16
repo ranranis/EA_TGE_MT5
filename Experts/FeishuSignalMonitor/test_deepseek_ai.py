@@ -7,7 +7,7 @@ import time
 import unittest
 from unittest.mock import Mock
 from app import config_load, export_teacher_levels
-from deepseek_ai import AIError, initialize_ai, validate_output, resolve_token, process_ai_batch, ai_snapshot, member_follow_snapshot
+from deepseek_ai import pure_meeting_invitation, AIError, initialize_ai, validate_output, resolve_token, process_ai_batch, ai_snapshot, member_follow_snapshot
 from store import connect, ingest, set_state, state
 
 
@@ -15,6 +15,18 @@ def result(kind='SETUP', side='BUY', token='68', price=4168, evidence='68↑'):
     return dict(id='0',kind=kind,plans=[] if kind!='SETUP' else [
         dict(side=side,token=token,price=price,mode='REACTION',evidence=evidence)],
         cancel_side='NONE',reason='合成解释')
+
+
+INVITATION = """@_all toppppp 邀请您参加腾讯会议
+会议主题：2号重磅数据现场解读
+会议时间：2026/10/15 20:15-22:15 (GMT+08:00) 中国标准时间 - 北京
+
+点击链接入会，或添加至会议列表：
+https://meeting.tencent.com/dm/test123
+
+#腾讯会议：123-456-789
+
+复制该信息，打开手机腾讯会议即可参与"""
 
 
 class ValidationTests(unittest.TestCase):
@@ -187,6 +199,55 @@ class WorkerTests(unittest.TestCase):
         def fake(targets,*_):
             return {'interpretations':[dict(result(kind=kind),id=t['id']) for t in targets]}
         return Mock(interpret=Mock(side_effect=fake))
+    def test_pure_invitation_retries_archive_locally_without_changing_plan(self):
+        self.seed();process_ai_batch(self.db,self.c,self.client(),self.now)
+        previous=copy.deepcopy(state(self.db,'deepseek_setup'))
+        success=state(self.db,'deepseek_status')['last_success']
+        self.seed(mid='invite',text=INVITATION,age=0)
+        row=self.db.execute("SELECT * FROM messages WHERE message_id='invite'").fetchone()
+        with self.db:
+            self.db.execute("INSERT INTO ai_messages VALUES(?,?,?,?,?,'{}',?,?,?,?)",
+                (row['chat_id'],row['message_id'],row['revision'],row['created'],'RETRY',
+                 self.now,203,self.now,'AI场景必须截至最新老师消息'))
+            set_state(self.db,'deepseek_status',dict(online=False,error='AI场景必须截至最新老师消息',last_success=success))
+        client=Mock()
+        self.assertEqual(process_ai_batch(self.db,self.c,client,self.now+1),1)
+        client.interpret.assert_not_called()
+        status=state(self.db,'deepseek_status')
+        self.assertTrue(status['teacher_ready'])
+        self.assertEqual(status['backlog'],0)
+        self.assertEqual(status['error'],'')
+        self.assertEqual(status['last_success'],success)
+        self.assertEqual(state(self.db,'deepseek_setup'),previous)
+        row=self.db.execute("SELECT status,payload FROM ai_messages WHERE message_id='invite'").fetchone()
+        self.assertEqual(row['status'],'DONE')
+        self.assertEqual(json.loads(row['payload'])['kind'],'DISCUSSION')
+
+    def test_invitation_filter_does_not_swallow_summary_or_cancel(self):
+        self.assertTrue(pure_meeting_invitation(INVITATION))
+        self.assertTrue(pure_meeting_invitation(INVITATION.replace('2号重磅数据现场解读','昨日虚惊一场，ppi会有好运嘛！！')))
+        for text in (INVITATION+'\n4120↑ 4180↓',
+                     INVITATION.replace('2号重磅数据现场解读','取消全部计划'),
+                     INVITATION.replace('2号重磅数据现场解读','4120做多'),
+                     '会议总结：小区间4120-4180，接近4120↑，接近4180↓'):
+            with self.subTest(text=text):
+                self.assertFalse(pure_meeting_invitation(text))
+        self.seed(text=INVITATION+'\n取消全部计划')
+        client=Mock(interpret=Mock(side_effect=AIError('synthetic')))
+        process_ai_batch(self.db,self.c,client,self.now)
+        client.interpret.assert_called_once()
+        self.assertEqual(self.db.execute("SELECT status FROM ai_messages").fetchone()[0],'RETRY')
+
+    def test_parse_failure_keeps_last_success_timestamp(self):
+        self.seed();process_ai_batch(self.db,self.c,self.client(),self.now)
+        success=state(self.db,'deepseek_status')['last_success']
+        self.seed(mid='new',text='接近80↓',age=0)
+        def fail(*args):
+            self.assertEqual(state(self.db,'deepseek_status')['last_success'],success)
+            raise AIError('timeout')
+        process_ai_batch(self.db,self.c,Mock(interpret=fail),self.now+1)
+        self.assertEqual(state(self.db,'deepseek_status')['last_success'],success)
+
     def test_success_cache_restart_and_atomic_snapshot(self):
         self.seed();client=self.client();process_ai_batch(self.db,self.c,client,self.now)
         self.assertTrue(ai_snapshot(self.db,self.c,self.now,False)['active'])
