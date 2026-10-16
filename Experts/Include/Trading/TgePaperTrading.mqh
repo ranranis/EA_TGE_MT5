@@ -158,9 +158,121 @@ bool PaperEventValid(const PaperEvent &e)
       paperTrades[i].entry!=e.entry || paperTrades[i].volume!=e.volume || e.msc<paperTrades[i].opened) return false;
    return e.kind=="GAP" || (e.kind=="CLOSE" && e.exit>0 && e.fee>=0);
 }
+
+// 只读明细缓存：由已提交事件重建，保持原P1账本和策略身份兼容。
+struct PaperDetail { PaperEvent entryEvent, endEvent; };
+PaperDetail paperDetails[];
+bool paperShowDetails=false;
+long paperSelectedId=0;
+int PaperDetailFind(const long id)
+{
+   for(int i=0;i<ArraySize(paperDetails);i++)
+      if(paperDetails[i].entryEvent.id==id) return i;
+   return -1;
+}
+void PaperRemember(const PaperEvent &e)
+{
+   if(e.kind=="OPEN")
+   {
+      int count=0,oldest=-1;
+      for(int i=0;i<ArraySize(paperDetails);i++)
+         if(paperDetails[i].entryEvent.arm==e.arm)
+         {
+            count++;
+            if(oldest<0 && paperDetails[i].endEvent.kind!="") oldest=i;
+         }
+      // 每组最多保留200笔；绝不丢弃尚未结束的模拟仓。
+      if(count>=200 && oldest>=0)
+      {
+         for(int j=oldest+1;j<ArraySize(paperDetails);j++) paperDetails[j-1]=paperDetails[j];
+         ArrayResize(paperDetails,ArraySize(paperDetails)-1);
+      }
+      int n=ArraySize(paperDetails); ArrayResize(paperDetails,n+1);
+      paperDetails[n].entryEvent=e; ZeroMemory(paperDetails[n].endEvent);
+   }
+   else if(e.kind=="CLOSE" || e.kind=="GAP")
+   {
+      int i=PaperDetailFind(e.id);
+      if(i>=0) paperDetails[i].endEvent=e;
+   }
+}
+int PaperSelected()
+{
+   int selected=PaperDetailFind(paperSelectedId);
+   if(selected>=0 && paperDetails[selected].entryEvent.arm==paperDetailArm) return selected;
+   for(int i=ArraySize(paperDetails)-1;i>=0;i--)
+      if(paperDetails[i].entryEvent.arm==paperDetailArm) return i;
+   return -1;
+}
+void PaperDetailAction(const int action)
+{
+   if(action==215) { paperShowDetails=!paperShowDetails; return; }
+   if(action==219) { ReviewReturnLive(); return; }
+   int at=PaperSelected(); if(at<0) return;
+   if(action==218)
+   {
+      reviewNavTime=(datetime)(paperDetails[at].entryEvent.msc/1000);
+      reviewNavAttempts=0; ReviewNavigate(); return;
+   }
+   int step=action==216 ? -1 : 1;
+   for(int i=at+step;i>=0 && i<ArraySize(paperDetails);i+=step)
+      if(paperDetails[i].entryEvent.arm==paperDetailArm)
+      { paperSelectedId=paperDetails[i].entryEvent.id; break; }
+}
+string PaperMoment(const long msc)
+{
+   return TimeToString((datetime)(msc/1000),TIME_DATE|TIME_SECONDS);
+}
+void PaperDetailPanel()
+{
+   UIText("模拟单明细 · "+PaperName(paperDetailArm),16,94,340,16,UI_TEXT);
+   UIButton("返回成绩单",420,94,124,215);
+   for(int arm=0;arm<PAPER_ARMS;arm++)
+      UIButton(PaperName(arm),12+arm*108,132,104,210+arm,paperDetailArm==arm);
+   int at=PaperSelected(),count=0,ordinal=0;
+   for(int i=0;i<ArraySize(paperDetails);i++)
+      if(paperDetails[i].entryEvent.arm==paperDetailArm)
+      { count++; if(i==at) ordinal=count; }
+   UIText("本组 "+IntegerToString(ordinal)+"/"+IntegerToString(count)+" · 按开仓时间，最新在后 · 券商时间",16,172,528,9,UI_MUTED);
+   if(at<0)
+   {
+      UIText("本组尚无模拟开单记录",26,226,508,14,UI_TEXT);
+      UIText(paperStatus[paperDetailArm],26,265,508,10,UI_MUTED);
+      UIText("五组继续自动运行；有模拟开单后这里会显示。",26,308,508,9,UI_DIM);
+      panelCanvas.Update(); return;
+   }
+   PaperEvent e=paperDetails[at].entryEvent, end=paperDetails[at].endEvent;
+   bool closed=end.kind=="CLOSE",gap=end.kind=="GAP";
+   int live=PaperFind(e.id);
+   double mfe=live>=0 ? paperTrades[live].mfe : end.mfe;
+   double mae=live>=0 ? paperTrades[live].mae : end.mae;
+   UICard(12,202,536,346,UI_ROW);
+   UIText((e.sign>0 ? "做多 BUY" : "做空 SELL")+" · #"+IntegerToString(e.id),26,214,300,13,UI_TEXT);
+   UIText(closed ? "已平仓" : gap ? "过程缺失" : "模拟持仓中",350,216,180,11,gap ? UI_WARN : UI_ACCENT,true);
+   UIText("点位 "+DoubleToString(e.level,_Digits)+" · "+DoubleToString(e.volume,2)+"手",26,246,508,11,UI_TEXT);
+   UIText("开仓 "+PaperMoment(e.msc)+"   @ "+DoubleToString(e.entry,_Digits),26,278,508,10,UI_TEXT);
+   UIText("结束 "+(end.kind!="" ? PaperMoment(end.msc) : "尚未结束")+
+      (closed ? "   @ "+DoubleToString(end.exit,_Digits) : ""),26,307,508,10,UI_MUTED);
+   UIText("SL "+DoubleToString(e.entry-e.sign*10,_Digits)+"   TP "+DoubleToString(e.entry+e.sign*5,_Digits)+
+      "   最长60分钟",26,336,508,10,UI_MUTED);
+   UIText(closed ? "结果 "+DoubleToString(end.gross-end.fee,2)+" "+AccountInfoString(ACCOUNT_CURRENCY)+
+      " · 费用 "+DoubleToString(end.fee,2) : gap ? "结果不计入盈亏，不推测缺失过程" : "结果待平仓结算",26,365,508,12,UI_TEXT);
+   UIText("最大顺行 "+DoubleToString(mfe,2)+" / 最大逆行 "+DoubleToString(mae,2)+"（采样价格差）",26,398,508,9,UI_MUTED);
+   UIText("入场原因："+e.why,26,428,508,9,UI_TEXT);
+   UIText("结束原因："+(end.kind!="" ? end.why : "等待止盈、止损或时间退出"),26,458,508,9,UI_MUTED);
+   UIText("判断K线："+(e.bar>0 ? TimeToString(e.bar,TIME_DATE|TIME_MINUTES) : "碰价入场，无收线条件"),26,487,508,9,UI_DIM);
+   UIText("来源："+e.source,26,516,508,8,UI_DIM);
+   UIButton("上一笔",12,562,92,216); UIButton("下一笔",112,562,92,217);
+   UIButton("定位入场K线",212,562,148,218); UIButton("返回实时",368,562,176,219);
+   UIText("仅模拟 · 每组显示最近200笔；完整记录保留在原账本",16,601,528,9,UI_MUTED);
+   UIText(reviewNotice!="" ? reviewNotice : "费用0表示未配置佣金；模拟金额不含隔夜费。",16,628,528,8,UI_DIM);
+   panelCanvas.Update();
+}
+
 void PaperApply(const PaperEvent &e)
 {
    paperSeq=e.seq;
+   PaperRemember(e);
    if(e.kind=="WAIT")
    { paperDecisionMinute[e.arm]=e.msc/60000; return; }
    if(e.kind=="REARM")
@@ -372,6 +484,7 @@ void PaperPoll()
 }
 void PaperPanel()
 {
+   if(paperShowDetails) { PaperDetailPanel(); return; }
    UIText("自动试做 · 五组比较",16,94,310,17,UI_TEXT);
    UIButton("查看判断明细",420,94,124,205);
    UIText(tradeMode ? "模拟不发单；原EA仍处于交易模式" : "原EA处于观察模式；五组模拟自动运行",
@@ -395,7 +508,8 @@ void PaperPanel()
       UIText(DoubleToString(paperScores[arm].drawdown,1)+" / "+IntegerToString(paperScores[arm].invalid),444,y+9,100,9,UI_MUTED);
    }
    UIText(PaperName(paperDetailArm)+"："+paperStatus[paperDetailArm],16,472,528,9,UI_TEXT);
-   UIText("最近结果："+paperLastResult,16,501,528,9,UI_MUTED);
+   UIButton("查看本组模拟单",16,501,190,215);
+   UIText("可翻页 / 定位入场K线",220,506,324,9,UI_MUTED);
    UIText(模拟每手往返费用>0 ? "已扣设置费用，不含隔夜费；仍为模拟估算" :
       "费用尚未配置：金额未扣佣金，不可当作净收益",16,533,528,9,UI_WARN);
    UIText("每秒采样试做；历史归档另存收到的报价，不保证完整逐笔。",16,560,528,8.5,UI_DIM);

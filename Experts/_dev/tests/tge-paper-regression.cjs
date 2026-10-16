@@ -12,7 +12,8 @@ function install(x,name,args=''){
  let s=body(name).replace(/\((?:int|long|datetime|double)\)/g,'')
  .replace(/\bstring (\w+)\[\];/g,'let $1=[];')
  .replace(/\b(?:PaperEvent|MqlTick) (\w+);/g,'let $1={};')
- .replace(/\b(?:PaperTrade|PaperScore|TgeObservation|MqlRates|datetime|double|long|int|uint|bool|string)\s+/g,'let ');
+ .replace(/\bPaperEvent (\w+)=/g,'let $1=')
+ .replace(/\b(?:PaperTrade|PaperScore|PaperDetail|TgeObservation|MqlRates|datetime|double|long|int|uint|bool|string)\s+/g,'let ');
  if(name==='PaperClean')s=s.replace(/StringReplace\(text,([^;]+)\);/g,'text=StringReplace(text,$1);');
  if(name==='PaperExit')s=s.replace('return why;','return {why,price};');
  s=s.replace('PaperExit(paperTrades[i],q,exit)',
@@ -32,20 +33,21 @@ function env(existing=''){
   重点事件前后分钟:10,一般高重要性前后分钟:3,冲击冷却秒数:120,恢复确认秒数:180,
   读取AI即时策略:true,启用积极持单:false,入场策略:0,TGE_ENTRY_COMPAT:0,TGE_ENTRY_TOUCH:1,TGE_ENTRY_ADAPTIVE:2,
   TEACHER_BAND:1,REARM_DISTANCE:4,REARM_SECONDS:5,观察收回ATR倍数:.25,
-  paperTrades:[],paperVisits:[],PAPER_ARMS:5,paperDetailArm:0,replayHealth:"archive",adaptiveBars:[],adaptiveATR:2,adaptiveTrend:0,paperScores:Array.from({length:5},()=>({opened:0,closed:0,wins:0,losses:0,invalid:0,net:0,peak:0,drawdown:0})),
+  paperTrades:[],paperVisits:[],paperDetails:[],PAPER_ARMS:5,paperDetailArm:0,paperShowDetails:false,paperSelectedId:0,replayHealth:"archive",adaptiveBars:[],adaptiveATR:2,adaptiveTrend:0,paperScores:Array.from({length:5},()=>({opened:0,closed:0,wins:0,losses:0,invalid:0,net:0,peak:0,drawdown:0})),
   paperSeq:0,paperLastTick:0,paperFile:-1,paperReady:false,paperPending:false,paperRestored:false,
   paperRetry:0,paperFrozen:{},paperPolicy:'',paperFilePath:'',paperLastLine:'',paperHealth:'',
-  paperStatus:['','','','',''],paperLastResult:'',paperDecisionMinute:[0,0,0,0,0],prefix:'test.',_Symbol:'XAUUSD.c',_Digits:2,
+  paperStatus:['','','','',''],paperLastResult:'',reviewNotice:'',paperDecisionMinute:[0,0,0,0,0],prefix:'test.',_Symbol:'XAUUSD.c',_Digits:2,
   observerLiveFrom:999,observerHasPending:false,entryObservations:[],adaptiveRecoverUntil:0,adaptiveShockUntil:0,
   aiPlans:[plan()],aiReady:true,DBL_MAX:Number.MAX_VALUE,
   MathRound:Math.round,MathMin:Math.min,MathMax:Math.max,MathAbs:Math.abs,MathIsValidNumber:Number.isFinite,
+  TimeToString:()=>"2026.10.16 00:16:40",TIME_DATE:1,TIME_SECONDS:2,
   IntegerToString:String,DoubleToString:(v,n)=>Number(v).toFixed(n),StringLen:s=>s.length,
   StringGetCharacter:(s,n)=>s[n],StringSubstr:(s,n,len)=>len===undefined?s.slice(n):s.slice(n,n+len),
   StringToInteger:Number,StringToDouble:Number,StringSplit:(s,sep,out)=>{out.splice(0,out.length,...s.split(sep));return out.length;},
   StringReplace:(s,a,b)=>s.split(a).join(b),Number:(s,dec)=>dec?/^\d+(?:\.\d+)?$/.test(s):/^\d+$/.test(s),
   Hash:s=>{let h=2166136261;for(const c of s)h=Math.imul(h^c.charCodeAt(0),16777619)>>>0;return h;},
-  ArraySize:a=>a.length,ArrayResize:(a,n)=>{while(a.length<n)a.push({});a.length=n;},
-  ZeroMemory:o=>{for(const k of Object.keys(o))delete o[k];
+  ArraySize:a=>a.length,ArrayResize:(a,n)=>{while(a.length<n)a.push(a===x.paperDetails?{entryEvent:{},endEvent:{}}:{});a.length=n;},
+  ZeroMemory:o=>{if(o==null)return;for(const k of Object.keys(o))delete o[k];
    Object.assign(o,{seq:0,id:0,msc:0,bar:0,arm:0,sign:0,level:0,entry:0,exit:0,volume:0,gross:0,fee:0,mfe:0,mae:0,kind:'',source:'',why:''});},
   TickSize:()=>.01,Align:(p,side)=>Number(((side>0?Math.ceil(p*100-1e-8):Math.floor(p*100+1e-8))/100).toFixed(2)),
   TimeGMT:()=>now,TimeCurrent:()=>now,FreshQuote:q=>{Object.assign(q,quote);return true;},
@@ -63,7 +65,7 @@ function env(existing=''){
  const funcs=[
  ['PaperName','arm'],['PaperReaction','arm,level,messageSide,bars,volatility,trendValue'],['PaperDirection','arm,i'],['PaperReactionStatus','i,q,arm,after'],['EffectiveEntryMethod',''],['EntrySourceReason','i'],['UnifiedEntryStatus','i,q,method,live'],
  ['ObserverDirection','i'],['ObserverEntryStatus','i,q,after'],
- ['PaperClean','text'],['PaperPolicy',''],['PaperEncode','e'],['PaperParse','line,e'],
+ ['PaperClean','text'],['PaperDetailFind','id'],['PaperRemember','e'],['PaperSelected',''],['PaperDetailPanel',''],['PaperMoment','msc'],['PaperPolicy',''],['PaperEncode','e'],['PaperParse','line,e'],
  ['PaperFind','id'],['PaperVisitIndex','arm,level'],['PaperEventValid','e'],['PaperApply','e'],
  ['PaperWrite','e'],['PaperEmit','e'],['InitPaper',''],['PaperFromTrade','t,q,e'],['PaperExit','t,q,price'],
  ['PaperInvalidate','q'],['PaperCount','arm'],['PaperAreaBusy','arm,level'],['PaperPoll',''],['StopPaper','']];
@@ -181,7 +183,7 @@ test('收益换算失败不能伪造净收益，下次排除过程不完整样�
 test('60分钟规则对多空一致，费用为零时页面明确告知未扣佣金',()=>{
  const e=env();const t={sign:1,entry:100,opened:1};
  const out=e.x.PaperExit(t,{bid:101,ask:101.1,time_msc:3600001},0);assert.equal(out.why,'满60分钟退出');assert.equal(out.price,101);
- assert(body('PaperPanel').includes('费用尚未配置'));assert(body('PaperPanel').includes('每秒采样'));
+ assert(body('PaperPanel').includes('费用尚未配置'));assert(body('PaperPanel').includes('每秒采样'));assert(body('PaperPanel').includes('查看本组模拟单'));
 });
 test('成绩单布局和明细按钮在固定面板内，不覆盖切换',()=>{
  const e=env(),bounds=[],buttons=[];install(e.x,'PaperPanel');
@@ -215,6 +217,27 @@ test('晚收到的消息不能回看旧K触发C/D/E，收到时间不由原文�
  e.x.aiPlans[0].available=800;e.x.aiPlans[0].confirmed=800;
  assert.equal(e.x.PaperReactionStatus(0,{time:1001,ask:100.8,bid:100.7},2,0),'区间反应候选');
  assert.match(e.x.PaperReactionStatus(0,{time:1001,ask:100.8,bid:100.7},4,0),/尚未收到/);
+});
+test('模拟单明细页面固定布局并提供定位/翻页入口',()=>{
+ const e=env();e.tick(99.9,100);install(e.x,'PaperDetailPanel');
+ const bounds=[],buttons=[];
+ Object.assign(e.x,{UI_TEXT:0,UI_WARN:1,UI_ACCENT:2,UI_ROW:3,UI_MUTED:4,UI_DIM:5,
+  UIText:(t,x,y,w,size)=>bounds.push([x,y,w,size+4]),UICard:(x,y,w,h)=>bounds.push([x,y,w,h]),
+  UIButton:(t,x,y,w,id)=>buttons.push({x,y,w,id}),panelCanvas:{Update:()=>{}}});
+ e.x.PaperDetailPanel();
+ assert(bounds.every(([x,y,w,h])=>x>=0&&x+w<=560&&y>=0&&y+h<=654));
+ assert.deepEqual(buttons.slice(-4).map(b=>b.id),[216,217,218,219]);
+});
+test('模拟单明细随开平仓更新，并可从账本恢复',()=>{
+ const e=env();e.tick(99.9,100);
+ assert.equal(e.x.paperDetails.length,1);
+ assert.equal(e.x.paperDetails[0].entryEvent.arm,0);
+ assert.equal(e.x.paperDetails[0].endEvent.kind,'');
+ e.tick(105,105.1);
+ assert.equal(e.x.paperDetails[0].endEvent.kind,'CLOSE');
+ assert.equal(e.x.paperDetails[0].endEvent.why,'止盈');
+ const r=env(e.file);assert.equal(r.x.paperDetails.length,1);
+ assert.equal(r.x.paperDetails[0].endEvent.kind,'CLOSE');
 });
 test('五组同一轮运行各自开仓与恢复，展示选择不改变策略',()=>{
  const e=env();e.x.aiPlans[0].confirmed=700;e.x.aiPlans[0].available=700;observe(e);
