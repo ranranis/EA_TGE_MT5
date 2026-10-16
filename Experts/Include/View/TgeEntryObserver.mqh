@@ -213,7 +213,7 @@ void RefreshObserver()
    for(int i=0;i<ArraySize(aiPlans);i++)
    {
       if(aiPlans[i].kind=="WATCH" || aiPlans[i].feedState!="READY" ||
-         aiPlans[i].expires<=r.utc || aiPlans[i].confirmed+offset>bar) continue;
+         aiPlans[i].expires<=r.utc || aiPlans[i].confirmed+offset>bar || aiPlans[i].available+offset>bar) continue;
       int n=ArraySize(indices); ArrayResize(indices,n+1); indices[n]=i;
    }
    for(int i=1;i<ArraySize(indices);i++)
@@ -270,6 +270,8 @@ string ObserverEntryStatus(const int i,const MqlTick &q,datetime after)
    int sign=ObserverDirection(i);
    if(sign==0) return "当前点位或消息方向与价格反应不一致";
    string evidence=aiPlans[i].kind+"/"+IntegerToString(aiPlans[i].sign)+"/"+aiPlans[i].id+"/"+aiPlans[i].source;
+   long offset=(long)MathRound((double)(TimeCurrent()-TimeGMT())/3600.0)*3600;
+   if(aiPlans[i].available+offset>r.bar) return "本根K开始时还未收到该版本";
    if(evidence!=(sign>0 ? r.lowerEvidence : r.upperEvidence) ||
       aiPlans[i].confirmed!=(sign>0 ? r.lowerConfirmed : r.upperConfirmed))
       return "点位来源已变化，等待重新判断";

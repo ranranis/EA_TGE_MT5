@@ -5,7 +5,7 @@ import io
 import json
 import re
 from datetime import datetime
-from store import state, set_state
+from store import state, set_state, archive_execution
 from deepseek_ai import lane_readiness, refs_current, pending_window_start
 from point_inputs import manual_points, annotated_roles, reference_only_prices, teacher_role_points, PRIORITIES
 from teacher_strategy import summary_source
@@ -246,4 +246,6 @@ def execution_csv(db, c, now, paused, context, map_active, levels, ai, protocol=
     writer.writerow(['TGA', str(protocol), int(now), int(active), c['symbols'][c['teacher_symbol']], len(rows), note])
     writer.writerows(rows)
     writer.writerow(['END', len(rows)])
-    return output.getvalue()
+    snapshot=output.getvalue()
+    if protocol==9: archive_execution(db,c,now,snapshot)
+    return snapshot

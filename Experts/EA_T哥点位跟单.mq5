@@ -1,5 +1,5 @@
 #property strict
-#property version "1.71"
+#property version "1.72"
 #property description "T哥点位：积极入场、分级保护、结构化退出；固定0.02手，独立Magic。"
 #include <Trade/Trade.mqh>
 #include <Canvas/Canvas.mqh>
@@ -72,6 +72,9 @@ input int    观察回看分钟=60;           // 连续已收盘M1，20至240
 input int    观察边界最少反应次数=2;    // 上下沿分别满足；反应至少间隔3根K
 input double 观察收回ATR倍数=0.25;      // 实验阈值，尚未验证盈利能力
 input double 观察最小区间ATR倍数=2.0;
+
+input group "历史数据 · 自动积累，不回填过去点位"
+input bool   启用历史归档=true;
 
 input group "自动模拟对比 · 不发送订单"
 input bool   启用自动模拟对比=true;
@@ -1218,6 +1221,7 @@ void CloseViewIndicators()
 
 #include "Include/View/TgeEntryObserver.mqh"
 #include "Include/Trading/TgePaperTrading.mqh"
+#include "Include/Journal/TgeReplayArchive.mqh"
 
 void SaveView()
 {
@@ -1437,6 +1441,7 @@ void ViewAction(const int action)
       else reason="无法打开编辑入口，请从监控看板进入点位编辑器";
    }
    else if(action==9) { uiObserver=true; uiStatistics=false; uiIndicators=false; uiPositions=false; }
+   else if(action>=210 && action<210+PAPER_ARMS) paperDetailArm=action-210;
    else if(action==205) uiPaperSummary=!uiPaperSummary;
    else if(action>=200 && action<=204) ObserverAction(action);
    else if(action==29) ToggleTradeMode();
@@ -1719,7 +1724,7 @@ void Panel()
    panelCanvas.FillRectangle(0,0,UIXPx(559),UIPx(39),UIInk(UI_HEADER));
    string pageTitle=uiObserver ? "入场研判" : uiPositions ? "持仓明细" : uiStatistics ? "交易统计" : uiIndicators ? "看盘设置" : "T哥点位计划";
    UIText(_Symbol+" · "+pageTitle,16,10,222,11,UI_TEXT);
-   UIText("v1.71",242,13,40,8,UI_DIM);
+   UIText("v1.72",242,13,40,8,UI_DIM);
    UIText(TimeToString(TimeGMT()+8*3600,TIME_SECONDS),286,12,100,10,UI_MUTED,true);
    UIButton(uiCollapsed ? "+" : "−",396,7,30,1);
    UIButton(tradeMode ? "交易模式" : "观察模式",434,7,110,29,tradeMode);
@@ -1938,6 +1943,7 @@ int OnInit()
       trendFastHandle==INVALID_HANDLE || trendSlowHandle==INVALID_HANDLE) return INIT_FAILED;
    RestorePending(); RestoreSharedVisits(); RestoreTeacherLimits();
    InitView(); InitTgeMobileMarkers();
+   InitReplay();
    fastStarted=TimeGMT(); readyFrom=TimeCurrent(); ReadHealth(); ReadAISetups();
    InitAdaptive(); RefreshAdaptiveMarket(); RefreshAdaptiveHistory(); RefreshPointStructure(); RefreshAdaptiveCalendar();
    LifePoll();
@@ -1956,7 +1962,7 @@ void OnTimer()
    if(fresh) for(int i=0;i<ArraySize(aiPlans);i++) TeacherEntryAllowed(i,q);
    Reconcile();
    SyncTeacherLimits(); Manage();
-   LifePoll(); ReviewNavigate(); RefreshObserver(); PaperPoll();
+   LifePoll(); ReviewNavigate(); RefreshObserver(); PaperPoll(); ReplayPoll();
    checkingMinute=iTime(_Symbol,PERIOD_M1,1);
    DecisionLog("EVALUATE",reason);
    SyncTgeMobileMarkers(); SyncHistoryLayer(); Panel(); busy=false;
@@ -1966,7 +1972,7 @@ void OnTick()
 {
    if(busy) return; busy=true;
    MqlTick q;
-   if(FreshQuote(q)) { RememberFastTick(q); UpdateTeacherVisits(q); UpdateAdaptiveShock(q); }
+   if(FreshQuote(q)) { ReplayCapture(q); RememberFastTick(q); UpdateTeacherVisits(q); UpdateAdaptiveShock(q); }
    Candidate candidate;
    if(LegacyLimitsClear() && pending.kind==0 && AIMarketSignal(candidate)) Open(candidate);
    busy=false;
@@ -2028,7 +2034,7 @@ void OnChartEvent(const int id,const long &lparam,const double &dparam,const str
 void OnDeinit(const int why)
 {
    EventKillTimer();
-   StopPaper();
+   StopReplay(); StopPaper();
    LifePoll(); LifeFlush(); ReviewReturnLive(false);
    RestoreHistoryLayer(); StopTgeMobileMarkers();
    if(uiInitialized)

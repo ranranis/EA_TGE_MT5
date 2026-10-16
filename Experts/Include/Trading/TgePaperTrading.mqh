@@ -17,17 +17,76 @@ struct PaperEvent
    double level,entry,exit,volume,gross,fee,mfe,mae;
    string kind,source,why;
 };
+#define PAPER_ARMS 5
+int paperDetailArm=0;
+string PaperName(const int arm)
+{
+   if(arm==0) return "A 碰价基准";
+   if(arm==1) return "B 区间反弹";
+   if(arm==2) return "C 单点收回";
+   if(arm==3) return "D 顺势回踩";
+   return "E 突破回踩";
+}
+// C/D/E的纯收盘判定，所有bars均为已完成K线，trend为当时已缓存的M5趋势。
+int PaperReaction(const int arm,const double level,const int messageSide,const MqlRates &bars[],
+                  const double volatility,const int trendValue)
+{
+   if(ArraySize(bars)<3 || volatility<=0 || level<=0) return 0;
+   MqlRates b=bars[0];
+   double buffer=MathMax(TickSize()*2,volatility*观察收回ATR倍数);
+   if(b.high-b.low>volatility*3) return 0;
+   int sign=messageSide!=0 ? messageSide : (b.close>level ? 1 : -1);
+   if(arm==4)
+   {
+      // 突破K必须先完成；下一根回踩K也必须完成。不用同根高低猜先后。
+      bool up=bars[2].close<=level && bars[1].close>level+buffer;
+      bool down=bars[2].close>=level && bars[1].close<level-buffer;
+      sign=up ? 1 : down ? -1 : 0;
+      if(sign==0 || messageSide*sign<0) return 0;
+   }
+   if(arm==3 && trendValue!=sign) return 0;
+   if(sign*(b.close-b.open)<volatility*0.10 || sign*(b.close-level)<buffer ||
+      MathAbs(b.close-level)>TEACHER_BAND+buffer) return 0;
+   if(sign>0 && (b.low<level-TEACHER_BAND || b.low>level+TEACHER_BAND)) return 0;
+   if(sign<0 && (b.high>level+TEACHER_BAND || b.high<level-TEACHER_BAND)) return 0;
+   return sign;
+}
+int PaperDirection(const int arm,const int i)
+{
+   if(arm==0) return PlanSign(i);
+   if(arm==1) return ObserverDirection(i);
+   return PaperReaction(arm,aiPlans[i].level,aiPlans[i].sign,adaptiveBars,adaptiveATR,adaptiveTrend);
+}
+string PaperReactionStatus(const int i,const MqlTick &q,const int arm,datetime after)
+{
+   if(!AdaptiveMarketFresh() || ArraySize(adaptiveBars)<3) return "等待完整收盘行情";
+   MqlRates b=adaptiveBars[0];
+   long offset=(long)MathRound((double)(TimeCurrent()-TimeGMT())/3600.0)*3600;
+   datetime evidenceBar=arm==4 ? adaptiveBars[2].time : b.time;
+   if(aiPlans[i].confirmed+offset>evidenceBar || aiPlans[i].available+offset>evidenceBar)
+      return "当时尚未收到该点位版本，等待新的反应";
+   if(q.time<b.time+60 || q.time>=b.time+120) return "等待新的一分钟行情";
+   if(TimeCurrent()<adaptiveRecoverUntil) after=(datetime)MathMax(after,adaptiveShockUntil);
+   if(after>0 && evidenceBar<after) return "等待消息或冲击结束后的新反应";
+   int sign=PaperDirection(arm,i);
+   if(sign==0) return arm==4 ? "等待突破完成后再回踩" : arm==3 ? "等待顺势回踩并收回" : "等待点位收回，暂不入场";
+   double entry=sign>0 ? q.ask : q.bid;
+   if(sign*(entry-aiPlans[i].level)<=0 ||
+      MathAbs(entry-aiPlans[i].level)>TEACHER_BAND+MathMax(TickSize()*2,adaptiveATR*观察收回ATR倍数))
+      return "价格已离开反应区域，不追价";
+   return "区间反应候选";
+}
 PaperTrade paperTrades[];
 PaperVisit paperVisits[];
-PaperScore paperScores[2];
+PaperScore paperScores[PAPER_ARMS];
 long paperSeq=0,paperLastTick=0;
 int paperFile=INVALID_HANDLE;
 bool paperReady=false,paperPending=false,paperRestored=false;
 datetime paperRetry=0;
 PaperEvent paperFrozen;
 string paperPolicy="",paperFilePath="",paperLastLine="",paperHealth="自动模拟尚未初始化";
-string paperStatus[2]={"等待报价","等待报价"},paperLastResult="尚无模拟平仓";
-long paperDecisionMinute[2]={0,0};
+string paperStatus[PAPER_ARMS],paperLastResult="尚无模拟平仓";
+long paperDecisionMinute[PAPER_ARMS];
 
 string PaperClean(string text)
 {
@@ -36,7 +95,7 @@ string PaperClean(string text)
 string PaperPolicy()
 {
    // 改变比较规则或费用会自动分开账本，不能把不同假设的成绩相加。
-   return "P1/tp5/sl10/hold60/lot"+DoubleToString(每次开仓手数,8)+"/cap"+IntegerToString(最大同时持仓)+
+   return "P2/five-arms-v1.72/tp5/sl10/hold60/lot"+DoubleToString(每次开仓手数,8)+"/cap"+IntegerToString(最大同时持仓)+
       "/fee"+DoubleToString(模拟每手往返费用,8)+"/slip"+DoubleToString(模拟单边滑点价格,8)+
       "/news"+IntegerToString((int)启用消息日历)+"/windows"+IntegerToString(重点事件前后分钟)+","+
       IntegerToString(一般高重要性前后分钟)+"/shock"+IntegerToString(冲击冷却秒数)+
@@ -73,7 +132,7 @@ bool PaperParse(const string line,PaperEvent &e)
    e.exit=StringToDouble(f[10]); e.volume=StringToDouble(f[11]); e.gross=StringToDouble(f[12]);
    e.fee=StringToDouble(f[13]); e.mfe=StringToDouble(f[14]); e.mae=StringToDouble(f[15]);
    e.source=f[16]; e.why=f[17];
-   return e.seq>0 && e.msc>0 && e.arm>=0 && e.arm<=1 &&
+   return e.seq>0 && e.msc>0 && e.arm>=0 && e.arm<PAPER_ARMS &&
       (e.kind=="OPEN" || e.kind=="CLOSE" || e.kind=="GAP" || e.kind=="REARM" || e.kind=="WAIT");
 }
 int PaperFind(const long id)
@@ -131,7 +190,7 @@ void PaperApply(const PaperEvent &e)
    if(net<0) paperScores[e.arm].losses++;
    paperScores[e.arm].peak=MathMax(paperScores[e.arm].peak,paperScores[e.arm].net);
    paperScores[e.arm].drawdown=MathMax(paperScores[e.arm].drawdown,paperScores[e.arm].peak-paperScores[e.arm].net);
-   paperLastResult=(e.arm==0 ? "碰价基准" : "新判断")+ " · "+e.why+" · "+
+   paperLastResult=PaperName(e.arm)+ " · "+e.why+" · "+
       DoubleToString(net,2)+" "+AccountInfoString(ACCOUNT_CURRENCY);
 }
 bool PaperWrite(const PaperEvent &e)
@@ -261,15 +320,15 @@ void PaperPoll()
       e.level=paperVisits[i].level; e.msc=q.time_msc; e.why="离开4点至少5秒，允许新机会";
       if(!PaperEmit(e)) return;
    }
-   for(int arm=0;arm<2;arm++)
+   for(int arm=0;arm<PAPER_ARMS;arm++)
    {
       if(PaperCount(arm)>=最大同时持仓) { paperStatus[arm]="模拟持仓已达上限"; continue; }
       int best=-1,side=0,closest=-1; double nearest=DBL_MAX;
       paperStatus[arm]=AIChannelReady() ? "等待有效点位" : "消息未同步，暂停新模拟";
       for(int i=0;i<ArraySize(aiPlans);i++)
       {
-         int sign=arm==0 ? PlanSign(i) : ObserverDirection(i);
-         string status=UnifiedEntryStatus(i,q,arm==0 ? 0 : 2,false);
+         int sign=PaperDirection(arm,i);
+         string status=UnifiedEntryStatus(i,q,arm==0 ? 0 : arm+1,false);
          double distance=MathAbs(aiPlans[i].level-(q.bid+q.ask)/2);
          if(distance<nearest) { nearest=distance; closest=i; paperStatus[arm]=status; }
          if(status!="触价候选" && status!="区间反应候选") continue;
@@ -293,18 +352,18 @@ void PaperPoll()
       bool conflict=false;
       for(int i=0;i<ArraySize(aiPlans);i++)
       {
-         int sign=arm==0 ? PlanSign(i) : ObserverDirection(i);
+         int sign=PaperDirection(arm,i);
          if(i==best || sign!=-side || aiPlans[i].priority!=aiPlans[best].priority) continue;
-         string status=UnifiedEntryStatus(i,q,arm==0 ? 0 : 2,false);
+         string status=UnifiedEntryStatus(i,q,arm==0 ? 0 : arm+1,false);
          if(status=="触价候选" || status=="区间反应候选") conflict=true;
       }
       if(conflict) { paperStatus[arm]="同优先级意见冲突，等待新消息或新行情"; continue; }
       PaperEvent e; ZeroMemory(e); e.kind="OPEN"; e.arm=arm; e.sign=side; e.msc=q.time_msc;
-      e.bar=arm==1 ? entryObservations[ArraySize(entryObservations)-1].bar : 0;
+      e.bar=arm==0 ? 0 : arm==1 ? entryObservations[ArraySize(entryObservations)-1].bar : adaptiveBars[0].time;
       e.level=aiPlans[best].level; e.volume=每次开仓手数;
       e.entry=Align((side>0 ? q.ask : q.bid)+side*模拟单边滑点价格,side);
       e.source=aiPlans[best].id+"/"+aiPlans[best].source+"/"+IntegerToString((long)aiPlans[best].confirmed);
-      e.why=arm==0 ? "碰价基准：有效点位接近后模拟入场" : "新判断：消息位置与已收盘K线反应一致";
+      e.why=PaperName(arm)+"：按本组规则自动模拟入场";
       if(arm==0) e.why+="；B当时："+UnifiedEntryStatus(best,q,2,false);
       if(!PaperEmit(e)) return;
       paperStatus[arm]="已模拟"+(side>0 ? "买入 " : "卖出 ")+DoubleToString(e.entry,_Digits);
@@ -313,33 +372,35 @@ void PaperPoll()
 }
 void PaperPanel()
 {
-   UIText("自动试做 · 成绩单",16,94,310,17,UI_TEXT);
+   UIText("自动试做 · 五组比较",16,94,310,17,UI_TEXT);
    UIButton("查看判断明细",420,94,124,205);
-   UIText(tradeMode ? "模拟不发单；原EA仍处于交易模式" : "原EA处于观察模式；两组模拟仍自动运行",
+   UIText(tradeMode ? "模拟不发单；原EA仍处于交易模式" : "原EA处于观察模式；五组模拟自动运行",
       16,126,528,10,tradeMode ? UI_WARN : UI_ACCENT);
-   UICard(12,155,536,55,UI_ROW);
-   UIText(paperHealth,26,163,508,10,UI_TEXT);
-   UIText("相同0.02手 · TP5/SL10 · 最长60分钟 · 各自独立计算",26,188,508,9,UI_MUTED);
-   for(int arm=0;arm<2;arm++)
+   UIText(paperHealth,16,155,528,9,UI_TEXT);
+   UIText(replayHealth,16,179,528,9,UI_MUTED);
+   UIText("各组相同0.02手 / TP5 SL10 / 最长60分钟",16,203,528,9,UI_DIM);
+   UIText("点选策略查看原因",16,233,176,9,UI_MUTED);
+   UIText("结果 / "+AccountInfoString(ACCOUNT_CURRENCY),198,233,88,9,UI_MUTED);
+   UIText("完成/持有",290,233,80,9,UI_MUTED);
+   UIText("赢/亏",374,233,65,9,UI_MUTED);
+   UIText("回撤 / 缺失",444,233,100,9,UI_MUTED);
+   for(int arm=0;arm<PAPER_ARMS;arm++)
    {
-      int x=12+arm*272;
-      UICard(x,222,264,220,UI_ROW);
-      UIText(arm==0 ? "A · 碰价就尝试" : "B · 等价格给出反应",x+14,235,236,12,UI_TEXT);
-      UIText(DoubleToString(paperScores[arm].net,2)+" "+AccountInfoString(ACCOUNT_CURRENCY),x+14,268,236,22,UI_ACCENT);
-      UIText("已结束 "+IntegerToString(paperScores[arm].closed)+" 单 / 进行中 "+IntegerToString(PaperCount(arm))+" 单",x+14,308,236,10,UI_MUTED);
-      UIText("盈利 "+IntegerToString(paperScores[arm].wins)+" / 亏损 "+IntegerToString(paperScores[arm].losses),x+14,335,236,10,UI_MUTED);
-      UIText("已实现最大回撤 "+DoubleToString(paperScores[arm].drawdown,2),x+14,362,236,9,UI_MUTED);
-      UIText("过程缺失、不计结果 "+IntegerToString(paperScores[arm].invalid)+" 单",x+14,389,236,9,UI_WARN);
-      UIText("共尝试 "+IntegerToString(paperScores[arm].opened)+" 单",x+14,415,236,9,UI_DIM);
+      int y=255+arm*41;
+      UICard(12,y,536,36,UI_ROW);
+      UIButton(PaperName(arm),16,y+4,172,210+arm,paperDetailArm==arm);
+      UIText(DoubleToString(paperScores[arm].net,2),198,y+8,88,11,UI_ACCENT);
+      UIText(IntegerToString(paperScores[arm].closed)+"/"+IntegerToString(PaperCount(arm)),290,y+9,80,9,UI_TEXT);
+      UIText(IntegerToString(paperScores[arm].wins)+"/"+IntegerToString(paperScores[arm].losses),374,y+9,65,9,UI_TEXT);
+      UIText(DoubleToString(paperScores[arm].drawdown,1)+" / "+IntegerToString(paperScores[arm].invalid),444,y+9,100,9,UI_MUTED);
    }
-   UIText("A："+paperStatus[0],16,455,528,9,UI_MUTED);
-   UIText("B："+paperStatus[1],16,479,528,9,UI_MUTED);
-   UIText("最近结果："+paperLastResult,16,510,528,9,UI_TEXT);
-   UIText(模拟每手往返费用>0 ? "金额已扣设置费用；不含隔夜费，仍是模拟估算" :
-      "费用尚未配置：金额未扣佣金，不可当作净收益",16,541,528,9,UI_WARN);
-   UIText("每秒采样Bid/Ask；可能漏掉秒内触价，不等同真实成交。",16,566,528,8.5,UI_DIM);
-   UIText("账本按规则/费用分开；重启恢复累计成绩，不猜缺失过程。",16,590,528,8.5,UI_DIM);
-   UIText("新判断仍在验证，暂不接管实盘。",16,618,528,9,UI_MUTED);
+   UIText(PaperName(paperDetailArm)+"："+paperStatus[paperDetailArm],16,472,528,9,UI_TEXT);
+   UIText("最近结果："+paperLastResult,16,501,528,9,UI_MUTED);
+   UIText(模拟每手往返费用>0 ? "已扣设置费用，不含隔夜费；仍为模拟估算" :
+      "费用尚未配置：金额未扣佣金，不可当作净收益",16,533,528,9,UI_WARN);
+   UIText("每秒采样试做；历史归档另存收到的报价，不保证完整逐笔。",16,560,528,8.5,UI_DIM);
+   UIText("缺失过程不计盈亏；旧两组成绩保留在原账本。",16,585,528,8.5,UI_DIM);
+   UIText("所有组均为待验证假设，暂不接管实盘。",16,614,528,9,UI_MUTED);
    panelCanvas.Update();
 }
 void StopPaper()

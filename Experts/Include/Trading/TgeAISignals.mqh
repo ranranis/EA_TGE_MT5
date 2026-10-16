@@ -5,8 +5,8 @@ struct AIPlan
 {
    int sign,priority,approach;
    double level,sl,first,tp,breakeven;
-   string id,kind,group,source,origin,status,mode,lifeReason;
-   datetime created,confirmed,expires;
+   string id,kind,group,source,origin,status,mode,lifeReason,evidenceVersion;
+   datetime created,confirmed,expires,available;
    int evidenceCount;
    string feedState,feedNote,loggedLife;
    bool sleeping,hardStopped;
@@ -58,6 +58,7 @@ bool ReadAISetups()
                   isMap ? priority==40 : watch && priority==0;
       if((!isMap && !direct && !range && !role && !watch) || !ranked ||
           (isMap || watch ? f[4]!="AUTO" : f[4]!="BUY" && f[4]!="SELL")) return InvalidAI("点位类型/方向/优先级无效");
+      incoming[i].evidenceVersion=lines[i+1]; incoming[i].available=TimeGMT();
       incoming[i].id=f[1]; incoming[i].kind=f[2]; incoming[i].priority=priority;
       signature+=lines[i+1]+"|";
       incoming[i].sign=isMap || watch ? 0 : f[4]=="BUY" ? 1 : -1; incoming[i].approach=0;
@@ -93,6 +94,7 @@ bool ReadAISetups()
        for(int j=0;j<ArraySize(aiPlans);j++)
           if(aiPlans[j].id==incoming[i].id)
           {
+            if(incoming[i].evidenceVersion==aiPlans[j].evidenceVersion) incoming[i].available=aiPlans[j].available;
             bool reconfirmed=incoming[i].confirmed>aiPlans[j].confirmed;
             incoming[i].approach=aiPlans[j].approach; incoming[i].status=aiPlans[j].status;
             // 明确重申是一次新的确认：旧点位的离价休眠、止损停用和状态文案不能把新消息锁死。
@@ -116,6 +118,7 @@ bool ReadAISetups()
          int n=ArraySize(map); ArrayResize(map,n+1); map[n]=level; mapAt=MathMax(mapAt,incoming[i].created);
       }
    }
+   ReplayAccepted(lines); // 保存EA首次实际接受的完整版本；归档不参与交易资格。
    // 所有行通过后一次替换；坏文件停新请求，不能发布半组方向。
    ArrayResize(aiPlans,count); aiSourceTime=0;
    for(int i=0;i<count;i++) { aiPlans[i]=incoming[i]; aiSourceTime=MathMax(aiSourceTime,incoming[i].created); }
@@ -418,6 +421,7 @@ string UnifiedEntryStatus(const int i,const MqlTick &q,const int method,const bo
       if(news!="") return news;
       if(TimeCurrent()<adaptiveShockUntil) return "急涨急跌，暂等稳定";
       if(method==2) return ObserverEntryStatus(i,q,after);
+      if(method>=3) return PaperReactionStatus(i,q,method-1,after);
       int side=PlanSign(i);
       if(side==0) return "等待接近点位";
       if(!InTeacherBand(side>0 ? q.ask : q.bid,aiPlans[i].level)) return "等待接近点位";

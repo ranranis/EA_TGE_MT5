@@ -30,6 +30,11 @@ def connect(path):
       modified TEXT, revision TEXT NOT NULL, deleted INTEGER NOT NULL, historical INTEGER NOT NULL,
       thread_id TEXT, checked REAL NOT NULL DEFAULT 0, raw TEXT NOT NULL,
       PRIMARY KEY(chat_id,message_id));
+    CREATE TABLE IF NOT EXISTS ai_messages(
+      chat_id TEXT NOT NULL,message_id TEXT NOT NULL,revision TEXT NOT NULL,created REAL NOT NULL,
+      status TEXT NOT NULL,payload TEXT NOT NULL,processed REAL NOT NULL,attempts INTEGER NOT NULL DEFAULT 0,
+      retry_at REAL NOT NULL DEFAULT 0,error TEXT NOT NULL DEFAULT '',
+      PRIMARY KEY(chat_id,message_id,revision));
     CREATE TABLE IF NOT EXISTS signals(
       id INTEGER PRIMARY KEY,chat_id TEXT NOT NULL,message_id TEXT NOT NULL,revision TEXT NOT NULL,
       sender TEXT NOT NULL,created REAL NOT NULL,payload TEXT NOT NULL,status TEXT NOT NULL,reason TEXT,
@@ -49,6 +54,18 @@ def connect(path):
       slippage REAL NOT NULL,pnl REAL NOT NULL,commission REAL NOT NULL,reason TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS equity(at REAL PRIMARY KEY,balance REAL NOT NULL,equity REAL NOT NULL);
     CREATE TABLE IF NOT EXISTS alerts(id INTEGER PRIMARY KEY,at REAL NOT NULL,code TEXT NOT NULL,detail TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS message_versions(
+      id INTEGER PRIMARY KEY, chat_id TEXT NOT NULL, message_id TEXT NOT NULL,
+      revision TEXT NOT NULL, received_at REAL NOT NULL, source_created REAL NOT NULL,
+      historical INTEGER NOT NULL, baseline INTEGER NOT NULL, raw TEXT NOT NULL);
+    CREATE INDEX IF NOT EXISTS message_version_lookup ON message_versions(chat_id,message_id,id);
+    CREATE TABLE IF NOT EXISTS point_state_versions(
+      id INTEGER PRIMARY KEY, key TEXT NOT NULL, recorded_at REAL NOT NULL, value TEXT NOT NULL);
+    CREATE INDEX IF NOT EXISTS point_state_lookup ON point_state_versions(key,id);
+    CREATE TABLE IF NOT EXISTS execution_versions(
+      id INTEGER PRIMARY KEY, scope TEXT NOT NULL, recorded_at REAL NOT NULL,
+      generated_at REAL NOT NULL, signature TEXT NOT NULL, snapshot TEXT NOT NULL);
+    CREATE INDEX IF NOT EXISTS execution_version_lookup ON execution_versions(scope,id);
     CREATE INDEX IF NOT EXISTS message_check ON messages(checked);
     CREATE INDEX IF NOT EXISTS signal_status ON signals(status);
     ''')
@@ -59,7 +76,29 @@ def state(db,key,default=None):
     return json.loads(row[0]) if row else default
 
 def set_state(db,key,value):
-    db.execute('INSERT INTO state VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',(key,dumps(value)))
+    encoded=dumps(value)
+    # 与当前状态同事务保存；历史表不反向参与交易，不用原消息时间伪造首次获知时间。
+    if key in ('teacher_levels','teacher_scene','deepseek_setup','deepseek_review','point_editor'):
+        latest=db.execute('SELECT value FROM point_state_versions WHERE key=? ORDER BY id DESC LIMIT 1',(key,)).fetchone()
+        if not latest or latest[0]!=encoded:
+            db.execute('INSERT INTO point_state_versions(key,recorded_at,value) VALUES(?,?,?)',(key,time.time(),encoded))
+    db.execute('INSERT INTO state VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',(key,encoded))
+
+def archive_execution(db,c,generated,snapshot):
+    import csv,io
+    rows=list(csv.reader(io.StringIO(snapshot)))
+    if len(rows)<2 or rows[0][:2]!=['TGA','9'] or rows[-1][0]!='END':
+        raise ValueError('只能归档完整TGA9执行快照')
+    # 仅剔除心跳和展示说明；启停、点位行、手动来源、期限和撤销状态参与版本比较。
+    semantic=[rows[0][0:2]+rows[0][3:6],*rows[1:]]
+    signature=hashlib.sha256(dumps(semantic).encode('utf-8')).hexdigest()
+    scope=dumps([c['chat_id'],c['symbols'][c['teacher_symbol']]])
+    with db:
+        previous=db.execute('SELECT signature FROM execution_versions WHERE scope=? ORDER BY id DESC LIMIT 1',(scope,)).fetchone()
+        if not previous or previous[0]!=signature:
+            db.execute('INSERT INTO execution_versions(scope,recorded_at,generated_at,signature,snapshot) VALUES(?,?,?,?,?)',
+                       (scope,time.time(),generated,signature,snapshot))
+
 
 def alert(db,code,detail,now=None):
     db.execute('INSERT INTO alerts(at,code,detail) VALUES(?,?,?)',(now or time.time(),code,detail))
@@ -78,6 +117,14 @@ def ingest(db,chat_id,messages,cutoff=None,historical=False,checked_ids=(),threa
             revision=hashlib.sha256(dumps(signature).encode('utf-8')).hexdigest()
             old=db.execute('SELECT * FROM messages WHERE chat_id=? AND message_id=?',(chat_id,mid)).fetchone()
             is_history=bool(historical or created<live_since or (old and old['historical']))
+            # 升级前没有版本历史的旧行只能标为“升级基线”，不能宣称当年已归档。
+            archived=db.execute('SELECT 1 FROM message_versions WHERE chat_id=? AND message_id=? LIMIT 1',(chat_id,mid)).fetchone()
+            if old and not archived:
+                db.execute('INSERT INTO message_versions(chat_id,message_id,revision,received_at,source_created,historical,baseline,raw) VALUES(?,?,?,?,?,?,1,?)',
+                           (chat_id,mid,old['revision'],now,old['created'],old['historical'],old['raw']))
+            if not old or old['revision']!=revision:
+                db.execute('INSERT INTO message_versions(chat_id,message_id,revision,received_at,source_created,historical,baseline,raw) VALUES(?,?,?,?,?,?,0,?)',
+                           (chat_id,mid,revision,now,created,int(is_history),dumps(message)))
             thread=message.get('thread_id')
             if thread: db.execute('INSERT OR IGNORE INTO threads(thread_id) VALUES(?)',(thread,))
             if old and old['revision']==revision:

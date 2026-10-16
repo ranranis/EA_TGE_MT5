@@ -40,7 +40,7 @@ function env(options={}){
   StringToInteger:Number,StringToDouble:Number,StringSplit:(s,sep,out)=>{out.splice(0,out.length,...s.split(sep));return out.length;},
   StringFind:(s,t)=>s.indexOf(t),StringSubstr:(s,n)=>s.slice(n),ArraySize:a=>a.length,ArrayResize:(a,n)=>{while(a.length<n)a.push({});a.length=n;},
   ArrayCopy:(a,b)=>a.splice(0,a.length,...b),ArraySort:a=>a.sort((a,b)=>a-b),
-  lastPriceMin:0,lastPriceMax:0,CHART_PRICE_MIN:1,CHART_PRICE_MAX:2,ChartGetDouble:(id,k)=>k===1?4100:4200,Load:k=>memory[k]||0,Store:(k,v)=>{memory[k]=v;return true;},GlobalVariablesFlush:()=>{},DrawLevels:()=>{},Print:()=>{},
+  lastPriceMin:0,lastPriceMax:0,CHART_PRICE_MIN:1,CHART_PRICE_MAX:2,ChartGetDouble:(id,k)=>k===1?4100:4200,Load:k=>memory[k]||0,Store:(k,v)=>{memory[k]=v;return true;},GlobalVariablesFlush:()=>{},DrawLevels:()=>{},ReplayAccepted:()=>{},Print:()=>{},
   ZeroMemory:p=>{for(const k of Object.keys(p))delete p[k];Object.assign(p,{kind:0,exitSL:0,exitFirst:0,exitTP:0,exitBE:0,valid:false});},
   FreshQuote:q=>Object.assign(q,{bid:4174.9,ask:4175,time_msc:now*1000}),
   CanExecute:()=>true,ExecutionBlock:()=>'',ExactLot:()=>true,Align:v=>v,Stops:()=>true,
