@@ -164,6 +164,7 @@ struct PaperDetail { PaperEvent entryEvent, endEvent; };
 PaperDetail paperDetails[];
 bool paperShowDetails=false;
 long paperSelectedId=0;
+bool paperChartDirty=true;
 int PaperDetailFind(const long id)
 {
    for(int i=0;i<ArraySize(paperDetails);i++)
@@ -172,6 +173,7 @@ int PaperDetailFind(const long id)
 }
 void PaperRemember(const PaperEvent &e)
 {
+   paperChartDirty=true;
    if(e.kind=="OPEN")
    {
       int count=0,oldest=-1;
@@ -206,8 +208,13 @@ int PaperSelected()
 }
 void PaperDetailAction(const int action)
 {
-   if(action==215) { paperShowDetails=!paperShowDetails; return; }
-   if(action==219) { ReviewReturnLive(); return; }
+   if(action==215)
+   {
+      paperShowDetails=!paperShowDetails;
+      if(!paperShowDetails) PaperClearReviewChart(); else paperChartDirty=true;
+      return;
+   }
+   if(action==219) { PaperClearReviewChart(); ReviewReturnLive(); return; }
    int at=PaperSelected(); if(at<0) return;
    if(action==218)
    {
@@ -217,14 +224,92 @@ void PaperDetailAction(const int action)
    int step=action==216 ? -1 : 1;
    for(int i=at+step;i>=0 && i<ArraySize(paperDetails);i+=step)
       if(paperDetails[i].entryEvent.arm==paperDetailArm)
-      { paperSelectedId=paperDetails[i].entryEvent.id; break; }
+      { paperSelectedId=paperDetails[i].entryEvent.id; paperChartDirty=true; break; }
 }
 string PaperMoment(const long msc)
 {
    return TimeToString((datetime)(msc/1000),TIME_DATE|TIME_SECONDS);
 }
+string PaperReviewPrefix()
+{
+   return VIEW+"PAPER_REVIEW_";
+}
+void PaperClearReviewChart()
+{
+   string objectPrefix=PaperReviewPrefix();
+   for(int i=ObjectsTotal(0,0)-1;i>=0;i--)
+   {
+      string name=ObjectName(0,i,0);
+      if(StringFind(name,objectPrefix)==0) ObjectDelete(0,name);
+   }
+   paperChartDirty=true;
+   ChartRedraw(0);
+}
+void PaperReviewArrow(const string name,const datetime at,const double price,
+                      const int code,const color ink,const int width,const string tip)
+{
+   if(ObjectFind(0,name)<0 && !ObjectCreate(0,name,OBJ_ARROW,0,at,price)) return;
+   ObjectMove(0,name,0,at,price);
+   ObjectSetInteger(0,name,OBJPROP_ARROWCODE,code);
+   ObjectSetInteger(0,name,OBJPROP_COLOR,ink);
+   ObjectSetInteger(0,name,OBJPROP_WIDTH,width);
+   ObjectSetInteger(0,name,OBJPROP_BACK,true);
+   ObjectSetInteger(0,name,OBJPROP_SELECTABLE,false);
+   ObjectSetInteger(0,name,OBJPROP_HIDDEN,true);
+   ObjectSetInteger(0,name,OBJPROP_ZORDER,0);
+   ObjectSetString(0,name,OBJPROP_TOOLTIP,tip);
+}
+void PaperReviewLine(const string name,const datetime t1,const double p1,
+                     const datetime t2,const double p2,const color ink,const int width,
+                     const ENUM_LINE_STYLE style,const string tip)
+{
+   if(ObjectFind(0,name)<0 && !ObjectCreate(0,name,OBJ_TREND,0,t1,p1,t2,p2)) return;
+   ObjectMove(0,name,0,t1,p1); ObjectMove(0,name,1,t2,p2);
+   ObjectSetInteger(0,name,OBJPROP_COLOR,ink);
+   ObjectSetInteger(0,name,OBJPROP_WIDTH,width);
+   ObjectSetInteger(0,name,OBJPROP_STYLE,style);
+   ObjectSetInteger(0,name,OBJPROP_RAY_LEFT,false);
+   ObjectSetInteger(0,name,OBJPROP_RAY_RIGHT,false);
+   ObjectSetInteger(0,name,OBJPROP_BACK,true);
+   ObjectSetInteger(0,name,OBJPROP_SELECTABLE,false);
+   ObjectSetInteger(0,name,OBJPROP_HIDDEN,true);
+   ObjectSetInteger(0,name,OBJPROP_ZORDER,0);
+   ObjectSetString(0,name,OBJPROP_TOOLTIP,tip);
+}
+void PaperDrawReviewChart()
+{
+   if(!paperShowDetails || !paperChartDirty) return;
+   PaperClearReviewChart();
+   paperChartDirty=false;
+   string objectPrefix=PaperReviewPrefix();
+   for(int i=0;i<ArraySize(paperDetails);i++)
+   {
+      PaperEvent e=paperDetails[i].entryEvent, end=paperDetails[i].endEvent;
+      if(e.arm!=paperDetailArm || e.msc<=0 || e.entry<=0) continue;
+      bool selected=e.id==paperSelectedId || (paperSelectedId==0 && i==PaperSelected());
+      int width=selected ? 3 : 1;
+      color entryInk=e.sign>0 ? C'0,108,180' : C'190,88,35';
+      color exitInk=e.sign>0 ? C'0,145,110' : C'175,55,115';
+      string base=objectPrefix+IntegerToString(e.id)+"_";
+      string direction=e.sign>0 ? "模拟多单" : "模拟空单";
+      PaperReviewArrow(base+"IN",(datetime)(e.msc/1000),e.entry,e.sign>0 ? 233 : 234,
+                       entryInk,width,direction+" 入场 #"+IntegerToString(e.id)+" · "+PaperMoment(e.msc));
+      if(end.kind=="CLOSE" && end.msc>e.msc && end.exit>0)
+      {
+         PaperReviewLine(base+"PATH",(datetime)(e.msc/1000),e.entry,(datetime)(end.msc/1000),end.exit,
+                         end.gross-end.fee>=0 ? C'0,145,110' : C'190,88,35',width,
+                         end.gross-end.fee>=0 ? STYLE_SOLID : STYLE_DASH,
+                         direction+" 入场→出场 #"+IntegerToString(e.id));
+         PaperReviewArrow(base+"OUT",(datetime)(end.msc/1000),end.exit,e.sign>0 ? 234 : 233,
+                          exitInk,width,direction+" 出场 #"+IntegerToString(e.id)+" · "+PaperMoment(end.msc)+
+                          " · "+DoubleToString(end.gross-end.fee,2));
+      }
+   }
+   ChartRedraw(0);
+}
 void PaperDetailPanel()
 {
+   PaperDrawReviewChart();
    UIText("模拟单明细 · "+PaperName(paperDetailArm),16,94,340,16,UI_TEXT);
    UIButton("返回成绩单",420,94,124,215);
    for(int arm=0;arm<PAPER_ARMS;arm++)

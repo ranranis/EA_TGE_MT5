@@ -70,6 +70,7 @@ function env(existing=''){
  ['PaperWrite','e'],['PaperEmit','e'],['InitPaper',''],['PaperFromTrade','t,q,e'],['PaperExit','t,q,price'],
  ['PaperInvalidate','q'],['PaperCount','arm'],['PaperAreaBusy','arm,level'],['PaperPoll',''],['StopPaper','']];
  funcs.forEach(([n,a])=>install(x,n,a));
+ x.PaperDrawReviewChart=()=>{};
  x.InitPaper();
  return {x,get file(){return file;},setFail:v=>fail=v,setNow:n=>now=n,
   tick:(bid,ask=bid+.1,dt=1)=>{now+=dt;quote={bid,ask,time:now,time_msc:now*1000};x.PaperPoll();},
