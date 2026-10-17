@@ -211,7 +211,7 @@ check('configured periods methods prices and colors reach native display compone
  cx.看盘MACD快线=8;cx.看盘MACD慢线=21;cx.看盘MACD信号线=5;cx.看盘ATR周期=10;
  for(const i of [0,6,1,7,8,9,2,3,4,5])cx.UIIndicatorSet(i,true);
  assert.deepEqual(JSON.parse(JSON.stringify(indicatorHandles.get(cx.uiIndicatorHandles[6]).parameters)),[13,2,5,2.5,[153,76,0],0,2]);
- assert.deepEqual(JSON.parse(JSON.stringify(indicatorHandles.get(cx.uiIndicatorHandles[0]).parameters)),[5,0,5,2.5,[46,99,142],0,1]);
+ assert.deepEqual(JSON.parse(JSON.stringify(indicatorHandles.get(cx.uiIndicatorHandles[0]).parameters)),[5,0,5,2.5,[96,121,144],0,1]);
  assert.deepEqual(JSON.parse(JSON.stringify(indicatorHandles.get(cx.uiIndicatorHandles[2]).parameters)),[25,2,5,2.5,[70,83,96],0,2]);
  // Replaced oscillator handles are released; recorded creation arguments still prove each native input.
  for(const [kind,p] of [[0,8],[1,10],[2,10]]){

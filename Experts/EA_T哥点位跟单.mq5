@@ -1,5 +1,5 @@
 #property strict
-#property version "1.81"
+#property version "1.82"
 #property description "T哥点位：积极入场、分级保护、结构化退出；固定0.02手，独立Magic。"
 #include <Trade/Trade.mqh>
 #include <Canvas/Canvas.mqh>
@@ -1091,7 +1091,7 @@ bool UIIndicatorSet(const int index,const bool enabled)
    bool overlay=!UIIsOscillator(index);
    int kind=overlay ? (index>=10 ? index-7 : index==2 ? 2 : index==0 ? 0 : 1) : index>=14 ? index-11 : index-3;
    ENUM_MA_METHOD method=index==0 ? 看盘主均线算法 : 看盘辅助均线算法;
-   color lineInk=index==0 ? C'46,99,142' : index==6 ? C'153,76,0' : index==1 ? C'151,103,45' :
+   color lineInk=index==0 ? C'96,121,144' : index==6 ? C'153,76,0' : index==1 ? C'151,103,45' :
                   index==10 ? C'20,55,85' : index==11 ? C'112,62,0' : index==7 ? C'45,45,45' :
                   index==8 ? C'70,63,116' : C'70,83,96';
    ENUM_LINE_STYLE lineStyle=index==1 || index==7 || index==10 ? STYLE_DASH :
@@ -1255,7 +1255,12 @@ void InitView()
    for(int i=0;i<3;i++) statsOffsets[i]=(int)GlobalVariableGet(uiPrefix+"offset"+IntegerToString(i));
    // 默认关闭新增看盘指标，按图表ID恢复用户已选的显示组合。
    for(int i=0;i<ArraySize(uiIndicatorLabels);i++)
-      if(GlobalVariableGet(uiPrefix+"indicator"+IntegerToString(i))>0) UIIndicatorSet(i,true);
+      if(GlobalVariableGet(uiPrefix+"indicator"+IntegerToString(i))>0)
+      {
+         // 旧模板可能保留同名的粗MA5；重挂时仅刷新EA自有实例，套用当前细线配色。
+         if(i==0 && !UIIndicatorSet(i,false)) continue;
+         UIIndicatorSet(i,true);
+      }
    uiOldMouseMove=ChartGetInteger(0,CHART_EVENT_MOUSE_MOVE)!=0;
    ChartSetInteger(0,CHART_EVENT_MOUSE_MOVE,true);
    ChartRedraw(0);
@@ -1727,7 +1732,7 @@ void Panel()
    panelCanvas.FillRectangle(0,0,UIXPx(559),UIPx(39),UIInk(UI_HEADER));
    string pageTitle=uiObserver ? "入场研判" : uiPositions ? "持仓明细" : uiStatistics ? "交易统计" : uiIndicators ? "看盘设置" : "T哥点位计划";
    UIText(_Symbol+" · "+pageTitle,16,10,222,11,UI_TEXT);
-   UIText("v1.81",242,13,40,8,UI_DIM);
+   UIText("v1.82",242,13,40,8,UI_DIM);
    UIText(TimeToString(TimeGMT()+8*3600,TIME_SECONDS),286,12,100,10,UI_MUTED,true);
    UIButton(uiCollapsed ? "+" : "−",396,7,30,1);
    UIButton(tradeMode ? "交易模式" : "观察模式",434,7,110,29,tradeMode);
