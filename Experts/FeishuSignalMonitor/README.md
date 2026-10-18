@@ -14,6 +14,10 @@
 
 验证命令：`python -X utf8 -m unittest test_execution_feed test_teacher_scene test_deepseek_ai test_plan_preview test_layered_signals`（监控目录），`node _dev/tests/tge-touch-regression.cjs`（Experts目录）。合成测试验证程序分支，不等于盈利回测或真实券商成交验收。
 
+## 一键全部关闭
+
+双击本目录的 `全部停止.cmd`：先等待监控和行情连接退出，再正常关闭配置指定的MT5。关闭状态会保留，登录启动任务也不会重新拉起；恢复时双击 `Start.cmd`。原有 `Stop.cmd` 仍只停止监控。关闭MT5期间本地EA停止运行，券商端已有SL/TP仍由服务器处理；此操作不主动平仓或撤单。如果终端弹窗阻止退出，会提示手动关闭，不强杀MT5。
+
 ## 看板与观察规则
 
 双击 `Start.cmd` 通过 Windows 任务计划启动常驻服务（自动安装/更新本项目任务），再双击 `Dashboard.cmd`（只打开浏览器），或访问 **http://127.0.0.1:8765/**。页面展示后台心跳、飞书同步时间、最近50条消息、老师当前点位、M5蜡烛图、EMA20/50、ATR14和候选提示。群消息默认30秒轮询，分析每5秒更新，看板每3秒刷新。浏览器和 Codex 关闭后，后台仍独立运行。看板由常驻服务维护，监控子进程退出时保持页面在线，按5至60秒退避重启监控；Windows登录后也会自动启动。暂停保留看板，`Stop.cmd` 则停止整套服务。监控日志在 `logs/monitor.log`，进程重启记录在 `logs/service.log`，启动异常另存 `logs/worker-stderr.log`。
