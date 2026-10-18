@@ -61,6 +61,36 @@ class StopAllTests(unittest.TestCase):
         self.assertIn('CloseMainWindow',command)
         self.assertNotIn('Stop-Process',command)
 
+    def test_start_all_launches_terminal_then_resumes_monitor(self):
+        for flag in ('off','pause'): (self.home/'control'/flag).touch()
+        events=[]
+        with patch('app.config_load',return_value={'mt5_terminal_path':'target'}),patch('app.setup'),\
+             patch('app.start_mt5',side_effect=lambda path:events.append('mt5')),\
+             patch('app.install_task',side_effect=lambda home:events.append('task')),\
+             patch('app.subprocess.run',return_value=Mock(returncode=0)) as run:
+            app.main(['--home',str(self.home),'start-all'])
+        self.assertEqual(events,['mt5','task'])
+        self.assertFalse((self.home/'control/off').exists())
+        self.assertFalse((self.home/'control/pause').exists())
+        self.assertEqual(run.call_args.args[0],['schtasks.exe','/Run','/TN',app.TASK_NAME])
+
+    def test_failed_mt5_start_keeps_off_and_does_not_start_monitor(self):
+        (self.home/'control/off').touch()
+        with patch('app.config_load',return_value={}),patch('app.setup'),\
+             patch('app.start_mt5',side_effect=RuntimeError('failed')),patch('app.install_task') as task:
+            with self.assertRaises(RuntimeError): app.main(['--home',str(self.home),'start-all'])
+        task.assert_not_called()
+        self.assertTrue((self.home/'control/off').exists())
+
+    def test_terminal_start_reuses_same_executable_instance(self):
+        target=self.home/'terminal64.exe';target.touch()
+        with patch('app.subprocess.run',return_value=Mock(returncode=0)) as run:
+            app.start_mt5(str(target))
+        args,kwargs=run.call_args
+        self.assertEqual(kwargs['env']['FEISHU_START_MT5_PATH'],str(target.resolve()))
+        self.assertIn('$_.Path -eq $env:FEISHU_START_MT5_PATH',args[0][-1])
+        self.assertIn('if ($items.Count -eq 0)',args[0][-1])
+
     def test_failed_close_is_reported_and_invalid_path_is_not_run(self):
         with patch('app.subprocess.run') as run:
             with self.assertRaises(RuntimeError): app.close_mt5('')

@@ -452,6 +452,23 @@ foreach ($item in $items) {
         raise RuntimeError('监控已停止，但MT5未正常退出；请检查终端是否有弹窗并手动关闭')
 
 
+def start_mt5(path):
+    """显式启动配置终端；已经运行时沿用现有实例。"""
+    target=Path(path)
+    if not target.is_absolute() or target.name.lower()!='terminal64.exe' or not target.is_file():
+        raise RuntimeError('MT5路径未正确配置，无法全部启动')
+    command='''$ErrorActionPreference='Stop'
+$items=@(Get-Process terminal64 -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $env:FEISHU_START_MT5_PATH })
+if ($items.Count -eq 0) {
+    Start-Process -FilePath $env:FEISHU_START_MT5_PATH -WorkingDirectory (Split-Path -LiteralPath $env:FEISHU_START_MT5_PATH) -ErrorAction Stop
+}
+'''
+    result=subprocess.run(['powershell.exe','-NoProfile','-NonInteractive','-Command',command],
+        env=os.environ|{'FEISHU_START_MT5_PATH':str(target.resolve())},capture_output=True,
+        creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
+    if result.returncode: raise RuntimeError('MT5启动失败，监控尚未恢复；请检查终端安装路径')
+
+
 def stop_all(home,c,timeout=70):
     # 持久关闭开关：登录任务也不会重新启动，直到用户运行Start.cmd。
     atomic_text(home/'control'/'off','1')
@@ -478,7 +495,7 @@ def main(argv=None):
     parser=argparse.ArgumentParser(description='飞书监控与 MT5 本地模拟；不存在实盘模式')
     parser.add_argument('--home',type=Path,default=DEFAULT_HOME,help='配置/运行数据目录，默认 LocalAppData')
     sub=parser.add_subparsers(dest='command',required=True)
-    for name in ('run','worker','service','once','doctor','status','report','pause','resume','stop','stop-all','start','dashboard','install-task','uninstall-task','ai-key'): sub.add_parser(name)
+    for name in ('run','worker','service','once','doctor','status','report','pause','resume','stop','stop-all','start','start-all','dashboard','install-task','uninstall-task','ai-key'): sub.add_parser(name)
     imp=sub.add_parser('import-history'); imp.add_argument('--start',required=True); imp.add_argument('--end',required=True)
     args=parser.parse_args(argv); home=args.home.resolve(); c=config_load(home); setup(home,'service.log' if args.command=='service' else 'monitor.log')
     if args.command=='stop-all': stop_all(home,c); return
@@ -501,14 +518,17 @@ def main(argv=None):
     if args.command=='dashboard':
         import webbrowser
         webbrowser.open(f'http://127.0.0.1:{c["dashboard_port"]}/'); return
-    if args.command=='start':
+    if args.command in ('start','start-all'):
         executable=ROOT/'.venv/Scripts/pythonw.exe'
         if not executable.exists(): raise RuntimeError('请先运行 Setup.cmd')
+        if args.command=='start-all': start_mt5(c.get('mt5_terminal_path',''))
         install_task(home)
         (home/'control'/'off').unlink(missing_ok=True)
+        if args.command=='start-all': (home/'control'/'pause').unlink(missing_ok=True)
         result=subprocess.run(['schtasks.exe','/Run','/TN',TASK_NAME],capture_output=True)
         if result.returncode: raise RuntimeError('后台启动失败：'+result.stderr.decode('oem',errors='replace'))
-        print('已通过任务计划启动常驻服务；用 Status.cmd 查看同步状态'); return
+        print('MT5已启动或正在运行；监控启动指令已发送，正在连接行情和同步消息。' if args.command=='start-all' else
+              '已通过任务计划启动常驻服务；用 Status.cmd 查看同步状态'); return
     if args.command in ('install-task','uninstall-task'):
         if args.command=='install-task':
             install_task(home); print('本项目登录启动任务已安装/更新'); return
