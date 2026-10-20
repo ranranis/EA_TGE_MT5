@@ -7,7 +7,7 @@ import time
 import unittest
 from unittest.mock import Mock
 from app import config_load, export_teacher_levels
-from deepseek_ai import pure_meeting_invitation, AIError, initialize_ai, validate_output, resolve_token, process_ai_batch, ai_snapshot, member_follow_snapshot
+from deepseek_ai import pure_meeting_invitation, AIError, initialize_ai, validate_output, resolve_token, process_ai_batch, ai_snapshot, member_follow_snapshot, pending_rows
 from store import connect, ingest, set_state, state
 
 
@@ -199,6 +199,39 @@ class WorkerTests(unittest.TestCase):
         def fake(targets,*_):
             return {'interpretations':[dict(result(kind=kind),id=t['id']) for t in targets]}
         return Mock(interpret=Mock(side_effect=fake))
+    def test_backlog_uses_message_time_history_and_caches_anchor(self):
+        self.seed(age=7200)
+        at=self.now-7200
+        history=Mock(historical_anchors=Mock(return_value={at:4170}))
+        client=self.client()
+        self.assertEqual(process_ai_batch(self.db,self.c,client,self.now,history_reader=history),1)
+        self.assertEqual(client.interpret.call_args.args[0][0]['market_anchor'],4170)
+        self.assertEqual(state(self.db,'deepseek_anchors')['om_test'],4170)
+        self.assertEqual(history.historical_anchors.call_args.args[1],[at])
+
+    def test_missing_history_never_uses_live_quote_for_old_tail(self):
+        self.seed(age=7200)
+        history=Mock(historical_anchors=Mock(return_value={}))
+        self.assertEqual(process_ai_batch(self.db,self.c,self.client(),self.now,history_reader=history),0)
+        r=self.db.execute('SELECT status,error FROM ai_messages').fetchone()
+        self.assertEqual(r['status'],'RETRY')
+        self.assertIn('缺少可用行情数量级',r['error'])
+        self.assertFalse(state(self.db,'deepseek_setup',{}))
+
+    def test_failed_batch_splits_and_fresh_messages_are_not_starved(self):
+        self.seed(mid='bad',age=20);self.seed(mid='good',age=10)
+        fail=Mock(interpret=Mock(side_effect=AIError('bad scene')))
+        process_ai_batch(self.db,self.c,fail,self.now)
+        self.seed(mid='new',age=0)
+        self.assertEqual([r['message_id'] for r in pending_rows(self.db,self.c,self.now+20)],['new'])
+        process_ai_batch(self.db,self.c,self.client('WATCH'),self.now+20)
+        self.assertEqual([r['message_id'] for r in pending_rows(self.db,self.c,self.now+21)],['bad'])
+        process_ai_batch(self.db,self.c,fail,self.now+21)
+        # 即使bad已到下一次重试时间，也先轮到尚未再次尝试的good。
+        self.assertEqual([r['message_id'] for r in pending_rows(self.db,self.c,self.now+150)],['good'])
+        self.assertEqual(process_ai_batch(self.db,self.c,self.client(),self.now+150),1)
+        self.assertEqual(self.db.execute('SELECT status FROM ai_messages WHERE message_id=?',('good',)).fetchone()[0],'DONE')
+
     def test_pure_invitation_retries_archive_locally_without_changing_plan(self):
         self.seed();process_ai_batch(self.db,self.c,self.client(),self.now)
         previous=copy.deepcopy(state(self.db,'deepseek_setup'))

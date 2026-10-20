@@ -3,6 +3,7 @@ import math
 import multiprocessing
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 class QuoteError(RuntimeError): pass
 
@@ -81,6 +82,26 @@ class _NativeReader:
         validate_bars(bars,now)
         return bars
 
+    def historical_anchors(self,symbol,timestamps):
+        """补读消息发生时已收盘的M5；休市缺口不拿更早或未来行情冒充。"""
+        self.ensure()
+        offset=self.config.get('mt5_time_offset_seconds',0)
+        anchors={}
+        for at in sorted(set(timestamps)):
+            if not math.isfinite(at) or at<=0: continue
+            until=datetime.fromtimestamp(at-offset-300,timezone.utc)
+            raw=self.mt5.copy_rates_from(symbol,self.mt5.TIMEFRAME_M5,until,2)
+            if raw is None: raise QuoteError('无法补读消息时点M5：'+str(self.mt5.last_error()))
+            for r in raw:
+                opened=float(r['time'])+offset
+                prices=[float(r[k]) for k in ('open','high','low','close')]
+                if (not all(math.isfinite(p) and p>0 for p in prices) or
+                    prices[2]>min(prices[0],prices[3]) or prices[1]<max(prices[0],prices[3])):
+                    raise QuoteError('消息时点M5价格无效')
+                if 300<=at-opened<=600:
+                    anchors[at]=prices[3]
+        return anchors
+
     def profit(self,symbol,side,volume,entry,exit_price):
         self.ensure()
         # 官方只读估算函数按券商品种规格及账户货币换算，绝不发出委托。
@@ -121,6 +142,7 @@ def _worker(pipe,config):
                 # 固定允许列表，子进程也没有任意 MT5 方法分发。
                 if method=='quote': result=reader.quote(*args)
                 elif method=='bars': result=reader.bars(*args)
+                elif method=='historical_anchors': result=reader.historical_anchors(*args)
                 elif method=='account_currency': result=reader.account_currency()
                 elif method=='profit': result=reader.profit(*args)
                 else: raise QuoteError('未知的只读请求')
@@ -158,6 +180,7 @@ class MT5Reader:
 
     def quote(self,symbol,now): return self._call('quote',symbol,now)
     def bars(self,symbol,now): return self._call('bars',symbol,now)
+    def historical_anchors(self,symbol,timestamps): return self._call('historical_anchors',symbol,timestamps)
     def account_currency(self): return self._call('account_currency')
     def profit(self,symbol,side,volume,entry,exit_price): return self._call('profit',symbol,side,volume,entry,exit_price)
     def _terminate(self):

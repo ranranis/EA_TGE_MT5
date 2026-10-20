@@ -9,13 +9,35 @@ import tempfile
 import threading
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, Mock
 from app import config_load, export_observer, InstanceLock, report
 from store import connect, ingest, state, set_state, TZ
 from signals import parse_message, validate_ai_json
 from lark_reader import LarkReader, LarkError, AuthRequired
-from mt5_reader import Quote, QuoteError
+from mt5_reader import Quote, QuoteError, _NativeReader
 from paper import PaperEngine
+
+class HistoricalAnchorTests(unittest.TestCase):
+    def test_closed_bar_only_and_configured_clock_offset(self):
+        reader=object.__new__(_NativeReader)
+        reader.config={'mt5_time_offset_seconds':3600};reader.ensure=Mock()
+        at=1800000000
+        def bar(opened,price):
+            return dict(time=opened-3600,open=price,high=price+1,low=price-1,close=price)
+        reader.mt5=Mock()
+        reader.mt5.copy_rates_from.return_value=[bar(at-900,4100),bar(at-300,4170),bar(at,4300)]
+        self.assertEqual(reader.historical_anchors('XAUUSD',[at,at]),{at:4170})
+        self.assertEqual(reader.mt5.copy_rates_from.call_count,1)
+        until=reader.mt5.copy_rates_from.call_args.args[2]
+        self.assertEqual(until.timestamp(),at-3600-300)
+        self.assertIsNotNone(until.tzinfo)
+
+    def test_empty_history_or_weekend_gap_has_no_anchor(self):
+        reader=object.__new__(_NativeReader);reader.config={};reader.ensure=Mock();reader.mt5=Mock()
+        reader.mt5.copy_rates_from.return_value=[]
+        self.assertEqual(reader.historical_anchors('XAUUSD',[1800000000]),{})
+        reader.mt5.copy_rates_from.return_value=None
+        with self.assertRaises(QuoteError):reader.historical_anchors('XAUUSD',[1800000000])
 
 class FakeQuotes:
     def __init__(self,now): self.now=now; self.bid=4100; self.ask=4100.20; self.fail=False; self.age=0; self.calls=[]
@@ -179,6 +201,6 @@ class MonitorTests(unittest.TestCase):
             self.assertFalse(any(isinstance(n,ast.Attribute) and n.attr in forbidden for n in ast.walk(tree)),filename)
         adapter=ast.parse((root/'mt5_reader.py').read_text(encoding='utf-8'))
         calls={n.func.attr for n in ast.walk(adapter) if isinstance(n,ast.Call) and isinstance(n.func,ast.Attribute) and (isinstance(n.func.value,ast.Name) and n.func.value.id=='m' or isinstance(n.func.value,ast.Attribute) and n.func.value.attr=='mt5')}
-        self.assertLessEqual(calls,{'initialize','terminal_info','account_info','symbol_info','symbol_info_tick','copy_rates_from_pos','order_calc_profit','shutdown','last_error'})
+        self.assertLessEqual(calls,{'initialize','terminal_info','account_info','symbol_info','symbol_info_tick','copy_rates_from_pos','copy_rates_from','order_calc_profit','shutdown','last_error'})
 
 if __name__=='__main__': unittest.main(verbosity=2)

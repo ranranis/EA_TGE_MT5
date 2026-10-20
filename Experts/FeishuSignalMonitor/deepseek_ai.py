@@ -443,7 +443,7 @@ def pending_window_start(db, now):
 
 def pending_rows(db, c, now):
     start=pending_window_start(db,now)
-    rows=db.execute("""SELECT m.*,m.rowid AS sequence FROM messages m LEFT JOIN ai_messages a
+    rows=db.execute("""SELECT m.*,m.rowid AS sequence,a.status AS ai_status,a.processed AS ai_processed FROM messages m LEFT JOIN ai_messages a
         ON a.chat_id=m.chat_id AND a.message_id=m.message_id AND a.revision=m.revision
         WHERE m.chat_id=?
         AND m.created>=? AND m.created<=? AND (a.status IS NULL OR (a.status='RETRY' AND a.retry_at<=?))
@@ -453,7 +453,11 @@ def pending_rows(db, c, now):
     config=dict(c,_map_message_id=state(db,'teacher_levels',{}).get('message_id'))
     for lane in ['teacher','group_summary']+['follow:'+mid for mid in follow_ids(c)]+['member']:
         batch=[r for r in rows if message_lane(config,r)==lane]
-        if batch:return batch[:1] if lane=='group_summary' else batch[:c.get('ai_batch_messages',8)]
+        if batch:
+            # 失败批拆成逐条重试；按上次尝试轮转，不能反复把同批好消息一起回滚。
+            fresh=[r for r in batch if r['ai_status'] is None]
+            if fresh:return fresh[:1] if lane=='group_summary' else fresh[:c.get('ai_batch_messages',8)]
+            return [min(batch,key=lambda r:(r['ai_processed'],r['created'],r['sequence']))]
     return []
 
 
@@ -549,7 +553,7 @@ def pure_meeting_invitation(text):
         and footer=='复制该信息，打开手机腾讯会议即可参与')
 
 
-def process_ai_batch(db, c, client, now, restore_scene=False, preview=False):
+def process_ai_batch(db, c, client, now, restore_scene=False, preview=False, history_reader=None):
     from teacher_strategy import source_levels
     rows=pending_rows(db,c,now)
     restoring=False
@@ -642,6 +646,25 @@ def process_ai_batch(db, c, client, now, restore_scene=False, preview=False):
         known=next((p['price'] for p in old_plans if p.get('price_ref',state(db,'deepseek_setup',{}).get('message_id'))==m['message_id']),None)
         native=[b for b in market.get('bars',[]) if b.get('at',0)+300<=stamp(m['time']) and stamp(m['time'])-b['at']<=600]
         m['market_anchor']=cached or (native[-1]['close'] if native else known or 0)
+    if history_reader is not None:
+        # 仅补缺失锚点，保留原消息时间；不使用当前报价补全旧消息的百位。
+        missing={m['message_id']:stamp(m['time']) for m in context if not m['market_anchor']}
+        for row in rows:
+            if not anchors.get(row['message_id']):
+                prior=[b for b in market.get('bars',[]) if 300<=row['created']-b.get('at',0)<=600]
+                if prior: anchors[row['message_id']]=prior[-1]['close']
+                elif now-row['created']>c['signal_ttl_seconds']:
+                    missing[row['message_id']]=row['created']
+        if missing:
+            from mt5_reader import QuoteError
+            try:
+                recovered=history_reader.historical_anchors(c['symbols'][c['teacher_symbol']],list(missing.values()))
+                anchors.update({mid:recovered[at] for mid,at in missing.items() if at in recovered})
+                for m in context:
+                    if not m['market_anchor']:m['market_anchor']=anchors.get(m['message_id'],0)
+                if recovered:logging.info('已补齐%d条消息的历史M5数量级',sum(at in recovered for at in missing.values()))
+            except QuoteError as ex:
+                logging.warning('历史M5补读暂不可用：%s；无锚点消息继续等待',ex)
     api_rows=[]
     direct={}
     for row in rows:
@@ -789,19 +812,22 @@ def process_ai_batch(db, c, client, now, restore_scene=False, preview=False):
 
 
 def ai_worker(home, c, stop):
+    from mt5_reader import MT5Reader
     db=connect(Path(home)/'data/monitor.sqlite')
     initialize_ai(db)
     client=create_ai_client(home,c)
+    history_reader=MT5Reader(c)
     try:
         while not stop.is_set():
             try:
                 if not (Path(home)/'control/pause').exists():
-                    process_ai_batch(db,c,client,time.time(),restore_scene=True)
+                    process_ai_batch(db,c,client,time.time(),restore_scene=True,history_reader=history_reader)
             except (sqlite3.Error,OSError,ValueError,TypeError) as ex:
                 logging.warning('AI后台异常：%s',type(ex).__name__)
                 with db:set_state(db,'deepseek_status',dict(enabled=True,online=False,at=time.time(),error='AI后台异常，等待重试',backlog=1))
             stop.wait(2)
     finally:
+        history_reader.close()
         db.close()
 
 
