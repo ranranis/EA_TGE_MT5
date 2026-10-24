@@ -313,6 +313,7 @@ class ObserverTests(unittest.TestCase):
         import xml.etree.ElementTree as ET
         root=ET.fromstring(task_xml(self.home)); ns={'t':'http://schemas.microsoft.com/windows/2004/02/mit/task'}
         self.assertIn('service',root.findtext('.//t:Arguments',namespaces=ns))
+        self.assertEqual(list(root.find('t:Triggers',ns)),[])
         self.assertEqual(root.findtext('.//t:MultipleInstancesPolicy',namespaces=ns),'IgnoreNew')
 
     def test_reader_revision_change_during_analysis_is_blocked(self):

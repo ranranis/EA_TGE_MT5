@@ -427,7 +427,7 @@ def task_xml(home):
     return f'''<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
  <RegistrationInfo><Description>Feishu read-only monitor and local analysis dashboard</Description></RegistrationInfo>
- <Triggers><LogonTrigger><Enabled>true</Enabled><UserId>{escape(user)}</UserId><Delay>PT30S</Delay></LogonTrigger></Triggers>
+ <Triggers />
  <Principals><Principal id="Author"><UserId>{escape(user)}</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>
  <Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><StartWhenAvailable>true</StartWhenAvailable><ExecutionTimeLimit>PT0S</ExecutionTimeLimit><RestartOnFailure><Interval>PT1M</Interval><Count>3</Count></RestartOnFailure></Settings>
  <Actions Context="Author"><Exec><Command>{escape(python)}</Command><Arguments>{escape(args)}</Arguments><WorkingDirectory>{escape(str(ROOT))}</WorkingDirectory></Exec></Actions>
@@ -531,7 +531,7 @@ def main(argv=None):
               '已通过任务计划启动常驻服务；用 Status.cmd 查看同步状态'); return
     if args.command in ('install-task','uninstall-task'):
         if args.command=='install-task':
-            install_task(home); print('本项目登录启动任务已安装/更新'); return
+            install_task(home); print('本项目手动启动任务已安装/更新'); return
         else: command=['schtasks.exe','/Delete','/TN',TASK_NAME,'/F']
         r=subprocess.run(command,capture_output=True)
         print(r.stdout.decode('oem',errors='replace')); print(r.stderr.decode('oem',errors='replace'))
